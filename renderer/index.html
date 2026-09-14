@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none';" />
+  <title>Claude Team Monitor</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>Claude Team Monitor</h1>
+    <nav class="tabs">
+      <button class="tab-btn active" data-tab="work">작업</button>
+      <button class="tab-btn" data-tab="history">히스토리</button>
+      <button class="tab-btn" data-tab="settings">설정</button>
+      <button class="tab-btn" data-tab="cleanup">세션 정리</button>
+    </nav>
+    <span id="last-updated"></span>
+  </header>
+
+  <main>
+    <!-- 작업 탭: 팀장(대화 포함) / 팀원 모니터링·관리 만 -->
+    <section id="work-tab" class="tab-page active">
+      <div id="lead-section">
+        <div class="section-header">
+          <h2>팀장</h2>
+          <div>
+            <button id="new-lead-btn">+ 새 팀장</button>
+            <button id="adopt-lead-btn">터미널 세션 이어가기</button>
+          </div>
+        </div>
+        <div id="lead-row" class="lead-row"></div>
+
+        <div id="lead-chat-panel" hidden>
+          <div class="chat-header">
+            <button id="restart-lead-btn" title="지금 대화 맥락을 이어받지 않고 같은 디렉토리에서 완전히 새 세션을 시작합니다">새 작업 시작</button>
+          </div>
+          <div id="chat-transcript"></div>
+          <div class="chat-input-row">
+            <textarea id="chat-input" placeholder="선택한 팀장에게 메시지 보내기 (Enter로 전송, Shift+Enter 줄바꿈)"></textarea>
+            <button id="chat-send-btn">전송</button>
+          </div>
+          <div id="restart-lead-panel" hidden>
+            <p class="form-hint">지금 대화 맥락을 이어받지 않고, 같은 디렉토리에서 완전히 새 세션을 시작합니다. 이 팀장 카드(이름표)는 그대로 유지되고 내용만 새로워집니다 — 예전 대화가 필요하면 다시 못 부릅니다.</p>
+            <textarea id="restart-instruction" placeholder="새 작업 지시 (비우면 기본 지시로 시작)"></textarea>
+            <button id="restart-confirm-btn">새로 시작</button>
+            <button id="restart-cancel-btn">취소</button>
+            <div id="restart-status"></div>
+          </div>
+        </div>
+
+        <div id="launch-form-panel">
+          <div class="row">
+            <select id="target-dir-select"><option value="">-- 등록된 디렉토리에서 선택 --</option></select>
+            <button id="pick-dir-btn" title="등록 안 된 폴더 선택">…</button>
+          </div>
+          <textarea id="instruction" placeholder="팀장에게 초기 지시 (비우면 기본 지시로 시작)"></textarea>
+          <button id="launch-btn" disabled>팀장 띄우기</button>
+          <button id="cancel-form-btn" hidden>취소</button>
+          <div id="launch-status"></div>
+        </div>
+
+        <div id="adopt-form-panel" hidden>
+          <p class="form-hint">터미널에서 떠있는 세션을 골라서 연결합니다<br><code>--bg</code>로 띄운 세션은 그대로, 그냥 대화 중인 세션은 지금까지의 대화를 복사한 새 백그라운드 세션을 만들어서 연결합니다(원본은 그대로 둠).</p>
+          <div class="row">
+            <select id="adoptable-select"><option value="">-- 연결할 세션 선택 --</option></select>
+            <button id="refresh-adoptable-btn" title="목록 새로고침">⟳</button>
+          </div>
+          <button id="adopt-btn" disabled>연결하기</button>
+          <button id="cancel-adopt-btn">취소</button>
+          <div id="adopt-status"></div>
+        </div>
+      </div>
+
+      <div id="member-section">
+        <div class="section-header">
+          <h2>팀원 모니터링 및 관리</h2>
+          <button id="add-member-btn">+ 팀원 직접 추가</button>
+        </div>
+        <div id="requests-list"></div>
+
+        <div id="add-member-panel" hidden>
+          <p class="form-hint">선택 중인 팀장 소속으로, 원하는 역할·지시를 직접 주고 팀원을 띄웁니다 (예: 구현이 아니라 코드리뷰만 시키기).</p>
+          <div class="row">
+            <select id="member-template-select"><option value="">-- 등록된 팀원 템플릿에서 불러오기 (선택) --</option></select>
+          </div>
+          <div class="row">
+            <select id="member-dir-select"><option value="">-- 등록된 디렉토리에서 선택 --</option></select>
+            <button id="pick-member-dir-btn" title="등록 안 된 폴더 선택">…</button>
+          </div>
+          <input id="member-role" type="text" placeholder="역할 이름 (예: reviewer, 비워도 됨)" />
+          <textarea id="member-instruction" placeholder="이 팀원에게 줄 지시 (예: 최근 diff를 코드리뷰만 해라, 직접 고치지 마라)"></textarea>
+          <button id="add-member-submit-btn" disabled>팀원 추가</button>
+          <button id="cancel-add-member-btn">취소</button>
+          <div id="add-member-status"></div>
+        </div>
+
+        <div id="member-row" class="member-row"></div>
+      </div>
+    </section>
+
+    <!-- 히스토리 탭: 지금 안 떠있는(오프라인) 팀장을 모아서 보여주고, 눌러서 이어할 수 있게 -->
+    <section id="history-tab" class="tab-page">
+      <div id="history-panel">
+        <div class="section-header">
+          <h2>이전 작업 히스토리</h2>
+          <button id="refresh-history-btn" title="목록 새로고침">⟳</button>
+        </div>
+        <p class="form-hint">지금 프로세스가 떠있지 않은 팀장들입니다. 카드를 누르면 작업 탭으로 이동해서 선택되고, 대화창에서 메시지를 보내면 자동으로 이어집니다. 오래된 세션은 이어하기가 실패할 수 있습니다(정확한 유효기간은 알려진 바 없음).</p>
+        <div id="history-list"></div>
+      </div>
+    </section>
+
+    <!-- 설정 탭: ① 팀장 디렉토리(어디서 팀장을 띄울지) ② 팀원 등록(역할 템플릿, 사전승인) -->
+    <section id="settings-tab" class="tab-page">
+      <div id="favorites-panel">
+        <h2>① 팀장 디렉토리</h2>
+        <p class="form-hint">"작업" 탭에서 팀장을 띄울 대상 디렉토리를 고를 때 여기 등록한 목록이 쓰입니다.</p>
+        <div class="row">
+          <input id="new-fav-dir" type="text" placeholder="디렉토리 경로" readonly />
+          <button id="browse-fav-btn">폴더 선택</button>
+          <button id="fav-add-btn">추가</button>
+        </div>
+        <div id="favorites-list"></div>
+      </div>
+
+      <div id="member-templates-panel">
+        <h2>② 팀원 등록 (역할 템플릿)</h2>
+        <p class="form-hint">디렉토리를 고르면 그 프로젝트 전용 <b>일꾼</b>으로("사전승인" 켜면 모든 팀장에게 자동 안내), 비워두면 코드리뷰·검수처럼 프로젝트에 안 묶인 <b>공용 역할</b>로 등록됩니다(쓸 때마다 대상 디렉토리를 그때 고름).</p>
+        <div class="row" id="tpl-dir-row">
+          <select id="new-tpl-dir-select"><option value="">-- 팀장 디렉토리에서 선택 (비우면 공용) --</option></select>
+          <button id="pick-tpl-dir-btn" title="등록 안 된 폴더 선택">…</button>
+        </div>
+        <div class="row">
+          <input id="new-tpl-name" type="text" placeholder="표시 이름 (예: g1cl-service 리뷰어)" />
+          <input id="new-tpl-role" type="text" placeholder="역할 (예: reviewer)" />
+        </div>
+        <textarea id="new-tpl-instruction" placeholder="이 팀원에게 줄 기본 지시 (예: 최근 diff를 코드리뷰만 해라, 직접 고치지 마라)"></textarea>
+        <button id="tpl-add-btn">팀원 등록</button>
+        <div id="member-templates-list"></div>
+      </div>
+    </section>
+
+    <!-- 세션 정리 탭: 실수로 끄는 걸 막기 위해 작업 탭과 완전히 분리된, 방치된 백그라운드 세션 종료 전용 화면 -->
+    <section id="cleanup-tab" class="tab-page">
+      <div id="cleanup-panel">
+        <div class="section-header">
+          <h2>백그라운드 세션 정리</h2>
+          <button id="refresh-cleanup-btn" title="목록 새로고침">⟳</button>
+        </div>
+        <p class="form-hint">지금 떠있는 모든 백그라운드 세션입니다(팀장·팀원으로 등록된 것 포함). 더 이상 필요 없는 걸 여기서 바로 종료하세요.</p>
+        <div id="cleanup-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
