@@ -34,7 +34,7 @@ type AgentEntry = {
 
 type SessionRow = AgentEntry & {
   projectName: string;
-  preview?: { time: string; prompt: string; answer: string } | null;
+  preview?: { time: string; prompt: string; answer: string; summary?: string } | null;
   isLead: boolean;
   leadId?: string; // 팀원 카드일 때, 소속 팀장의 짧은 id
   role?: string;   // 팀원 카드일 때, 등록된 역할(예: reviewer)
@@ -152,7 +152,9 @@ function getLatestPreview(projectName: string, sessionId: string): SessionRow['p
   const entries = readJournalEntries(projectName).filter(e => e.sessionId === sessionId);
   if (entries.length === 0) return null;
   const last = entries[entries.length - 1];
-  return { time: last.time ?? '', prompt: last.prompt ?? '', answer: last.answer ?? '' };
+  // daily-journal이 prompt/answer 말고 요약([F]/[T]/[S] 구조로 파일·도구·핵심을 정리한 것)도 같이
+  // 남긴다 — 원문 앞부분을 그냥 자르는 것보다 훨씬 읽기 좋아서 있으면 우선 쓴다.
+  return { time: last.time ?? '', prompt: last.prompt ?? '', answer: last.answer ?? '', summary: last.summary || undefined };
 }
 
 // 팀장과의 "대화" 패널용 — 그 세션 id로 필터링한 전체 왕복 기록(오늘자).
@@ -615,6 +617,20 @@ async function restartLead(sessionId: string, targetDir: string, instruction: st
   return newId;
 }
 
+// "작업 종료" — 이 팀장이 띄운 팀원을 전부 먼저 끄고, 마지막에 팀장 자신을 끈다. 팀장 기록은
+// leads.json에서 지우지 않는다 — 다른 "종료"와 마찬가지로 오프라인/히스토리로 남아서 나중에
+// --resume으로 다시 부를 수 있어야 한다(완전 삭제가 아니라 "지금은 멈춤"이라는 의미).
+async function endLeadWork(sessionId: string): Promise<void> {
+  const lead = loadLeads().find(l => l.sessionId === sessionId);
+  if (!lead) return;
+  const members = loadMembers().filter(m => m.leadId === lead.id);
+  for (const m of members) {
+    await stopSession(m.memberId);
+    try { fs.unlinkSync(path.join(MEMBERS_DIR, `${m.memberId}.json`)); } catch { /* ignore */ }
+  }
+  await stopSession(lead.id);
+}
+
 async function findSessionIdByShortId(shortId: string): Promise<string | null> {
   const agents = await fetchAgents();
   return agents.find(a => a.id === shortId)?.sessionId ?? null;
@@ -931,6 +947,13 @@ ipcMain.handle('restart-lead', async (_e, leadId: string, instruction: string) =
   if (!lead) return null;
   const finalInstruction = instruction.trim() || '지금 상황을 파악하고 다음 작업을 시작해줘.';
   return queueLeadOperation(leadId, () => restartLead(lead.sessionId, lead.targetDir, finalInstruction));
+});
+
+ipcMain.handle('end-lead-work', async (_e, leadId: string) => {
+  const lead = loadLeads().find(l => l.id === leadId);
+  if (!lead) return false;
+  await queueLeadOperation(leadId, () => endLeadWork(lead.sessionId));
+  return true;
 });
 
 // 세션 짧은 id는 claude CLI가 hex 문자열로만 발급하지만(runClaudeBg의 정규식 참고), 렌더러에서

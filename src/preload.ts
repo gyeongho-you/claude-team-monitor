@@ -34,4 +34,5 @@ contextBridge.exposeInMainWorld('api', {
   sendToLead: (leadId: string, message: string) => ipcRenderer.invoke('send-to-lead', leadId, message),
   updateLeadLabel: (leadId: string, label: string) => ipcRenderer.invoke('update-lead-label', leadId, label),
   restartLead: (leadId: string, instruction: string) => ipcRenderer.invoke('restart-lead', leadId, instruction),
+  endLeadWork: (leadId: string) => ipcRenderer.invoke('end-lead-work', leadId),
 });

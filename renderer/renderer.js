@@ -21,6 +21,29 @@ const restartInstructionEl = document.getElementById('restart-instruction');
 const restartConfirmBtn = document.getElementById('restart-confirm-btn');
 const restartCancelBtn = document.getElementById('restart-cancel-btn');
 const restartStatusEl = document.getElementById('restart-status');
+const endWorkBtn = document.getElementById('end-work-btn');
+const endWorkPanelEl = document.getElementById('end-work-panel');
+const endWorkConfirmBtn = document.getElementById('end-work-confirm-btn');
+const endWorkCancelBtn = document.getElementById('end-work-cancel-btn');
+const endWorkStatusEl = document.getElementById('end-work-status');
+const modalBackdropEl = document.getElementById('modal-backdrop');
+
+// "새 작업 시작"/"작업 종료" 확인창은 대화창 아래쪽에 인라인으로 뜨면 스크롤 밖이라 눈에 안 띄어서
+// (사용자 피드백), 화면 가운데 팝업(모달)으로 띄운다 — 배경을 어둡게 깔고 그 위에 패널을 얹는다.
+function showModal(panelEl) {
+  panelEl.hidden = false;
+  modalBackdropEl.hidden = false;
+}
+
+function hideModal(panelEl) {
+  panelEl.hidden = true;
+  if (restartLeadPanelEl.hidden && endWorkPanelEl.hidden) modalBackdropEl.hidden = true;
+}
+
+modalBackdropEl.addEventListener('click', () => {
+  hideModal(restartLeadPanelEl);
+  hideModal(endWorkPanelEl);
+});
 const launchFormPanelEl = document.getElementById('launch-form-panel');
 const cancelFormBtn = document.getElementById('cancel-form-btn');
 const adoptFormPanelEl = document.getElementById('adopt-form-panel');
@@ -123,6 +146,7 @@ function updateBusyUI() {
   const selectedBusy = !!selectedLeadId && busyLeadIds.has(selectedLeadId);
   chatSendBtn.disabled = selectedBusy;
   restartLeadBtn.disabled = selectedBusy;
+  endWorkBtn.disabled = selectedBusy;
   document.querySelectorAll('[data-team-lead]').forEach(btn => {
     if (busyLeadIds.has(btn.dataset.teamLead)) btn.disabled = true;
   });
@@ -168,7 +192,9 @@ function renderLeadCard(row) {
 async function selectLead(leadId) {
   selectedLeadId = leadId;
   formMode = 'none';
-  restartLeadPanelEl.hidden = true;
+  hideModal(restartLeadPanelEl);
+  hideModal(endWorkPanelEl);
+  chatTranscriptEl.innerHTML = ''; // 새 팀장의 대화를 불러오는 동안 이전 팀장의 대화가 잠깐 보이는 걸 막는다
   await renderChat();
   updateLeadSectionVisibility();
   updateMemberSectionVisibility();
@@ -187,7 +213,10 @@ function cleanPrompt(prompt) {
 }
 
 async function renderChat() {
-  if (!selectedLeadId) return;
+  if (!selectedLeadId) {
+    chatTranscriptEl.innerHTML = ''; // 선택이 풀렸는데 예전 대화가 그대로 남아있으면 안 된다
+    return;
+  }
   let transcript;
   try {
     transcript = await window.api.getLeadTranscript(selectedLeadId);
@@ -287,13 +316,13 @@ async function sendChatMessage() {
 }
 
 restartLeadBtn.addEventListener('click', () => {
-  restartLeadPanelEl.hidden = false;
+  showModal(restartLeadPanelEl);
   restartInstructionEl.value = '';
   restartStatusEl.textContent = '';
 });
 
 restartCancelBtn.addEventListener('click', () => {
-  restartLeadPanelEl.hidden = true;
+  hideModal(restartLeadPanelEl);
 });
 
 restartConfirmBtn.addEventListener('click', async () => {
@@ -307,7 +336,7 @@ restartConfirmBtn.addEventListener('click', async () => {
     const id = await window.api.restartLead(leadId, restartInstructionEl.value.trim());
     if (id) {
       selectedLeadId = id;
-      restartLeadPanelEl.hidden = true;
+      hideModal(restartLeadPanelEl);
       restartStatusEl.textContent = '';
       await renderChat();
     } else {
@@ -318,6 +347,40 @@ restartConfirmBtn.addEventListener('click', async () => {
   } finally {
     busyLeadIds.delete(leadId);
     restartConfirmBtn.disabled = false;
+    updateBusyUI();
+  }
+});
+
+endWorkBtn.addEventListener('click', () => {
+  showModal(endWorkPanelEl);
+  endWorkStatusEl.textContent = '';
+});
+
+endWorkCancelBtn.addEventListener('click', () => {
+  hideModal(endWorkPanelEl);
+});
+
+endWorkConfirmBtn.addEventListener('click', async () => {
+  if (!selectedLeadId || busyLeadIds.has(selectedLeadId)) return;
+  const leadId = selectedLeadId;
+  busyLeadIds.add(leadId);
+  updateBusyUI();
+  endWorkConfirmBtn.disabled = true;
+  endWorkStatusEl.textContent = '팀원부터 종료하는 중...';
+  try {
+    const ok = await window.api.endLeadWork(leadId);
+    if (ok) {
+      hideModal(endWorkPanelEl);
+      endWorkStatusEl.textContent = '';
+      await refreshBoardNow();
+    } else {
+      endWorkStatusEl.textContent = '작업 종료에 실패했습니다.';
+    }
+  } catch (err) {
+    endWorkStatusEl.textContent = `작업 종료 중 오류가 발생했습니다: ${errMsg(err)}`;
+  } finally {
+    busyLeadIds.delete(leadId);
+    endWorkConfirmBtn.disabled = false;
     updateBusyUI();
   }
 });
@@ -450,6 +513,14 @@ document.querySelector('.tab-btn[data-tab="cleanup"]').addEventListener('click',
 
 // resume 유효기간이 공식적으로 알려진 게 없어서 정확한 컷오프는 못 정한다 — 그냥 "오래됐다"는 걸
 // 경고 색으로만 알려주고, 실제 이어짐 여부는 시도해봐야 안다(sendChatMessage의 실패 처리 참고).
+// daily-journal이 남기는 summary([F]/[T]/[S] 구조로 파일·도구·핵심을 정리한 것)가 있으면 그걸 쓰고,
+// 없으면 prompt/answer 원문을 잘라서 보여준다.
+function formatPreview(preview, promptLen, answerLen) {
+  if (!preview) return '(대화 기록 없음)';
+  if (preview.summary) return escapeHtml(preview.summary);
+  return `${escapeHtml(preview.prompt).slice(0, promptLen)}\n→ ${escapeHtml(preview.answer).slice(0, answerLen)}`;
+}
+
 function historyRiskBadge(row) {
   const lastActive = row.preview?.time ? new Date(row.preview.time.replace(' ', 'T')) : new Date(row.startedAt);
   if (isNaN(lastActive.getTime())) return '';
@@ -468,7 +539,7 @@ function renderHistoryCard(row) {
         ${historyRiskBadge(row)}
       </div>
       <div class="history-meta">${escapeHtml(row.cwd)} · ${relativeAge(row.startedAt)} 시작</div>
-      ${row.preview ? `<div class="history-preview">${escapeHtml(row.preview.prompt).slice(0, 80)}\n→ ${escapeHtml(row.preview.answer).slice(0, 160)}</div>` : ''}
+      ${row.preview ? `<div class="history-preview">${formatPreview(row.preview, 80, 160)}</div>` : ''}
       <div class="history-hint">눌러서 이어하기 — 작업 탭으로 이동해 대화창에서 메시지를 보내면 다시 깨어납니다</div>
     </div>
   `;
@@ -496,9 +567,7 @@ document.querySelector('.tab-btn[data-tab="history"]').addEventListener('click',
 
 function renderMemberCard(row, leadLabelById) {
   const statusLabel = statusLabelKo(row);
-  const preview = row.preview
-    ? `${escapeHtml(row.preview.prompt).slice(0, 100)}\n→ ${escapeHtml(row.preview.answer).slice(0, 220)}`
-    : '(대화 기록 없음)';
+  const preview = formatPreview(row.preview, 100, 220);
   const attachBtn = row.kind === 'background' && row.id
     ? `<button data-attach="${escapeHtml(row.id)}">터미널 열기</button>`
     : '';
