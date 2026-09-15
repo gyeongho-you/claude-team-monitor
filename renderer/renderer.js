@@ -177,6 +177,7 @@ let lastRows = [];
 const addMemberBtn = document.getElementById('add-member-btn');
 const addMemberPanelEl = document.getElementById('add-member-panel');
 const memberTemplateSelect = document.getElementById('member-template-select');
+const memberNameEl = document.getElementById('member-name');
 const memberDirSelect = document.getElementById('member-dir-select');
 const pickMemberDirBtn = document.getElementById('pick-member-dir-btn');
 const memberRoleSelect = document.getElementById('member-role-select');
@@ -339,8 +340,10 @@ function syncAdoptBtnState() {
 }
 
 function syncAddMemberSubmitBtnState() {
-  addMemberSubmitBtn.disabled = !memberDirSelect.value;
-  addMemberSubmitBtn.title = memberDirSelect.value ? '' : '먼저 디렉토리를 선택하세요';
+  const hasName = !!memberNameEl.value.trim();
+  const hasDir = !!memberDirSelect.value;
+  addMemberSubmitBtn.disabled = !hasName || !hasDir;
+  addMemberSubmitBtn.title = !hasName ? '이름을 입력하세요' : !hasDir ? '먼저 디렉토리를 선택하세요' : '';
 }
 
 function buildDirOptionsHtml(favs, customDir, placeholder) {
@@ -428,20 +431,28 @@ function cleanPrompt(prompt) {
 function isAutoInjectedPrompt(prompt) {
   const p = (prompt || '').trim();
   if (!p) return false;
-  return p.startsWith('<task-notification>') || p.startsWith('[알림]');
+  // 대기 메시지 묶음 배달(main.ts combinePendingNoticeMessages)로 여러 건이 번호가 매겨져 하나의
+  // turn으로 합쳐지면 이 패턴들이 문자열 맨 앞이 아니라 중간(예: "2) <task-notification>...")에
+  // 올 수 있다 — startsWith 대신 문자열 어디에든 있으면 자동주입으로 인정한다(묶인 항목 중
+  // 하나라도 자동주입이면 턴 전체를 자동주입으로 표시한다는 뜻이기도 하다).
+  return p.includes('<task-notification>') || p.includes('[알림]');
 }
 
 // <task-notification> 블록은 task-id/tool-use-id/output-file 경로 등 잡음이 많아 그대로 보여주면
-// 너무 길다 — status/summary 태그만 뽑아서 한 줄로 줄인다(실측 포맷: <status>completed</status>
-// <summary>Background command "..." completed (exit code 0)</summary>). 태그를 못 찾으면(포맷이
-// 달라졌으면) 그냥 앞부분만 잘라 보여준다. [알림] 문구는 이미 짧은 한국어 문장이라 그대로 둔다.
+// 너무 길다 — 나오는 블록마다 status/summary 태그만 뽑아서 한 줄로 줄인다(실측 포맷:
+// <status>completed</status><summary>Background command "..." completed (exit code 0)</summary>).
+// 대기 메시지 묶음 배달 때문에 이 블록이 번호 매겨진 항목들 사이 어딘가에 끼어있을 수 있어서,
+// 문자열 전체에서 찾은 블록을 전부(하나든 여럿이든) 제자리에서 축약하고 나머지 텍스트(번호,
+// 다른 항목, [알림] 문구 등)는 그대로 둔다. 블록이 하나도 없으면(예: [알림]만 있는 경우) 원문
+// 그대로 돌려준다 — [알림] 문구는 이미 짧은 한국어 문장이라 축약이 필요 없다.
 function summarizeAutoInjectedPrompt(prompt) {
   const p = (prompt || '').trim();
-  if (!p.startsWith('<task-notification>')) return p;
-  const status = p.match(/<status>([\s\S]*?)<\/status>/)?.[1]?.trim();
-  const summary = p.match(/<summary>([\s\S]*?)<\/summary>/)?.[1]?.trim();
-  if (summary) return status ? `[${status}] ${summary}` : summary;
-  return p.length > 150 ? `${p.slice(0, 150)}…` : p;
+  return p.replace(/<task-notification>[\s\S]*?<\/task-notification>/g, block => {
+    const status = block.match(/<status>([\s\S]*?)<\/status>/)?.[1]?.trim();
+    const summary = block.match(/<summary>([\s\S]*?)<\/summary>/)?.[1]?.trim();
+    if (summary) return status ? `[${status}] ${summary}` : summary;
+    return block.length > 150 ? `${block.slice(0, 150)}…` : block;
+  });
 }
 
 // 트랜스크립트 한 턴의 prompt 줄을 렌더링한다 — 자동 주입된 것이면 🔔 아이콘과 다른 스타일
@@ -462,7 +473,7 @@ function renderLeadMemberChips() {
   leadMembersChipsEl.innerHTML = members.length
     ? members.map(m => `
         <button class="member-chip" data-files="${escapeHtml(m.cwd)}">
-          ${escapeHtml(dirLabel(m.cwd))}${m.role ? ` · ${escapeHtml(m.role)}` : ''} — 커밋 대상
+          ${escapeHtml(m.label || dirLabel(m.cwd))}${m.role ? ` · ${escapeHtml(m.role)}` : ''} — 커밋 대상
         </button>
       `).join('')
     : '';
@@ -505,9 +516,32 @@ async function syncQueuedMessagesWithTranscript(leadId, transcript) {
   const currentList = pendingChatTurns.get(leadId);
   if (!currentList || !currentList.length) return;
 
+  // main.ts의 deliverPendingNotices는 배달을 "시작"하는 순간(stop→resume을 걸며 resumeLead를
+  // 큐잉하는 순간) pendingNotices.json에서 그 notice id를 바로 지운다 — 그런데 실제로 트랜스크립트에
+  // 그 턴이 나타나기까지는 재기동+응답 생성 시간이 더 걸린다. id가 사라졌다고 여기서 곧바로
+  // pendingChatTurns에서도 지우면, 그 사이 구간엔 대기열 placeholder도 없고 실제 트랜스크립트에도
+  // 없어서 화면에 아무것도 안 보이는 공백이 생긴다(실사용 재현: "작업중인 메시지가 안 뜬다"). 그래서
+  // id가 사라진 'queued' 항목은 지우지 않고 이미 있는 in-flight 처리로 전환해서 실제로 나타날
+  // 때까지 계속 보여준다. 같은 팀장 앞으로 쌓인 여러 건이 한 번에 그룹으로 묶여 배달될 수 있어서
+  // (main.ts combinePendingNoticeMessages) 각 원문은 실제 턴의 prompt 안에 번호가 매겨져 그대로
+  // 포함되지만 정확히 같은 문자열은 아니다 — 그래서 전환된 항목은 정확히 일치가 아니라 "트랜스크립트
+  // prompt 안에 원문이 포함돼있는지"로 판단한다(matchBySubstring). pendingChatTurns에 저장된
+  // 객체를 직접 변형하므로(참조 공유) 별도로 다시 set() 안 해도 상태가 그대로 반영된다.
+  if (remainingQueuedIds) {
+    for (const item of currentList) {
+      if (item.kind === 'queued' && !remainingQueuedIds.has(item.id)) {
+        item.kind = 'in-flight';
+        item.matchBySubstring = true;
+      }
+    }
+  }
+
   const stillPending = currentList.filter(item => {
     if (item.kind === 'queued') return remainingQueuedIds ? remainingQueuedIds.has(item.id) : true;
-    return !transcript.some(t => t.prompt === item.message);
+    const delivered = item.matchBySubstring
+      ? transcript.some(t => t.prompt.includes(item.message))
+      : transcript.some(t => t.prompt === item.message);
+    return !delivered;
   });
   if (stillPending.length === currentList.length) return;
   if (stillPending.length) pendingChatTurns.set(leadId, stillPending);
@@ -793,15 +827,19 @@ restartConfirmBtn.addEventListener('click', async () => {
   restartConfirmBtn.disabled = true;
   restartStatusEl.textContent = '새 세션을 시작하는 중...';
   try {
-    const id = await window.api.restartLead(leadId, restartInstructionEl.value.trim());
-    if (id) {
-      selectedLeadId = id;
+    const result = await window.api.restartLead(leadId, restartInstructionEl.value.trim());
+    if (result && result.id) {
+      selectedLeadId = result.id;
       hideModal(restartLeadPanelEl);
       restartStatusEl.textContent = '';
       await renderChat();
       renderMemberRow(); // 새 세션이라 소속 팀원이 없을 테니, 폴링 안 기다리고 바로 비워서 보여준다
     } else {
-      restartStatusEl.textContent = '새 세션 시작에 실패했습니다.';
+      // main.ts가 실패 사유(타임아웃/레코드 없음 등)를 함께 돌려주므로 그대로 보여준다 — "왜"를
+      // 몰라 재현·진단이 안 되던 문제를 해결하기 위한 것이다.
+      restartStatusEl.textContent = result && result.error
+        ? `새 세션 시작에 실패했습니다 — ${result.error}`
+        : '새 세션 시작에 실패했습니다.';
     }
   } catch (err) {
     restartStatusEl.textContent = `새 세션 시작 중 오류가 발생했습니다: ${errMsg(err)}`;
@@ -1045,7 +1083,7 @@ function renderMemberCard(row, leadLabelById) {
   return `
     <div class="session-card member-card ${statusClass(row)}">
       <div class="top-line">
-        <span>${escapeHtml(row.projectName)}</span>
+        <span>${escapeHtml(row.label || row.projectName)}</span>
         <span>${escapeHtml(statusLabel)}</span>
       </div>
       ${row.leadId ? `<div class="member-of">소속 팀장: ${escapeHtml(leadDisplay)}${row.role ? ` · 역할: ${escapeHtml(row.role)}` : ''}</div>` : ''}
@@ -1205,6 +1243,7 @@ addMemberBtn.addEventListener('click', () => {
   // 디렉토리 선택은 이전에 뭘 골랐든 매번 새로 고르게 한다 — 안 그러면 예전 선택이 그대로 남아있어서
   // (예: 예전에 팀장 자신의 디렉토리에 팀원을 넣었던 기록) 실수로 엉뚱한 곳에 팀원이 뜬다.
   memberCustomPickedDir = null;
+  memberNameEl.value = '';
   memberDirSelect.value = '';
   memberTemplateSelect.value = '';
   setRoleValue(memberRoleSelect, memberRoleCustom, '');
@@ -1215,7 +1254,12 @@ addMemberBtn.addEventListener('click', () => {
 
 cancelAddMemberBtn.addEventListener('click', () => {
   showAddMember = false;
+  memberNameEl.value = '';
   updateMemberSectionVisibility();
+});
+
+memberNameEl.addEventListener('input', () => {
+  syncAddMemberSubmitBtnState();
 });
 
 memberTemplateSelect.addEventListener('change', async () => {
@@ -1259,6 +1303,13 @@ pickMemberDirBtn.addEventListener('click', async () => {
 
 addMemberSubmitBtn.addEventListener('click', async () => {
   if (!memberDirSelect.value || !selectedLeadId) return;
+  // 버튼이 disabled로 막고 있어야 정상이지만(syncAddMemberSubmitBtnState), 혹시 모를 경우를
+  // 대비해 실제 제출 직전에도 한 번 더 확인한다 — 이름 없이 팀원이 추가되는 실수를 막는 게
+  // 이 검증의 목적이라 이중으로 막아둔다.
+  if (!memberNameEl.value.trim()) {
+    addMemberStatusEl.textContent = '이 팀원을 구분할 이름을 입력해주세요.';
+    return;
+  }
   if (!memberInstructionEl.value.trim()) {
     addMemberStatusEl.textContent = '이 팀원에게 줄 지시를 입력해주세요.';
     return;
@@ -1266,9 +1317,10 @@ addMemberSubmitBtn.addEventListener('click', async () => {
   addMemberSubmitBtn.disabled = true;
   addMemberStatusEl.textContent = '추가하는 중...';
   try {
-    const id = await window.api.launchMember(selectedLeadId, memberDirSelect.value, memberInstructionEl.value.trim(), getRoleValue(memberRoleSelect, memberRoleCustom));
+    const id = await window.api.launchMember(selectedLeadId, memberDirSelect.value, memberInstructionEl.value.trim(), getRoleValue(memberRoleSelect, memberRoleCustom), memberNameEl.value.trim());
     if (id) {
       addMemberStatusEl.textContent = `팀원을 추가했습니다(${id}).`;
+      memberNameEl.value = '';
       memberInstructionEl.value = '';
       setRoleValue(memberRoleSelect, memberRoleCustom, '');
       memberTemplateSelect.value = '';
@@ -1299,7 +1351,7 @@ function renderRequests(requests) {
       // dirLabel/역할처럼 다른 곳에서 쓰는 것과 같은 방식으로 사람이 읽을 수 있게 바꿔서 보여준다.
       const memberRow = lastRows.find(r => !r.isLead && r.id === req.memberId);
       title = memberRow
-        ? `팀원 종료 요청 — ${dirLabel(memberRow.cwd)}${memberRow.role ? ` (${memberRow.role})` : ''}`
+        ? `팀원 종료 요청 — ${memberRow.label || dirLabel(memberRow.cwd)}${memberRow.role ? ` (${memberRow.role})` : ''}`
         : `팀원 종료 요청 — ${req.memberId}(이미 종료된 세션이라 상세 정보를 알 수 없음)`;
     } else {
       title = req.requestedDir || '';

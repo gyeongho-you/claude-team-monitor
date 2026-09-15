@@ -58,7 +58,11 @@ const MEMBER_MISS_GRACE_MS = 8000;
 // 회귀 때문에(위 MEMBER_MISS_GRACE_MS 주석 참고) "처음 못 잡힌 시각" 기준으로 판단한다.
 const LEAD_OFFLINE_GRACE_MS = 8000;
 
-const RUN_CLAUDE_TIMEOUT_MS = 30000; // claude --bg가 이 시간 안에도 안 끝나면 행(hang)으로 간주하고 포기한다.
+// claude --bg가 이 시간 안에도 안 끝나면 행(hang)으로 간주하고 포기한다. restartLead/launchTeamLead처럼
+// /team-lead 스킬을 새로 로드하며 시작하는 무거운 콜드 스타트는 단순 --resume보다 느릴 수 있고,
+// 이 PC에서 여러 claude 세션이 동시에 떠있으면(실측 재현) 자원 경합으로 더 늘어질 수 있어서
+// 여유를 두었다("재시작이 자꾸 실패한다" 리포트 대응 — 정확한 원인은 아직 미확인이라 방어적으로 늘림).
+const RUN_CLAUDE_TIMEOUT_MS = 45000;
 const STOP_SESSION_TIMEOUT_MS = 15000;
 
 type AgentEntry = {
@@ -90,6 +94,8 @@ type MemberRecord = {
   leadId: string;
   createdAt: number;
   role?: string; // 예: "reviewer" — 일반 구현 팀원과 구분해 화면에 표시하기 위한 선택 필드
+  label?: string; // 사용자가 "+ 팀원 직접 추가"에서 직접 붙인 이름 — LeadRecord.label과 같은 개념.
+                  // 이 필드를 추가하기 전에 등록된 팀원에는 없을 수 있어 optional이다.
 };
 
 // "팀장 디렉토리" — 팀장을 어디서 띄울지 고르는 용도의 단순 등록 목록. 팀원 관련 결정(역할·사전승인)은
@@ -456,7 +462,7 @@ function computeLiveRows(
         isLead,
         leadId: member?.leadId,
         role: member?.role,
-        label: lead?.label,
+        label: isLead ? lead?.label : member?.label,
         offline: false,
       };
     });
@@ -879,16 +885,25 @@ async function resumeLead(internalId: string, message: string): Promise<string |
 // 바뀌지만 leads.json 레코드 자체와 이름표는 유지)에 덮어씌운다 — /clear 후 새 작업을 맡기는 느낌.
 // resumeLead와 마찬가지로 호출부는 queueLeadOperation(internalId, ...)으로 감싸야 하고, 실행
 // 시점에 internalId로 최신 레코드를 다시 찾아야 한다(같은 이유).
-async function restartLead(internalId: string, instruction: string): Promise<string | null> {
+//
+// "재시작이 자꾸 실패한다"는 실사용 리포트 조사 중 — internalId 연결/pending-notice 경고 기능
+// 자체엔 재시작을 막거나 방해하는 버그가 없음을 코드 추적으로 확인했다(둘 다 무관한 별개 경로).
+// 다만 이전엔 실패 사유를 구분 없이 전부 null로 뭉뚱그려서 "실패했습니다"로만 보여줬는데, 그래서는
+// stopSession 이후 runClaudeBg가 왜 실패했는지(타임아웃/마커 인식 실패 등, 자세한 내용은 콘솔
+// 로그에 남음) 사용자가 화면에서 전혀 알 수 없었다 — 실제 원인을 좁히려면 이게 먼저 필요해서,
+// 실패 사유를 렌더러까지 전달하도록 반환 타입을 바꿨다.
+async function restartLead(internalId: string, instruction: string): Promise<{ id: string } | { error: string }> {
   const current = loadLeads().find(l => l.internalId === internalId);
-  if (!current) return null;
+  if (!current) return { error: '팀장 레코드를 찾을 수 없습니다(이미 삭제됐거나 internalId가 어긋났을 수 있음).' };
   await stopSession(current.id);
   installTeamLeadSkill();
   const { paths: approvedMembers, text: approvedText } = approvedMemberBriefing(current.targetDir);
   const prompt = `/team-lead ${instruction}\n\n${approvedText}`;
 
   const newId = await runClaudeBg(['--bg', prompt], current.targetDir);
-  if (!newId) return null;
+  if (!newId) {
+    return { error: `claude --bg가 ${RUN_CLAUDE_TIMEOUT_MS / 1000}초 안에 새 세션 시작을 확인해주지 못했습니다(타임아웃 또는 "backgrounded" 표시를 못 찾음). claude CLI 로그인/설치 상태를 확인해보세요 — 자세한 로그는 앱 콘솔에 남습니다.` };
+  }
   const newSessionId = (await findSessionIdByShortId(newId)) ?? newId;
 
   const leads = loadLeads();
@@ -900,7 +915,7 @@ async function restartLead(internalId: string, instruction: string): Promise<str
     rec.approvedMembers = approvedMembers;
     saveLeads(leads);
   }
-  return newId;
+  return { id: newId };
 }
 
 // "작업 종료" — 이 팀장이 띄운 팀원을 전부 먼저 끄고, 마지막에 팀장 자신을 끈다. 팀장 기록은
@@ -1031,13 +1046,14 @@ function registerMember(member: MemberRecord): void {
 
 // 팀장이 알아서 판단해서 띄우는 것과 별개로, 사용자가 직접 특정 역할(코드리뷰 등)을 주고
 // 팀원을 띄운다 — 어떤 팀장 소속으로 붙일지는 사용자가 고른다(대화창에서 선택 중인 팀장 등).
-async function launchMember(leadId: string, targetDir: string, instruction: string, role: string): Promise<string | null> {
+// label은 사용자가 이 팀원을 구분하려고 직접 붙인 이름(렌더러에서 필수 입력으로 강제)이다.
+async function launchMember(leadId: string, targetDir: string, instruction: string, role: string, label: string): Promise<string | null> {
   // role은 화면 라벨용 메타데이터에 그치지 않고, Claude 세션 자신도 알 수 있게 프롬프트에 박아준다.
   const roleLine = role ? `역할: ${role}\n\n` : '';
   const prompt = `${TEAM_MEMBER_BRIEFING}\n\n${roleLine}${TEAM_MEMBER_STANDBY_NOTE}\n\n"""\n${instruction}\n"""`;
   const id = await runClaudeBg(['--bg', prompt], targetDir);
   if (!id) return null;
-  registerMember({ memberId: id, leadId, createdAt: Date.now(), role: role || undefined });
+  registerMember({ memberId: id, leadId, createdAt: Date.now(), role: role || undefined, label: label || undefined });
 
   // 팀장이 스스로 띄운 게 아니라서 알려주지 않으면 이 팀원의 존재도 결과도 영원히 모른다 — 다만
   // 팀장이 지금 다른 작업으로 busy일 수 있어서 즉시 stop→resume으로 끼어들지 않고 큐에 쌓아둔다.
@@ -1046,7 +1062,7 @@ async function launchMember(leadId: string, targetDir: string, instruction: stri
   // queueLeadNotice는 internalId를 받으므로, IPC로 넘어온 짧은 id(leadId)를 여기서 변환한다.
   const leadRec = loadLeads().find(l => l.id === leadId);
   if (leadRec) {
-    queueLeadNotice(leadRec.internalId, `[알림] 사용자가 직접 팀원을 추가했습니다 — 디렉토리: ${targetDir}${role ? `, 역할: ${role}` : ''}, 사전 지시(참고용): "${instruction}", 세션 id: ${id}. 이 팀원은 이미 팀원 공통 브리핑(백그라운드 세션 유의사항)을 전달받은 상태이며, 지금 준비 완료 응답만 남기고 대기 중이니, 필요하면 관리 대상에 추가하고 실제 작업을 시작하라는 메시지를 직접 보내라(stop→resume). 완료되면 확인해서 최종 보고에 포함시켜라.`);
+    queueLeadNotice(leadRec.internalId, `[알림] 사용자가 직접 팀원을 추가했습니다 — 이름: ${label}, 디렉토리: ${targetDir}${role ? `, 역할: ${role}` : ''}, 사전 지시(참고용): "${instruction}", 세션 id: ${id}. 이 팀원은 이미 팀원 공통 브리핑(백그라운드 세션 유의사항)을 전달받은 상태이며, 지금 준비 완료 응답만 남기고 대기 중이니, 필요하면 관리 대상에 추가하고 실제 작업을 시작하라는 메시지를 직접 보내라(stop→resume). 완료되면 확인해서 최종 보고에 포함시켜라.`);
   }
 
   return id;
@@ -1169,8 +1185,8 @@ ipcMain.handle('delete-member-template', (_e, id: string) => {
   return loadMemberTemplates();
 });
 
-ipcMain.handle('launch-member', async (_e, leadId: string, targetDir: string, instruction: string, role: string) =>
-  launchMember(leadId, targetDir, instruction, role));
+ipcMain.handle('launch-member', async (_e, leadId: string, targetDir: string, instruction: string, role: string, label: string) =>
+  launchMember(leadId, targetDir, instruction, role, label));
 
 ipcMain.handle('approve-request', async (_e, requestId: string) => {
   const req = writeRequestDecision(requestId, 'approved');
@@ -1269,7 +1285,7 @@ ipcMain.handle('update-lead-label', (_e, leadId: string, label: string) => {
 
 ipcMain.handle('restart-lead', async (_e, leadId: string, instruction: string) => {
   const lead = loadLeads().find(l => l.id === leadId);
-  if (!lead) return null;
+  if (!lead) return { error: '팀장을 찾을 수 없습니다 — 이미 종료됐거나 목록이 갱신됐을 수 있습니다.' };
   const finalInstruction = instruction.trim() || '지금 상황을 파악하고 다음 작업을 시작해줘.';
   return queueLeadOperation(lead.internalId, () => restartLead(lead.internalId, finalInstruction));
 });

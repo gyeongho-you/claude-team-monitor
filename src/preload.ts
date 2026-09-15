@@ -18,8 +18,8 @@ contextBridge.exposeInMainWorld('api', {
   forkSessionAsLead: (sessionId: string, cwd: string) => ipcRenderer.invoke('fork-session-as-lead', sessionId, cwd),
   launchTeamLead: (targetDir: string, instruction: string) =>
     ipcRenderer.invoke('launch-team-lead', targetDir, instruction),
-  launchMember: (leadId: string, targetDir: string, instruction: string, role: string) =>
-    ipcRenderer.invoke('launch-member', leadId, targetDir, instruction, role),
+  launchMember: (leadId: string, targetDir: string, instruction: string, role: string, label: string) =>
+    ipcRenderer.invoke('launch-member', leadId, targetDir, instruction, role, label),
   getMemberTemplates: () => ipcRenderer.invoke('get-member-templates'),
   addMemberTemplate: (scope: string, dir: string, name: string, role: string, instruction: string) =>
     ipcRenderer.invoke('add-member-template', scope, dir, name, role, instruction),
