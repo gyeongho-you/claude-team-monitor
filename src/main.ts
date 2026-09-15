@@ -908,25 +908,39 @@ function runClaudeBg(args: string[], cwd: string): Promise<string | null> {
 // claude --bg --resume <id>는 그 세션이 아직 살아있으면 "복사본"을 새로 만들어버린다(실측 확인) —
 // 진짜 같은 세션을 이어가려면 먼저 stop 해서 재운 뒤에 resume 해야 한다("woke session ... with its saved
 // options" 로 확인됨, 같은 짧은 id 그대로 유지). done 상태에서 stop 해도 안전하다.
-function stopSession(id: string): Promise<void> {
+// exit code만으로는 부족하다 — 타임아웃으로 child.kill()한 경우 exit code가 없어도 실제로 세션이
+// 죽었는지 알 수 없다. 그래서 claude stop을 시도한 뒤 claude agents --json으로 그 id가 실제로
+// 목록에서 사라졌는지까지 확인해서 최종 성공 여부를 반환한다.
+function stopSession(id: string): Promise<boolean> {
   return new Promise(resolve => {
     let settled = false;
-    const finish = () => {
+    const finish = (exitedCleanly: boolean) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve();
+      fetchAgents().then(agents => {
+        const stillAlive = agents.some(a => a.id === id);
+        if (stillAlive) {
+          console.error(`[stopSession] claude stop ${id} 이후에도 agents 목록에 여전히 남아있습니다 — 정지 실패로 간주합니다.`);
+        }
+        resolve(exitedCleanly && !stillAlive);
+      });
     };
     const child = spawn('claude', ['stop', id]);
     const timer = setTimeout(() => {
       console.error(`[stopSession] claude stop ${id} 이 응답 없이 대기 중이라 강제 종료합니다.`);
       child.kill();
-      finish();
+      finish(false);
     }, STOP_SESSION_TIMEOUT_MS);
-    child.on('close', finish);
+    child.on('close', code => {
+      if (code !== 0) {
+        console.error(`[stopSession] claude stop ${id} 이 실패했습니다(exit code ${code}).`);
+      }
+      finish(code === 0);
+    });
     child.on('error', err => {
       console.error('[stopSession] claude stop 프로세스를 실행하지 못했습니다:', err);
-      finish();
+      finish(false);
     });
   });
 }
@@ -1019,15 +1033,24 @@ async function restartLead(internalId: string, instruction: string): Promise<{ i
 // leads.json에서 지우지 않는다 — 다른 "종료"와 마찬가지로 오프라인/히스토리로 남아서 나중에
 // --resume으로 다시 부를 수 있어야 한다(완전 삭제가 아니라 "지금은 멈춤"이라는 의미). internalId로
 // 실행 시점에 최신 레코드를 다시 찾는다(resumeLead/restartLead와 같은 이유).
-async function endLeadWork(internalId: string): Promise<void> {
+// 팀장 자신을 끄는 마지막 stopSession이 실패하면(바쁜 세션은 정지에 더 오래 걸릴 수 있다) 1회
+// 재시도하고, 그래도 실패하면 그 사실을 반환값에 담아 호출부(ipcMain 핸들러)가 렌더러에 정확히
+// 전달할 수 있게 한다.
+async function endLeadWork(internalId: string): Promise<{ success: boolean; memberFailures: string[] }> {
   const lead = loadLeads().find(l => l.internalId === internalId);
-  if (!lead) return;
+  if (!lead) return { success: false, memberFailures: [] };
   const members = loadMembers().filter(m => m.leadId === lead.id);
+  const memberFailures: string[] = [];
   for (const m of members) {
-    await stopSession(m.memberId);
+    const stopped = await stopSession(m.memberId);
+    if (!stopped) memberFailures.push(m.memberId);
     try { fs.unlinkSync(path.join(MEMBERS_DIR, `${m.memberId}.json`)); } catch { /* ignore */ }
   }
-  await stopSession(lead.id);
+  let leadStopped = await stopSession(lead.id);
+  if (!leadStopped) {
+    leadStopped = await stopSession(lead.id);
+  }
+  return { success: leadStopped, memberFailures };
 }
 
 async function findSessionIdByShortId(shortId: string): Promise<string | null> {
@@ -1389,9 +1412,8 @@ ipcMain.handle('restart-lead', async (_e, leadId: string, instruction: string) =
 
 ipcMain.handle('end-lead-work', async (_e, leadId: string) => {
   const lead = loadLeads().find(l => l.id === leadId);
-  if (!lead) return false;
-  await queueLeadOperation(lead.internalId, () => endLeadWork(lead.internalId));
-  return true;
+  if (!lead) return { success: false, memberFailures: [] };
+  return queueLeadOperation(lead.internalId, () => endLeadWork(lead.internalId));
 });
 
 // 세션 짧은 id는 claude CLI가 hex 문자열로만 발급하지만(runClaudeBg의 정규식 참고), 렌더러에서

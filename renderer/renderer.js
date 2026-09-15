@@ -604,25 +604,43 @@ function renderQueuedTurnsHtml(leadId) {
   }).join('');
 }
 
+// renderChat()은 3초 폴링(renderBoard)마다, 그리고 메시지를 보낼 때(sendChatMessage)마다 await 없이
+// (fire-and-forget으로) 호출된다 — 그래서 같은 팀장에 대해 여러 renderChat() 호출이 동시에 실행 중일
+// 수 있다. get-lead-transcript는 daily-journal 기록 전체를 매번 동기로 다시 읽고 파싱해서(캐시
+// 없음) 프로젝트 기록이 쌓일수록 IPC 왕복 시간이 늘어나고 편차도 커지는데(실측: g1cl-mgt처럼 두 달치
+// 기록이 쌓인 프로젝트는 회당 130~145ms), 즉시전송처럼 응답까지 수십 초가 걸리는 동안 3초 폴링이
+// 여러 번 겹쳐 돌면 나중에 시작한 호출이 먼저 끝나고 더 먼저 시작했던(그래서 아직 새 턴이 반영 안 된
+// 시점의 낡은 transcript를 쥔) 호출이 그 뒤에 끝나 화면을 덮어써버릴 수 있다 — 방금 보낸 메시지가
+// 잠깐(다음 폴링까지) 화면에서 통째로 사라지는 버그가 바로 이 순서 역전 때문이다(실사용 재현: "즉시
+// 작업 시작한 메시지가 화면에 안 뜬다"). renderChatSeq로 "가장 나중에 시작된 호출"만 실제로 화면을
+// 쓰게 하고, 그 사이 더 최신 호출이 시작된 낡은 결과는 버린다. 또한 selectedLeadId는 각 await 사이에
+// 바뀔 수 있는 전역 변수라 함수 안에서 여러 번 다시 읽으면(예전 코드) 같은 호출 안에서도 팀장이
+// 뒤바뀔 수 있었다 — 시작할 때 leadId로 한 번만 캡처해서 끝까지 그 값만 쓴다.
+let renderChatSeq = 0;
+
 async function renderChat() {
+  const mySeq = ++renderChatSeq;
   renderLeadMemberChips();
-  if (!selectedLeadId) {
+  const leadId = selectedLeadId;
+  if (!leadId) {
     chatTranscriptEl.innerHTML = ''; // 선택이 풀렸는데 예전 대화가 그대로 남아있으면 안 된다
     return;
   }
   let transcript;
   try {
-    transcript = await window.api.getLeadTranscript(selectedLeadId);
+    transcript = await window.api.getLeadTranscript(leadId);
   } catch (err) {
+    if (mySeq !== renderChatSeq) return; // 더 최신 renderChat() 호출이 이미 시작됐다 — 이 결과는 버린다
     chatTranscriptEl.innerHTML = `<p style="color:#f14c4c">대화 기록을 불러오지 못했습니다: ${escapeHtml(errMsg(err))}</p>`;
     return;
   }
 
-  await syncQueuedMessagesWithTranscript(selectedLeadId, transcript);
+  await syncQueuedMessagesWithTranscript(leadId, transcript);
+  if (mySeq !== renderChatSeq) return; // 위와 같은 이유로, 이 시점에도 더 최신 호출이 없을 때만 화면을 쓴다
 
-  const row = lastRows.find(r => r.isLead && r.id === selectedLeadId);
+  const row = lastRows.find(r => r.isLead && r.id === leadId);
   const busyBanner = computeBusyBannerHtml(row);
-  const queuedTurnHtml = renderQueuedTurnsHtml(selectedLeadId);
+  const queuedTurnHtml = renderQueuedTurnsHtml(leadId);
 
   // 3초마다 도는 폴링 갱신마다 무조건 맨 아래로 스크롤하면, 옛날 대화를 읽으려고 위로 스크롤해둔 걸
   // 계속 끌어내린다 — 이미 맨 아래 근처에 있을 때만("계속 따라가기") 다시 맨 아래로 붙인다.
@@ -868,13 +886,15 @@ endWorkConfirmBtn.addEventListener('click', async () => {
   endWorkConfirmBtn.disabled = true;
   endWorkStatusEl.textContent = '팀원부터 종료하는 중...';
   try {
-    const ok = await window.api.endLeadWork(leadId);
-    if (ok) {
+    const result = await window.api.endLeadWork(leadId);
+    if (result && result.success) {
       hideModal(endWorkPanelEl);
       endWorkStatusEl.textContent = '';
       await refreshBoardNow();
+    } else if (result && result.memberFailures && result.memberFailures.length > 0) {
+      endWorkStatusEl.textContent = `팀장 종료에 실패했습니다. (팀원 종료도 일부 실패: ${result.memberFailures.join(', ')})`;
     } else {
-      endWorkStatusEl.textContent = '작업 종료에 실패했습니다.';
+      endWorkStatusEl.textContent = '팀장 종료에 실패했습니다.';
     }
   } catch (err) {
     endWorkStatusEl.textContent = `작업 종료 중 오류가 발생했습니다: ${errMsg(err)}`;
