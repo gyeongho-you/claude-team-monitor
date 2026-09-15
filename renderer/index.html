@@ -12,9 +12,10 @@
     <nav class="tabs">
       <button class="tab-btn active" data-tab="work">작업</button>
       <button class="tab-btn" data-tab="history">히스토리</button>
-      <button class="tab-btn" data-tab="settings">설정</button>
+      <button class="tab-btn" data-tab="settings">팀장/팀원 셋팅</button>
       <button class="tab-btn" data-tab="cleanup">세션 정리</button>
     </nav>
+    <button id="theme-toggle-btn" title="다크/라이트 모드 전환">🌙</button>
     <span id="last-updated"></span>
   </header>
 
@@ -36,6 +37,7 @@
             <button id="restart-lead-btn" title="지금 대화 맥락을 이어받지 않고 같은 디렉토리에서 완전히 새 세션을 시작합니다">새 작업 시작</button>
             <button id="end-work-btn" title="이 팀장이 띄운 팀원을 전부 끄고, 팀장도 종료합니다">작업 종료</button>
           </div>
+          <div id="lead-members-chips"></div>
           <div id="chat-transcript"></div>
           <div class="chat-input-row">
             <textarea id="chat-input" placeholder="선택한 팀장에게 메시지 보내기 (Enter로 전송, Shift+Enter 줄바꿈)"></textarea>
@@ -95,7 +97,18 @@
             <select id="member-dir-select"><option value="">-- 등록된 디렉토리에서 선택 --</option></select>
             <button id="pick-member-dir-btn" title="등록 안 된 폴더 선택">…</button>
           </div>
-          <input id="member-role" type="text" placeholder="역할 이름 (예: reviewer, 비워도 됨)" />
+          <div class="row">
+            <select id="member-role-select">
+              <option value="">-- 역할 선택 (비워도 됨) --</option>
+              <option value="implementer">구현자 (implementer)</option>
+              <option value="reviewer">코드 리뷰어 (reviewer)</option>
+              <option value="tester">테스터 (tester)</option>
+              <option value="researcher">조사·분석 (researcher)</option>
+              <option value="documenter">문서화 (documenter)</option>
+              <option value="__custom__">직접 입력...</option>
+            </select>
+            <input id="member-role-custom" type="text" placeholder="역할 이름 직접 입력" hidden />
+          </div>
           <textarea id="member-instruction" placeholder="이 팀원에게 줄 지시 (예: 최근 diff를 코드리뷰만 해라, 직접 고치지 마라)"></textarea>
           <button id="add-member-submit-btn" disabled>팀원 추가</button>
           <button id="cancel-add-member-btn">취소</button>
@@ -133,14 +146,28 @@
 
       <div id="member-templates-panel">
         <h2>② 팀원 등록 (역할 템플릿)</h2>
-        <p class="form-hint">디렉토리를 고르면 그 프로젝트 전용 <b>일꾼</b>으로("사전승인" 켜면 모든 팀장에게 자동 안내), 비워두면 코드리뷰·검수처럼 프로젝트에 안 묶인 <b>공용 역할</b>로 등록됩니다(쓸 때마다 대상 디렉토리를 그때 고름).</p>
+        <p class="form-hint"><b>소속</b>(어느 팀장이 쓸 수 있는지 — 공통 or 특정 팀장 전용)과 <b>디렉토리</b>(이 팀원이 일할 곳)는 서로 독립적입니다. 디렉토리를 고르고 "사전승인"을 켜면 그 소속의 팀장에게 자동 안내되고, 비워두면 쓸 때마다 대상 디렉토리를 그때 고릅니다.</p>
+        <div class="row">
+          <select id="new-tpl-scope-select"><option value="shared">공통 (모든 팀장 사용 가능)</option></select>
+        </div>
         <div class="row" id="tpl-dir-row">
-          <select id="new-tpl-dir-select"><option value="">-- 팀장 디렉토리에서 선택 (비우면 공용) --</option></select>
+          <select id="new-tpl-dir-select"><option value="">-- 이 팀원이 일할 디렉토리 선택 (비워도 됨) --</option></select>
           <button id="pick-tpl-dir-btn" title="등록 안 된 폴더 선택">…</button>
         </div>
         <div class="row">
           <input id="new-tpl-name" type="text" placeholder="표시 이름 (예: g1cl-service 리뷰어)" />
-          <input id="new-tpl-role" type="text" placeholder="역할 (예: reviewer)" />
+        </div>
+        <div class="row">
+          <select id="new-tpl-role-select">
+            <option value="">-- 역할 선택 (비워도 됨) --</option>
+            <option value="implementer">구현자 (implementer)</option>
+            <option value="reviewer">코드 리뷰어 (reviewer)</option>
+            <option value="tester">테스터 (tester)</option>
+            <option value="researcher">조사·분석 (researcher)</option>
+            <option value="documenter">문서화 (documenter)</option>
+            <option value="__custom__">직접 입력...</option>
+          </select>
+          <input id="new-tpl-role-custom" type="text" placeholder="역할 이름 직접 입력" hidden />
         </div>
         <textarea id="new-tpl-instruction" placeholder="이 팀원에게 줄 기본 지시 (예: 최근 diff를 코드리뷰만 해라, 직접 고치지 마라)"></textarea>
         <button id="tpl-add-btn">팀원 등록</button>
@@ -162,6 +189,15 @@
   </main>
 
   <div id="modal-backdrop" hidden></div>
+
+  <div id="file-list-panel" class="modal-panel" hidden>
+    <div class="section-header">
+      <h2>커밋 대상 변경사항</h2>
+      <button id="file-list-close-btn">닫기</button>
+    </div>
+    <p class="form-hint">지금 이 디렉토리에서 커밋+푸시를 지시하면 포함될 변경사항입니다(git 미커밋 상태 그대로). 파일을 누르면 diff를 볼 수 있습니다.</p>
+    <div id="file-list-content"></div>
+  </div>
 
   <script src="renderer.js"></script>
 </body>

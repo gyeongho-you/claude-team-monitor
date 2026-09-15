@@ -21,8 +21,8 @@ contextBridge.exposeInMainWorld('api', {
   launchMember: (leadId: string, targetDir: string, instruction: string, role: string) =>
     ipcRenderer.invoke('launch-member', leadId, targetDir, instruction, role),
   getMemberTemplates: () => ipcRenderer.invoke('get-member-templates'),
-  addMemberTemplate: (category: string, dir: string, name: string, role: string, instruction: string) =>
-    ipcRenderer.invoke('add-member-template', category, dir, name, role, instruction),
+  addMemberTemplate: (scope: string, dir: string, name: string, role: string, instruction: string) =>
+    ipcRenderer.invoke('add-member-template', scope, dir, name, role, instruction),
   updateMemberTemplate: (id: string, fields: Record<string, string>) =>
     ipcRenderer.invoke('update-member-template', id, fields),
   toggleMemberTemplateApproved: (id: string) => ipcRenderer.invoke('toggle-member-template-approved', id),
@@ -31,6 +31,8 @@ contextBridge.exposeInMainWorld('api', {
   denyRequest: (requestId: string) => ipcRenderer.invoke('deny-request', requestId),
   openInTerminal: (id: string) => ipcRenderer.invoke('open-in-terminal', id),
   getLeadTranscript: (leadId: string) => ipcRenderer.invoke('get-lead-transcript', leadId),
+  getChangedFiles: (cwd: string) => ipcRenderer.invoke('get-changed-files', cwd),
+  getFileDiff: (cwd: string, file: string) => ipcRenderer.invoke('get-file-diff', cwd, file),
   sendToLead: (leadId: string, message: string) => ipcRenderer.invoke('send-to-lead', leadId, message),
   updateLeadLabel: (leadId: string, label: string) => ipcRenderer.invoke('update-lead-label', leadId, label),
   restartLead: (leadId: string, instruction: string) => ipcRenderer.invoke('restart-lead', leadId, instruction),

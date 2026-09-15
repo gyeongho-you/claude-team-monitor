@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { exec, spawn } from 'child_process';
+import { exec, execFile, spawn } from 'child_process';
 
 const POLL_INTERVAL_MS = 3000;
 const CLAUDE_HOME = path.join(os.homedir(), '.claude');
@@ -56,19 +56,20 @@ type MemberRecord = {
 // 별도의 MemberTemplate이 담당한다 — 둘을 하나로 묶지 않는다(등록 ≠ 역할부여 ≠ 사전승인).
 type Favorite = { path: string; name: string };
 
-// "팀원 등록(역할 템플릿)" — 재사용 가능한 팀원 정의. 두 종류가 있다:
-// - worker(프로젝트 일꾼): 특정 디렉토리(path)에 고정된 팀원. approved가 true면 모든 팀장이 launch
-//   시점에 자동으로 "그 디렉토리는 승인됨"으로 안내받는다(매번 체크박스를 다시 켤 필요 없음).
-// - general(전반 역할): 코드리뷰·검수처럼 특정 프로젝트에 묶이지 않는 역할. path가 없고, 실제로 쓸 때
-//   마다 대상 디렉토리를 그때그때 고른다 — 그래서 approved 개념(디렉토리 자동승인)이 적용되지 않는다.
+// "팀원 등록(역할 템플릿)" — 재사용 가능한 팀원 정의. 서로 독립적인 두 축으로 정해진다:
+// - scope(소속): 'shared'면 모든 팀장이 쓸 수 있고, 특정 디렉토리 경로면 그 디렉토리에서 도는
+//   팀장만 이 템플릿을 브리핑받는다. 팀장은 stop/resume을 거치며 짧은 id가 계속 바뀌므로, 안정적인
+//   식별자로 팀장 자신의 디렉토리(targetDir)를 "소속" 값으로 쓴다.
+// - path(디렉토리): 이 팀원이 실제로 일할 디렉토리. 있으면 그 안에서만, 없으면 쓸 때마다 그때그때
+//   고른다. approved는 path가 있을 때만 의미 있다(사전승인이면 매번 체크박스 없이 자동 브리핑).
 type MemberTemplate = {
   id: string;
-  category: 'worker' | 'general';
-  path?: string; // worker만 있음
+  scope: string; // 'shared' | <팀장 디렉토리 경로>
+  path?: string;
   name: string;
   role: string;
   instruction: string;
-  approved: boolean; // worker에서만 의미 있음
+  approved: boolean; // path가 있을 때만 의미 있음
 };
 
 type LeadRecord = {
@@ -119,6 +120,49 @@ function resolveProjectName(sessionId: string, cwd: string): string {
     // 무시하고 근사치로 폴백
   }
   return path.basename(cwd);
+}
+
+// "변경 파일"은 처음엔 daily-journal의 편집 기록(PostToolUse 훅 버퍼)을 썼는데, Bash로 직접 손대거나
+// 서브에이전트를 거치는 경로는 그 기록에 안 잡히는 걸 실측으로 확인하고 git 상태 조회로 바꿨다.
+// 그 다음엔 "이 세션이 건드린 것만" 보여주려고 mtime으로 필터링했는데, 실제로 사용자가 원한 건
+// 그게 아니라 "지금 커밋+푸시하면 뭐가 들어가는지"였다 — 그건 이 필터링 없이 그냥 git의 현재
+// 미커밋 상태 그대로가 정답이다(git add -A로 커밋할 때 포함될 것과 정확히 같다). 그래서 다시
+// mtime 필터 없이 git status 원본을 그대로 보여주는 걸로 되돌렸다.
+function getGitChangedFiles(cwd: string): Promise<{ file: string; status: string }[]> {
+  return new Promise(resolve => {
+    exec('git status --porcelain', { cwd, windowsHide: true, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+      if (err) { resolve([]); return; } // git 저장소가 아니거나 git이 없으면 빈 목록
+      const files = stdout.split('\n')
+        .map(l => l.replace(/\r$/, ''))
+        .filter(Boolean)
+        .map(l => ({ status: l.slice(0, 2).trim() || '?', file: l.slice(3).trim() }));
+      resolve(files);
+    });
+  });
+}
+
+// 목록의 파일 하나를 눌렀을 때 실제 내용을 보여준다. git이 추적 중인 변경이면 diff를, 아직 추적
+// 안 되는 새 파일(untracked)이면 diff 대상이 없으므로 파일 내용 자체를 "전부 추가"로 보여준다.
+// HEAD와 비교해야 한다 — `git diff --`(워킹트리 대 인덱스)만 쓰면 git add로 스테이징만 해두고
+// 추가 수정이 없는 파일은 diff가 비어서 새 파일로 오판돼 전체 내용이 "전부 추가"로 보인다.
+// HEAD가 아직 없는(커밋 0개) 저장소에서는 이 명령 자체가 실패하는데, 그 경우엔 사실상 모든 파일이
+// 진짜 새 파일이므로 아래 catch(=untracked 처리) 경로로 폴백되는 게 오히려 맞다.
+function getFileDiff(cwd: string, file: string): Promise<{ diff: string; isNew: boolean; binary: boolean }> {
+  return new Promise(resolve => {
+    execFile('git', ['diff', 'HEAD', '--', file], { cwd, windowsHide: true, maxBuffer: 20 * 1024 * 1024 }, (err, stdout) => {
+      if (!err && stdout.trim()) {
+        resolve({ diff: stdout, isNew: false, binary: /^Binary files /m.test(stdout) });
+        return;
+      }
+      try {
+        const buf = fs.readFileSync(path.join(cwd, file));
+        const isBinary = buf.subarray(0, 8000).includes(0); // NUL 바이트가 있으면 텍스트가 아닌 걸로 간주
+        resolve({ diff: isBinary ? '' : buf.toString('utf-8'), isNew: true, binary: isBinary });
+      } catch {
+        resolve({ diff: '', isNew: true, binary: false });
+      }
+    });
+  });
 }
 
 // 팀장을 하루 넘겨 이어가는 경우가 있어서, 오늘 날짜뿐 아니라 daily-journal에 쌓인 모든 날짜의
@@ -206,11 +250,30 @@ function fetchAgents(): Promise<AgentEntry[]> {
 }
 
 // 단일 JSON 파일 하나를 안전하게 읽는다 — 없거나 깨져 있으면 null.
+// 팀원 등록·승인 요청 같은 JSON 파일은 팀장(LLM)이 직접 손으로 써서 만든다 — 실측으로, Windows
+// 경로(`C:\Users\...`)를 JSON 이스케이프 없이 그냥 넣는 실수가 실제로 나왔다("\U", "\P" 등은
+// 유효한 JSON 이스케이프가 아니라 파싱 자체가 깨짐). 이러면 등록이 통째로 무시돼서 팀원이 화면에
+// 아예 안 뜨는 심각한 문제로 이어지므로, 파싱에 실패하면 유효한 JSON 이스케이프
+// (\" \\ \/ \b \f \n \r \t \uXXXX)가 아닌 백슬래시를 전부 두 번 이스케이프해서 한 번 더 시도한다.
+function repairLooseBackslashes(raw: string): string {
+  return raw.replace(/\\(?!["\\/bfnrtu])/g, '\\\\');
+}
+
 function readJsonFileSafe<T>(filePath: string): T | null {
+  let raw: string;
   try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as T;
+    raw = fs.readFileSync(filePath, 'utf-8');
   } catch {
     return null;
+  }
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    try {
+      return JSON.parse(repairLooseBackslashes(raw)) as T;
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -261,6 +324,12 @@ function queueLeadNotice(leadId: string, message: string): void {
   savePendingNotices(notices);
 }
 
+// 팀원이 busy → idle/done으로 바뀌는 순간(=일을 마쳤을 가능성)을 감지하려고 폴링마다 마지막으로
+// 본 상태를 기억해둔다. 앱을 껐다 켜면 초기화되지만(=재부팅 직후 이미 끝나있던 건 못 잡음), 계속
+// 켜둔 동안엔 문제없다. 이게 없으면 팀장이 스스로 확인할 계기가 없어서 팀원 보고가 영영 팀장(=이
+// 앱 화면)에 안 올라온다.
+const lastMemberStatus = new Map<string, string>();
+
 function loadMembers(): MemberRecord[] {
   try {
     if (!fs.existsSync(MEMBERS_DIR)) return [];
@@ -276,6 +345,14 @@ function loadMembers(): MemberRecord[] {
 // 방금 등록된 팀원은 claude agents --json 스냅샷에 아직 안 잡혔을 수 있다(팀장이 방금 스폰한
 // 직후의 타이밍 차이) — 그 유예 기간 안에는 "떠있지 않다"고 오판해 등록 파일을 지우지 않는다.
 const MEMBER_CLEANUP_GRACE_MS = 15000;
+
+// 유예 기간이 지난, 멀쩡히 동작 중이던 팀원도 claude stop→resume되는 그 짧은 순간(프로세스가 잠깐
+// 사라졌다가 새 pid로 재기동되는 구간)엔 agents 스냅샷에서 한 번 빠질 수 있다(실측 재현됨 — 살아있는
+// 팀원 4명의 등록 파일이 단 한 번의 폴링 미스로 전부 삭제됨). 그래서 한 번 빠진 것만으로 바로 지우지
+// 않고, 연속으로 이 횟수 이상 못 잡혔을 때만 정리한다. memberId별 연속 미스 횟수는 폴링 사이에도
+// 유지해야 하므로 모듈 스코프에 둔다.
+const MEMBER_CLEANUP_MISS_THRESHOLD = 2;
+const memberMissStreaks = new Map<string, number>();
 
 // 보드에는 "내가 띄운 팀장"과 "팀장이 등록한 팀원"만 보여준다 — 그 외(사용자가 따로 열어둔 무관한
 // 세션 등)는 team-lead 체계 밖이므로 제외한다. interactive 세션은 애초에 짧은 id가 없어서 자동으로 빠진다.
@@ -305,6 +382,20 @@ async function buildSessionRows(): Promise<{ rows: SessionRow[]; requests: Membe
         offline: false,
       };
     });
+
+  // 팀원이 busy → idle/done으로 바뀌면 팀장에게 확인해보라고 알려준다(큐에 쌓였다가 팀장이
+  // idle/blocked일 때 전달됨 — 아래 pendingNotices 처리 로직 재사용).
+  liveRows.filter(r => !r.isLead).forEach(r => {
+    const status = (r.status || r.state || '').toLowerCase();
+    const prevStatus = lastMemberStatus.get(r.id!);
+    if (prevStatus === 'busy' && status && status !== 'busy' && r.leadId) {
+      queueLeadNotice(
+        r.leadId,
+        `[알림] 팀원 ${r.id}(${r.cwd}${r.role ? `, 역할: ${r.role}` : ''})가 작업을 마친 것 같습니다(상태: ${status}). stop→resume으로 "방금 한 작업을 한국어로 짧게 요약해줘"처럼 확인하고, 결과를 파악해서 필요하면 최종 보고에 반영하세요.`,
+      );
+    }
+    if (status) lastMemberStatus.set(r.id!, status);
+  });
 
   // 대기 중인 팀원-추가 알림 중, 그 팀장이 지금 busy가 아니면(=억지로 끊어도 하던 작업이 없으면)
   // 이 타이밍에 stop→resume으로 실제 전달한다. busy면 다음 폴링까지 큐에 그대로 둔다.
@@ -357,14 +448,29 @@ async function buildSessionRows(): Promise<{ rows: SessionRow[]; requests: Membe
 
   const rows = [...liveRows, ...offlineRows];
 
-  // 팀원은 팀장과 달리 일회성 하위 작업 단위라 이어할 필요가 적어서, 종료되면 바로 정리한다 — 단,
-  // 방금(MEMBER_CLEANUP_GRACE_MS 이내) 등록된 팀원은 agents 스냅샷에 아직 안 잡혔을 수 있으니 봐준다.
+  // 팀원은 팀장과 달리 일회성 하위 작업 단위라 이어할 필요가 적어서, 종료되면 정리한다 — 단,
+  // 방금(MEMBER_CLEANUP_GRACE_MS 이내) 등록된 팀원은 봐주고(TOCTOU), 연속 미스가
+  // MEMBER_CLEANUP_MISS_THRESHOLD회 미만이면(=stop→resume 재기동 구간일 수 있음) 아직 지우지 않는다.
+  const currentMemberIds = new Set(members.map(m => m.memberId));
   members.forEach(m => {
     if (Date.now() - m.createdAt < MEMBER_CLEANUP_GRACE_MS) return;
-    if (!agentIdSet.has(m.memberId)) {
-      try { fs.unlinkSync(path.join(MEMBERS_DIR, `${m.memberId}.json`)); } catch { /* ignore */ }
+    if (agentIdSet.has(m.memberId)) {
+      memberMissStreaks.delete(m.memberId);
+      return;
     }
+    const misses = (memberMissStreaks.get(m.memberId) ?? 0) + 1;
+    if (misses < MEMBER_CLEANUP_MISS_THRESHOLD) {
+      memberMissStreaks.set(m.memberId, misses);
+      return;
+    }
+    memberMissStreaks.delete(m.memberId);
+    try { fs.unlinkSync(path.join(MEMBERS_DIR, `${m.memberId}.json`)); } catch { /* ignore */ }
   });
+  // 등록 파일이 다른 경로(수동 종료 버튼 등)로 이미 사라진 memberId의 미스 카운터는 여기서 정리해야
+  // Map이 무한정 자라지 않는다.
+  for (const key of memberMissStreaks.keys()) {
+    if (!currentMemberIds.has(key)) memberMissStreaks.delete(key);
+  }
 
   const requests = loadPendingRequests();
   return { rows, requests };
@@ -437,29 +543,29 @@ function saveMemberTemplates(templates: MemberTemplate[]): void {
   }
 }
 
-// 팀장을 새로 띄울 때마다 매번 체크박스를 켜지 않아도 되도록, "사전승인"이 켜진 worker 템플릿은
-// 항상 자동으로 그 팀장의 승인 목록에 들어간다. general(전반 역할) 템플릿은 디렉토리가 없어서
-// 자동승인 대상이 될 수 없지만, "이런 역할이 있다"는 것 자체는 별도로 안내해서 팀장이 필요할 때
-// 대상 디렉토리를 골라 활용하게 한다.
-function approvedMemberBriefing(): { paths: string[]; text: string } {
-  const templates = loadMemberTemplates();
-  const approvedWorkers = templates.filter(t => t.category === 'worker' && t.approved && t.path);
-  const generalRoles = templates.filter(t => t.category === 'general');
+// 팀장을 새로 띄울 때마다 매번 체크박스를 켜지 않아도 되도록, "사전승인"이 켜지고 디렉토리(path)가
+// 있는 템플릿은 항상 자동으로 그 팀장의 승인 목록에 들어간다. path가 없는 템플릿은 자동승인 대상이
+// 될 수 없지만, "이런 역할이 있다"는 것 자체는 별도로 안내해서 팀장이 필요할 때 대상 디렉토리를
+// 골라 활용하게 한다. scope가 'shared'가 아니면 그 디렉토리(callerDir)에서 도는 팀장에게만 보인다.
+function approvedMemberBriefing(callerDir: string): { paths: string[]; text: string } {
+  const templates = loadMemberTemplates().filter(t => t.scope === 'shared' || t.scope === callerDir);
+  const approvedWithPath = templates.filter(t => t.approved && t.path);
+  const withoutPath = templates.filter(t => !t.path);
 
   const parts: string[] = [];
-  if (approvedWorkers.length > 0) {
-    const lines = approvedWorkers.map(t =>
+  if (approvedWithPath.length > 0) {
+    const lines = approvedWithPath.map(t =>
       `- ${t.path}${t.role ? ` (역할: ${t.role})` : ''}${t.instruction ? ` — 추천 지시: "${t.instruction}"` : ''}`);
     parts.push(`사전 승인된 팀원 디렉토리 목록(이 안에서는 바로 팀원을 띄워도 됨):\n${lines.join('\n')}`);
   } else {
     parts.push('사전 승인된 팀원 디렉토리가 없음 — 팀원이 필요하면 반드시 승인 요청부터 거쳐라.');
   }
-  if (generalRoles.length > 0) {
-    const lines = generalRoles.map(t =>
+  if (withoutPath.length > 0) {
+    const lines = withoutPath.map(t =>
       `- ${t.name}(역할: ${t.role || '미지정'})${t.instruction ? ` — 기본 지시: "${t.instruction}"` : ''}`);
     parts.push(`특정 프로젝트에 묶이지 않은 역할(필요한 디렉토리에 적용해서 써라 — 그 디렉토리가 위 사전승인 목록에 없으면 승인 요청부터 거쳐라):\n${lines.join('\n')}`);
   }
-  return { paths: approvedWorkers.map(t => t.path!), text: parts.join('\n\n') };
+  return { paths: approvedWithPath.map(t => t.path!), text: parts.join('\n\n') };
 }
 
 const RUN_CLAUDE_TIMEOUT_MS = 30000; // claude --bg가 이 시간 안에도 안 끝나면 행(hang)으로 간주하고 포기한다.
@@ -598,7 +704,7 @@ async function restartLead(sessionId: string, targetDir: string, instruction: st
   if (!current) return null;
   await stopSession(current.id);
   installTeamLeadSkill();
-  const { paths: approvedMembers, text: approvedText } = approvedMemberBriefing();
+  const { paths: approvedMembers, text: approvedText } = approvedMemberBriefing(targetDir);
   const prompt = `/team-lead ${instruction}\n\n${approvedText}`;
 
   const newId = await runClaudeBg(['--bg', prompt], targetDir);
@@ -638,7 +744,7 @@ async function findSessionIdByShortId(shortId: string): Promise<string | null> {
 
 async function launchTeamLead(targetDir: string, instruction: string): Promise<string | null> {
   installTeamLeadSkill();
-  const { paths: approvedMembers, text: approvedText } = approvedMemberBriefing();
+  const { paths: approvedMembers, text: approvedText } = approvedMemberBriefing(targetDir);
   const prompt = `/team-lead ${instruction}\n\n${approvedText}`;
 
   const id = await runClaudeBg(['--bg', prompt], targetDir);
@@ -691,7 +797,7 @@ async function adoptLead(shortId: string): Promise<string | null> {
   const agent = agents.find(a => a.id === shortId && a.kind === 'background');
   if (!agent) return null;
   installTeamLeadSkill();
-  const { paths: approvedMembers } = approvedMemberBriefing();
+  const { paths: approvedMembers } = approvedMemberBriefing(agent.cwd);
   const leads = loadLeads();
   leads.push({
     id: agent.id!,
@@ -722,7 +828,7 @@ async function forkSessionAsLead(sessionId: string, cwd: string): Promise<string
   );
   if (!id) return null;
   const newSessionId = (await findSessionIdByShortId(id)) ?? id;
-  const { paths: approvedMembers } = approvedMemberBriefing();
+  const { paths: approvedMembers } = approvedMemberBriefing(cwd);
   const leads = loadLeads();
   leads.push({ id, sessionId: newSessionId, targetDir: cwd, launchedAt: Date.now(), approvedMembers });
   saveLeads(leads);
@@ -741,14 +847,21 @@ function registerMember(member: MemberRecord): void {
 // 하나 물고 개인 인터랙티브 세션처럼 굴다가 애매하면 "어느 경로를 리뷰할까요?" 식으로 되묻고
 // 멈춰버린다(실측: 아무도 안 보고 있으니 그 질문엔 영원히 답이 안 옴). 그래서 모든 팀원 프롬프트
 // 맨 앞에 이 원칙을 박아넣는다.
-const TEAM_MEMBER_BRIEFING = '너는 지금 "팀장" 세션이 배정한 "팀원" 세션이다. 사람이 실시간으로 지켜보며 답해주는 세션이 아니니, 중간에 사용자에게 되묻지 말고 스스로 판단해서 진행해라. 정보가 부족하면 저장소 안에서 직접 조사해서 합리적으로 판단하고, 정말로 진행이 불가능할 때만 왜 막혔는지를 최종 답변에 명확히 남기고 멈춰라(질문만 던지고 끝내지 마라). 작업을 마치면 무엇을 확인했고 결과가 무엇인지 최종 답변에 구조적으로 정리해라 — 그 답변이 팀장에게 전달되는 유일한 보고 내용이다.';
+const TEAM_MEMBER_BRIEFING = '너는 지금 "팀장" 세션이 배정한 "팀원" 세션이다. 사람이 실시간으로 지켜보며 답해주는 세션이 아니니, 중간에 사용자에게 되묻지 말고 스스로 판단해서 진행해라. 정보가 부족하면 저장소 안에서 직접 조사해서 합리적으로 판단하고, 정말로 진행이 불가능할 때만 왜 막혔는지를 최종 답변에 명확히 남기고 멈춰라(질문만 던지고 끝내지 마라). AskUserQuestion 같은 화살표 선택형 인터랙티브 도구는 절대 쓰지 마라 — 백그라운드 세션이라 실제 터미널이 안 붙어있어서 그 메뉴에 아무도 응답할 수 없고, 세션이 그대로 영구히 멈춘다(텍스트로 되묻는 것보다 훨씬 심각하게 막힘). 같은 이유로 EnterWorktree/ExitWorktree 도구도 쓰지 마라 — 사전 승인 안 된 경로로 permission root를 옮기려 하면 "진행할까요? Yes/No" 확인 프롬프트가 뜨는데 이것도 아무도 응답 못 해서 똑같이 멈춘다(실측 확인). 워크트리가 필요하면 `git worktree add <경로> <브랜치>`를 Bash로 직접 실행하고, 그 경로를 Edit/Write/Bash의 대상 경로로 그냥 지정해서 작업해라 — permission root 자체를 옮기는 도구만 피하면 된다. 작업을 마치면 무엇을 확인했고 결과가 무엇인지 최종 답변에 구조적으로 정리해라 — 그 답변이 팀장에게 전달되는 유일한 보고 내용이다.';
+
+// launchMember로 처음 띄울 때 instruction을 곧바로 실행 지시로 붙이면, 실사용해보니 지시가
+// 구체적일수록(예: "정합성/버그/로직 문제를 자세히 리뷰해라") 팀원이 팀장의 확인 없이 곧장 전체
+// 작업을 스스로 벌여버려서 사용자가 당황하는 일이 잦았다. 그래서 최초 실행에서는 instruction을
+// "앞으로 맡을 작업에 대한 참고용 사전 지시"로만 전달하고, 실제 개시는 항상 팀장이 이어서 보내는
+// 다음 메시지에서 시작되도록 못 박는다 — 최초 실행은 항상 "대기" 상태로 끝나야 한다.
+const TEAM_MEMBER_STANDBY_NOTE = '아래는 앞으로 맡을 작업에 대한 참고용 사전 지시다 — 이번 턴에서 곧바로 실행하지 마라. 내용을 확인했다는 짧은 준비 완료 응답만 남기고(예: "확인했습니다. 아래 작업을 맡을 준비가 됐습니다."), 실제로 작업을 시작하라는 팀장의 다음 메시지가 올 때까지 기다려라. 팀장이 다시 메시지를 보내기 전까지는 어떤 파일도 고치거나 만들지 마라.';
 
 // 팀장이 알아서 판단해서 띄우는 것과 별개로, 사용자가 직접 특정 역할(코드리뷰 등)을 주고
 // 팀원을 띄운다 — 어떤 팀장 소속으로 붙일지는 사용자가 고른다(대화창에서 선택 중인 팀장 등).
 async function launchMember(leadId: string, targetDir: string, instruction: string, role: string): Promise<string | null> {
   // role은 화면 라벨용 메타데이터에 그치지 않고, Claude 세션 자신도 알 수 있게 프롬프트에 박아준다.
   const roleLine = role ? `역할: ${role}\n\n` : '';
-  const prompt = `${TEAM_MEMBER_BRIEFING}\n\n${roleLine}${instruction}`;
+  const prompt = `${TEAM_MEMBER_BRIEFING}\n\n${roleLine}${TEAM_MEMBER_STANDBY_NOTE}\n\n"""\n${instruction}\n"""`;
   const id = await runClaudeBg(['--bg', prompt], targetDir);
   if (!id) return null;
   registerMember({ memberId: id, leadId, dir: targetDir, createdAt: Date.now(), role: role || undefined });
@@ -756,7 +869,8 @@ async function launchMember(leadId: string, targetDir: string, instruction: stri
   // 팀장이 스스로 띄운 게 아니라서 알려주지 않으면 이 팀원의 존재도 결과도 영원히 모른다 — 다만
   // 팀장이 지금 다른 작업으로 busy일 수 있어서 즉시 stop→resume으로 끼어들지 않고 큐에 쌓아둔다.
   // buildSessionRows가 폴링마다 이 큐를 보고, 팀장이 idle/blocked가 됐을 때만 실제로 전달한다.
-  queueLeadNotice(leadId, `[알림] 사용자가 직접 팀원을 추가했습니다 — 디렉토리: ${targetDir}${role ? `, 역할: ${role}` : ''}, 지시: "${instruction}", 세션 id: ${id}. 이 팀원은 네가 띄운 게 아니니 필요하면 관리 대상에 추가하고, 완료되면 확인해서 최종 보고에 포함시켜라.`);
+  // (팀원은 대기 상태로 시작하므로, 이 알림을 받은 팀장이 실제 작업 개시 메시지를 별도로 보내야 한다.)
+  queueLeadNotice(leadId, `[알림] 사용자가 직접 팀원을 추가했습니다 — 디렉토리: ${targetDir}${role ? `, 역할: ${role}` : ''}, 사전 지시(참고용): "${instruction}", 세션 id: ${id}. 이 팀원은 지금 준비 완료 응답만 남기고 대기 중이니, 필요하면 관리 대상에 추가하고 실제 작업을 시작하라는 메시지를 직접 보내라(stop→resume). 완료되면 확인해서 최종 보고에 포함시켜라.`);
 
   return id;
 }
@@ -844,13 +958,13 @@ ipcMain.handle('fork-session-as-lead', async (_e, sessionId: string, cwd: string
 
 ipcMain.handle('get-member-templates', () => loadMemberTemplates());
 
-ipcMain.handle('add-member-template', (_e, category: 'worker' | 'general', dir: string, name: string, role: string, instruction: string) => {
+ipcMain.handle('add-member-template', (_e, scope: string, dir: string, name: string, role: string, instruction: string) => {
   const templates = loadMemberTemplates();
   templates.push({
     id: `tpl-${Date.now()}`,
-    category,
-    path: category === 'worker' ? dir : undefined,
-    name: name || (category === 'worker' ? path.basename(dir) : (role || '역할')),
+    scope: scope || 'shared',
+    path: dir || undefined,
+    name: name || (dir ? path.basename(dir) : (role || '역할')),
     role: role || '',
     instruction: instruction || '',
     approved: false,
@@ -921,6 +1035,10 @@ ipcMain.handle('deny-request', async (_e, requestId: string) => {
     resumeLead(lead.sessionId, lead.targetDir, `팀원 요청이 거부됐습니다 — "${req.requestedDir}"에는 팀원을 띄우지 마세요. 다른 방법을 찾거나 사용자에게 다시 확인하세요.`));
   return true;
 });
+
+ipcMain.handle('get-changed-files', (_e, cwd: string) => getGitChangedFiles(cwd));
+
+ipcMain.handle('get-file-diff', (_e, cwd: string, file: string) => getFileDiff(cwd, file));
 
 ipcMain.handle('get-lead-transcript', (_e, leadId: string) => {
   const lead = loadLeads().find(l => l.id === leadId);

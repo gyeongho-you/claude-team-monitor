@@ -4,3 +4,4 @@ dist-electron/
 dist-builder/
 release/
 *.log
+.claude/worktrees/

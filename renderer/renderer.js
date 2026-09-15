@@ -1,3 +1,23 @@
+// --- 다크/라이트 테마 ---
+// localStorage는 뷰어(이 창)별로 따로 노는 값이라 여러 사용자 간 공유될 일이 없고, 그냥 "이 PC의
+// 이 앱 창은 어떤 테마로 보고 싶은지"라는 순수 UI 취향이라 딱 맞는 용도다.
+const THEME_KEY = 'claude-team-monitor-theme';
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  const btn = document.getElementById('theme-toggle-btn');
+  if (btn) btn.textContent = theme === 'light' ? '☀️' : '🌙';
+}
+(function initTheme() {
+  let saved = 'dark';
+  try { saved = localStorage.getItem(THEME_KEY) || 'dark'; } catch { /* 접근 안 되면 기본값(dark) */ }
+  applyTheme(saved);
+})();
+document.getElementById('theme-toggle-btn').addEventListener('click', () => {
+  const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  applyTheme(next);
+  try { localStorage.setItem(THEME_KEY, next); } catch { /* 저장 안 돼도 이번 세션 동안은 유지됨 */ }
+});
+
 // --- 탭 전환 ---
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -12,6 +32,7 @@ const leadRowEl = document.getElementById('lead-row');
 const newLeadBtn = document.getElementById('new-lead-btn');
 const adoptLeadBtn = document.getElementById('adopt-lead-btn');
 const leadChatPanelEl = document.getElementById('lead-chat-panel');
+const leadMembersChipsEl = document.getElementById('lead-members-chips');
 const chatTranscriptEl = document.getElementById('chat-transcript');
 const chatInputEl = document.getElementById('chat-input');
 const chatSendBtn = document.getElementById('chat-send-btn');
@@ -27,9 +48,14 @@ const endWorkConfirmBtn = document.getElementById('end-work-confirm-btn');
 const endWorkCancelBtn = document.getElementById('end-work-cancel-btn');
 const endWorkStatusEl = document.getElementById('end-work-status');
 const modalBackdropEl = document.getElementById('modal-backdrop');
+const fileListPanelEl = document.getElementById('file-list-panel');
+const fileListCloseBtn = document.getElementById('file-list-close-btn');
+const fileListContentEl = document.getElementById('file-list-content');
+const ALL_MODAL_PANELS = () => [restartLeadPanelEl, endWorkPanelEl, fileListPanelEl];
 
-// "새 작업 시작"/"작업 종료" 확인창은 대화창 아래쪽에 인라인으로 뜨면 스크롤 밖이라 눈에 안 띄어서
-// (사용자 피드백), 화면 가운데 팝업(모달)으로 띄운다 — 배경을 어둡게 깔고 그 위에 패널을 얹는다.
+// "새 작업 시작"/"작업 종료"/"변경 파일" 같은 확인창·상세창은 대화창 아래쪽에 인라인으로 뜨면
+// 스크롤 밖이라 눈에 안 띄어서(사용자 피드백), 화면 가운데 팝업(모달)으로 띄운다 — 배경을
+// 어둡게 깔고 그 위에 패널을 얹는다.
 function showModal(panelEl) {
   panelEl.hidden = false;
   modalBackdropEl.hidden = false;
@@ -37,13 +63,96 @@ function showModal(panelEl) {
 
 function hideModal(panelEl) {
   panelEl.hidden = true;
-  if (restartLeadPanelEl.hidden && endWorkPanelEl.hidden) modalBackdropEl.hidden = true;
+  if (ALL_MODAL_PANELS().every(p => p.hidden)) modalBackdropEl.hidden = true;
 }
 
 modalBackdropEl.addEventListener('click', () => {
-  hideModal(restartLeadPanelEl);
-  hideModal(endWorkPanelEl);
+  ALL_MODAL_PANELS().forEach(hideModal);
 });
+
+// "지금 커밋+푸시하면 뭐가 들어가는지"를 보여주는 용도 — 그래서 git의 현재 미커밋 상태를 그대로
+// 보여준다(git add -A로 커밋할 때 포함될 것과 정확히 같음). "이 세션이 건드린 것만" 걸러보려고
+// mtime 필터를 넣었던 적이 있는데, 그건 원하는 질문과 달라서 다시 뺐다.
+let fileListCwd = null; // 지금 열려있는 팝업이 어느 디렉토리 기준인지(파일 클릭 시 diff 조회, 뒤로가기용)
+
+function gitStatusLabel(code) {
+  const map = { M: '수정', A: '추가', D: '삭제', R: '이름변경', C: '복사', U: '충돌', '??': '새 파일' };
+  return map[code] || code;
+}
+
+async function showFileList(cwd) {
+  fileListCwd = cwd;
+  showModal(fileListPanelEl);
+  fileListContentEl.innerHTML = '<p style="color:#777">불러오는 중...</p>';
+  try {
+    const files = await window.api.getChangedFiles(cwd);
+    fileListContentEl.innerHTML = files.length
+      ? files.map(f => `
+          <div class="file-list-item" data-diff-file="${escapeHtml(f.file)}">
+            <span class="file-list-tool">${escapeHtml(gitStatusLabel(f.status))}</span>
+            <span class="file-list-path">${escapeHtml(f.file)}</span>
+          </div>
+        `).join('')
+      : '<p style="color:#777">지금 커밋 대상인 변경사항이 없습니다.</p>';
+  } catch (err) {
+    fileListContentEl.innerHTML = `<p style="color:#f14c4c">불러오지 못했습니다: ${escapeHtml(errMsg(err))}</p>`;
+  }
+}
+
+// diff 텍스트를 한 줄씩 훑어서 +/-/@@ 기준으로 git처럼 색을 입힌다.
+function renderDiffLines(diffText) {
+  return diffText.split('\n').map(line => {
+    let cls = 'diff-ctx';
+    if (line.startsWith('+++') || line.startsWith('---')) cls = 'diff-meta';
+    else if (line.startsWith('@@')) cls = 'diff-hunk';
+    else if (line.startsWith('+')) cls = 'diff-add';
+    else if (line.startsWith('-')) cls = 'diff-del';
+    return `<div class="diff-line ${cls}">${escapeHtml(line) || '&nbsp;'}</div>`;
+  }).join('');
+}
+
+async function showFileDiff(file) {
+  const cwd = fileListCwd;
+  fileListContentEl.innerHTML = `
+    <button class="diff-back-btn">← 목록으로</button>
+    <div class="diff-path">${escapeHtml(file)}</div>
+    <p style="color:#777">불러오는 중...</p>
+  `;
+  try {
+    const { diff, isNew, binary } = await window.api.getFileDiff(cwd, file);
+    let body;
+    if (binary) {
+      body = '<p style="color:#777">바이너리 파일이라 내용을 보여줄 수 없습니다.</p>';
+    } else if (!diff) {
+      body = '<p style="color:#777">내용이 없거나 삭제된 파일입니다.</p>';
+    } else if (isNew) {
+      // 아직 git이 추적 안 하는 새 파일 — 비교 대상이 없으니 전체를 추가된 내용으로 보여준다.
+      body = `<div class="diff-box">${diff.split('\n').map(l => `<div class="diff-line diff-add">+${escapeHtml(l) || '&nbsp;'}</div>`).join('')}</div>`;
+    } else {
+      body = `<div class="diff-box">${renderDiffLines(diff)}</div>`;
+    }
+    fileListContentEl.innerHTML = `
+      <button class="diff-back-btn">← 목록으로</button>
+      <div class="diff-path">${escapeHtml(file)}</div>
+      ${body}
+    `;
+  } catch (err) {
+    fileListContentEl.innerHTML = `
+      <button class="diff-back-btn">← 목록으로</button>
+      <p style="color:#f14c4c">불러오지 못했습니다: ${escapeHtml(errMsg(err))}</p>
+    `;
+  }
+}
+
+// 목록/diff 둘 다 fileListContentEl을 통째로 다시 그리는 구조라, 개별 리스너 대신 위임 하나로 처리한다.
+fileListContentEl.addEventListener('click', e => {
+  const backBtn = e.target.closest('.diff-back-btn');
+  if (backBtn) { showFileList(fileListCwd); return; }
+  const item = e.target.closest('[data-diff-file]');
+  if (item) showFileDiff(item.dataset.diffFile);
+});
+
+fileListCloseBtn.addEventListener('click', () => hideModal(fileListPanelEl));
 const launchFormPanelEl = document.getElementById('launch-form-panel');
 const cancelFormBtn = document.getElementById('cancel-form-btn');
 const adoptFormPanelEl = document.getElementById('adopt-form-panel');
@@ -62,7 +171,8 @@ const addMemberPanelEl = document.getElementById('add-member-panel');
 const memberTemplateSelect = document.getElementById('member-template-select');
 const memberDirSelect = document.getElementById('member-dir-select');
 const pickMemberDirBtn = document.getElementById('pick-member-dir-btn');
-const memberRoleInput = document.getElementById('member-role');
+const memberRoleSelect = document.getElementById('member-role-select');
+const memberRoleCustom = document.getElementById('member-role-custom');
 const memberInstructionEl = document.getElementById('member-instruction');
 const addMemberSubmitBtn = document.getElementById('add-member-submit-btn');
 const cancelAddMemberBtn = document.getElementById('cancel-add-member-btn');
@@ -88,10 +198,12 @@ const browseFavBtn = document.getElementById('browse-fav-btn');
 const favAddBtn = document.getElementById('fav-add-btn');
 const favoritesListEl = document.getElementById('favorites-list');
 
+const newTplScopeSelect = document.getElementById('new-tpl-scope-select');
 const newTplDirSelect = document.getElementById('new-tpl-dir-select');
 const pickTplDirBtn = document.getElementById('pick-tpl-dir-btn');
 const newTplName = document.getElementById('new-tpl-name');
-const newTplRole = document.getElementById('new-tpl-role');
+const newTplRoleSelect = document.getElementById('new-tpl-role-select');
+const newTplRoleCustom = document.getElementById('new-tpl-role-custom');
 const newTplInstruction = document.getElementById('new-tpl-instruction');
 const tplAddBtn = document.getElementById('tpl-add-btn');
 const memberTemplatesListEl = document.getElementById('member-templates-list');
@@ -107,6 +219,40 @@ let lastLeadIds = new Set();
 // 같은 팀장에 여러 조작이 겹치면 세션이 갈라질 수 있어서(main.ts의 leadId 큐 참고), 진행 중엔 관련
 // 버튼을 비활성화해 사용자가 겹쳐서 누르는 걸 막는다.
 const busyLeadIds = new Set();
+
+// 역할 선택(정해진 역할 드롭다운 + "직접 입력") 공용 헬퍼 — work 탭 팀원 직접 추가와 설정 탭
+// 템플릿 등록 두 군데에서 똑같이 쓴다. 실제 값은 하나(select 값, 단 __custom__이면 custom input 값).
+function wireRoleFields(selectEl, customEl) {
+  selectEl.addEventListener('change', () => {
+    customEl.hidden = selectEl.value !== '__custom__';
+    if (selectEl.value === '__custom__') customEl.focus();
+  });
+}
+
+function getRoleValue(selectEl, customEl) {
+  return selectEl.value === '__custom__' ? customEl.value.trim() : selectEl.value;
+}
+
+// 템플릿을 불러오거나 폼을 초기화할 때, 저장된 role 문자열을 드롭다운/커스텀 입력 상태로 되돌린다.
+function setRoleValue(selectEl, customEl, value) {
+  const isPreset = [...selectEl.options].some(o => o.value === value && o.value !== '__custom__' && o.value !== '');
+  if (!value) {
+    selectEl.value = '';
+    customEl.hidden = true;
+    customEl.value = '';
+  } else if (isPreset) {
+    selectEl.value = value;
+    customEl.hidden = true;
+    customEl.value = '';
+  } else {
+    selectEl.value = '__custom__';
+    customEl.hidden = false;
+    customEl.value = value;
+  }
+}
+
+wireRoleFields(memberRoleSelect, memberRoleCustom);
+wireRoleFields(newTplRoleSelect, newTplRoleCustom);
 
 function statusClass(row) {
   if (row.offline) return 'status-offline';
@@ -173,18 +319,31 @@ function setSelectValuePreserving(selectEl, options, preferredValue) {
 
 // ---------------- 작업 탭: 팀장 ----------------
 
+// 팀장이 idle/완료 상태여도, 자기 팀원이 아직 작업 중이면 실제로는 "끝난 게" 아니라 그 결과를
+// 기다리는 중이다 — 완료/대기 중이라고 뜨면 사용자가 "아 끝났나보다" 하고 놓치기 쉬우니 구분한다.
+function hasBusyMember(leadId) {
+  return lastRows.some(r => !r.isLead && r.leadId === leadId && (r.status || r.state || '').toLowerCase() === 'busy');
+}
+
 function renderLeadCard(row) {
-  const statusLabel = statusLabelKo(row);
+  const ownStatus = row.offline ? '' : (row.state === 'done' ? 'done' : (row.status || row.state || '').toLowerCase());
+  const waitingOnMember = !row.offline && (ownStatus === 'idle' || ownStatus === 'done') && hasBusyMember(row.id);
+  const statusLabel = waitingOnMember ? '⏳ 팀원 작업 대기중' : statusLabelKo(row);
+  const cardStatusClass = waitingOnMember ? 'status-busy' : statusClass(row);
   const selected = row.id === selectedLeadId ? 'selected' : '';
   return `
-    <div class="session-card lead-card ${statusClass(row)} ${selected}" data-lead="${escapeHtml(row.id)}">
+    <div class="session-card lead-card ${cardStatusClass} ${selected}" data-lead="${escapeHtml(row.id)}">
       <div class="top-line">
         <input class="lead-label-input" data-lead-label="${escapeHtml(row.id)}" value="${escapeHtml(row.label || '')}" placeholder="${escapeHtml(row.projectName)}" />
         <span>${escapeHtml(statusLabel)}</span>
       </div>
       ${row.name ? `<div class="lead-topic">${escapeHtml(row.name)}</div>` : ''}
       <div class="meta">${escapeHtml(row.cwd)}</div>
-      ${row.offline ? '<div class="offline-hint">메시지를 보내면 다시 이어집니다</div>' : `<div class="actions"><button data-attach="${escapeHtml(row.id)}">터미널 열기</button></div>`}
+      ${row.offline ? '<div class="offline-hint">메시지를 보내면 다시 이어집니다</div>' : ''}
+      <div class="actions">
+        ${row.offline ? '' : `<button data-attach="${escapeHtml(row.id)}">터미널 열기</button>`}
+        <button data-files="${escapeHtml(row.cwd)}">커밋 대상</button>
+      </div>
     </div>
   `;
 }
@@ -196,6 +355,10 @@ async function selectLead(leadId) {
   hideModal(endWorkPanelEl);
   chatTranscriptEl.innerHTML = ''; // 새 팀장의 대화를 불러오는 동안 이전 팀장의 대화가 잠깐 보이는 걸 막는다
   await renderChat();
+  // "이 팀장 전용" 템플릿 드롭다운은 selectedLeadId 기준으로 걸러지므로, 팀장을 바꿀 때마다
+  // 다시 그려야 한다 — 안 그러면 예전에 선택돼있던(혹은 없던) 팀장 기준으로 필터링된 채 굳어버린다.
+  rebuildMemberTemplateSelect();
+  renderMemberRow(); // 팀원 목록도 폴링 안 기다리고 바로 갱신 — lastRows 캐시 기준이라 즉시 가능
   updateLeadSectionVisibility();
   updateMemberSectionVisibility();
   document.querySelectorAll('[data-lead]').forEach(el => {
@@ -212,7 +375,30 @@ function cleanPrompt(prompt) {
   return p || '(초기 지시 없음)';
 }
 
+// 팀장이 팀원 보고를 요약해서 최종 답변에 적어줘도 "그래서 뭐가 바뀌었는데?"는 여전히 안 보인다 —
+// 굳이 팀원 카드까지 내려가서 찾지 않아도, 팀장 대화창 바로 위에서 소속 팀원별 변경 파일을 바로
+// 열어볼 수 있게 한다(터미널 열기처럼 원본을 다 보여주는 게 아니라, 훑어보기 용도로 가볍게).
+function renderLeadMemberChips() {
+  if (!selectedLeadId) { leadMembersChipsEl.innerHTML = ''; return; }
+  const members = lastRows.filter(r => !r.isLead && r.leadId === selectedLeadId);
+  leadMembersChipsEl.innerHTML = members.length
+    ? members.map(m => `
+        <button class="member-chip" data-files="${escapeHtml(m.cwd)}">
+          ${escapeHtml(dirLabel(m.cwd))}${m.role ? ` · ${escapeHtml(m.role)}` : ''} — 커밋 대상
+        </button>
+      `).join('')
+    : '';
+}
+
+// 위 chip은 renderChat()이 돌 때마다(폴링 포함) innerHTML이 통째로 새로 그려지므로, 개별
+// addEventListener 대신 부모에 한 번만 위임 리스너를 건다.
+leadMembersChipsEl.addEventListener('click', e => {
+  const btn = e.target.closest('[data-files]');
+  if (btn) showFileList(btn.dataset.files);
+});
+
 async function renderChat() {
+  renderLeadMemberChips();
   if (!selectedLeadId) {
     chatTranscriptEl.innerHTML = ''; // 선택이 풀렸는데 예전 대화가 그대로 남아있으면 안 된다
     return;
@@ -225,8 +411,14 @@ async function renderChat() {
     return;
   }
   const row = lastRows.find(r => r.isLead && r.id === selectedLeadId);
-  const isBusy = !!row && !row.offline && (row.status || row.state || '').toLowerCase() === 'busy';
-  const busyBanner = isBusy ? '<div class="chat-working">● 작업 중...</div>' : '';
+  const ownStatus = row && !row.offline ? (row.status || row.state || '').toLowerCase() : '';
+  const isBusy = ownStatus === 'busy';
+  const waitingOnMember = !isBusy && !!row && (ownStatus === 'idle' || ownStatus === 'done') && hasBusyMember(row.id);
+  const busyBanner = isBusy
+    ? '<div class="chat-working">● 작업 중...</div>'
+    : waitingOnMember
+      ? '<div class="chat-working">⏳ 팀원 작업 대기중...</div>'
+      : '';
 
   // 3초마다 도는 폴링 갱신마다 무조건 맨 아래로 스크롤하면, 옛날 대화를 읽으려고 위로 스크롤해둔 걸
   // 계속 끌어내린다 — 이미 맨 아래 근처에 있을 때만("계속 따라가기") 다시 맨 아래로 붙인다.
@@ -247,9 +439,16 @@ async function renderChat() {
   updateBusyUI();
 }
 
+// formMode('none'/'launch'/'adopt')만으로는 "팀장이 0개라 launch 폼이 기본으로 뜬 상태"를 못
+// 구분해서, 대화창/팀원 목록 양쪽에서 써야 하는 이 계산을 함수 하나로 뽑아둔다.
+function getEffectiveLeadMode() {
+  const hasLeads = lastLeadIds.size > 0;
+  return formMode === 'none' && !hasLeads ? 'launch' : formMode;
+}
+
 function updateLeadSectionVisibility() {
   const hasLeads = lastLeadIds.size > 0;
-  const effectiveMode = formMode === 'none' && !hasLeads ? 'launch' : formMode;
+  const effectiveMode = getEffectiveLeadMode();
 
   launchFormPanelEl.hidden = effectiveMode !== 'launch';
   adoptFormPanelEl.hidden = effectiveMode !== 'adopt';
@@ -299,15 +498,35 @@ async function sendChatMessage() {
   chatInputEl.value = '';
   busyLeadIds.add(leadId);
   updateBusyUI();
+
+  // 응답이 올 때까지(길게는 수십 초) 방금 보낸 메시지가 화면에 전혀 안 보이면 전송이 안 된 것처럼
+  // 보인다 — 실제 응답이 오기 전까지 낙관적으로 먼저 채팅창에 얹어서 보여준다. 응답이 오면
+  // renderChat()이 서버 기록 기준으로 다시 그리면서 이 임시 말풍선을 자연스럽게 대체한다.
+  const wasNearBottom = chatTranscriptEl.scrollHeight - chatTranscriptEl.scrollTop - chatTranscriptEl.clientHeight < 40;
+  const optimisticTurn = document.createElement('div');
+  optimisticTurn.className = 'chat-turn';
+  optimisticTurn.innerHTML = `
+    <div class="chat-time">${escapeHtml(new Date().toLocaleTimeString('ko-KR'))}</div>
+    <div class="chat-prompt">▸ ${escapeHtml(message)}</div>
+    <div class="chat-answer chat-pending">응답을 기다리는 중...</div>
+  `;
+  chatTranscriptEl.appendChild(optimisticTurn);
+  if (wasNearBottom) chatTranscriptEl.scrollTop = chatTranscriptEl.scrollHeight;
+
   try {
     const id = await window.api.sendToLead(leadId, message);
     if (!id) {
       // 오프라인 팀장을 이어하려다 실패한 경우(세션 만료 등) 여기서 걸린다 — 조용히 넘어가지 않는다.
+      optimisticTurn.remove();
       chatTranscriptEl.insertAdjacentHTML('beforeend', '<p style="color:#f14c4c">이어하기에 실패했습니다 — 세션이 만료됐거나 claude CLI 실행에 문제가 있을 수 있습니다.</p>');
       return;
     }
+    // resumeLead가 다른 짧은 id로 깨어날 수 있다(main.ts resumeLead 주석 참고) — 반영하지 않으면
+    // 대화창 선택이 풀려서 방금 보낸 대화가 사라진 것처럼 보인다.
+    selectedLeadId = id;
     await renderChat();
   } catch (err) {
+    optimisticTurn.remove();
     chatTranscriptEl.insertAdjacentHTML('beforeend', `<p style="color:#f14c4c">이어하기 중 오류가 발생했습니다: ${escapeHtml(errMsg(err))}</p>`);
   } finally {
     busyLeadIds.delete(leadId);
@@ -339,6 +558,7 @@ restartConfirmBtn.addEventListener('click', async () => {
       hideModal(restartLeadPanelEl);
       restartStatusEl.textContent = '';
       await renderChat();
+      renderMemberRow(); // 새 세션이라 소속 팀원이 없을 테니, 폴링 안 기다리고 바로 비워서 보여준다
     } else {
       restartStatusEl.textContent = '새 세션 시작에 실패했습니다.';
     }
@@ -456,6 +676,7 @@ adoptBtn.addEventListener('click', async () => {
         : `복사본을 연결했습니다(${id}). 원본 세션은 그대로입니다.`;
       formMode = 'none';
       selectedLeadId = id;
+      renderMemberRow(); // 폴링 안 기다리고 이 팀장 소속 팀원으로 바로 갱신
       updateLeadSectionVisibility();
     } else {
       adoptStatusEl.textContent = '연결에 실패했습니다 — 세션이 이미 종료됐을 수 있습니다.';
@@ -583,6 +804,7 @@ function renderMemberCard(row, leadLabelById) {
       <div class="preview">${preview}</div>
       <div class="actions">
         ${attachBtn}
+        <button data-files="${escapeHtml(row.cwd)}">커밋 대상</button>
         <button data-refresh-member="${escapeHtml(row.id)}" title="이 팀원 최신 상태 새로고침">⟳</button>
         <button class="stop-btn" data-stop-member="${escapeHtml(row.id)}" title="이 팀원 세션 종료">삭제</button>
       </div>
@@ -628,52 +850,83 @@ function renderBoard(rows) {
   if (selectedLeadId && !lastLeadIds.has(selectedLeadId)) selectedLeadId = null;
   if (!selectedLeadId && onlineLeads.length > 0 && formMode === 'none') selectedLeadId = onlineLeads[0].id;
 
+  // 여기서도 selectedLeadId가 바뀔 수 있어서(자동 선택 등, selectLead()를 안 거침) 매 폴링마다
+  // 다시 맞춰준다 — IPC 호출 없이 캐시만 쓰는 가벼운 함수라 3초마다 불러도 부담 없다.
+  rebuildMemberTemplateSelect();
+
   updateLeadSectionVisibility();
   updateMemberSectionVisibility();
   if (selectedLeadId) renderChat();
 
-  const leadLabelById = new Map(leads.map(l => [l.id, l.label || l.projectName]));
-  memberRowEl.innerHTML = members.length
-    ? members.map(row => renderMemberCard(row, leadLabelById)).join('')
-    : '<div class="empty-hint">떠있는 팀원이 없습니다.</div>';
-
-  document.querySelectorAll('[data-attach]').forEach(btn => {
-    btn.addEventListener('click', async e => {
-      e.stopPropagation(); // 팀장 카드 안 버튼일 땐 카드 클릭(selectLead)까지 같이 안 타게
-      try {
-        await window.api.openInTerminal(btn.dataset.attach);
-      } catch (err) {
-        console.error('터미널 열기 실패:', err);
-      }
-    });
-  });
-
-  document.querySelectorAll('[data-refresh-member]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      btn.disabled = true;
-      try {
-        await refreshBoardNow();
-      } catch (err) {
-        console.error('새로고침 실패:', err);
-      } finally {
-        btn.disabled = false;
-      }
-    });
-  });
-
-  document.querySelectorAll('[data-stop-member]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      btn.disabled = true;
-      try {
-        await window.api.stopBackgroundSession(btn.dataset.stopMember);
-      } catch (err) {
-        console.error('팀원 세션 종료 실패:', err);
-      } finally {
-        await refreshBoardNow();
-      }
-    });
-  });
+  renderMemberRow();
 }
+
+// 팀장 선택이 바뀔 때(카드 클릭, 자동 선택, 재시작/작업종료 등) 3초 폴링을 기다리지 않고 바로
+// 반영되도록 멤버 행 렌더링을 별도 함수로 뺐다 — lastRows는 이미 캐시돼있으니 IPC 없이 즉시
+// 다시 그릴 수 있다. 버튼 클릭 리스너는 아래 workTabEl 위임 하나로 처리하므로 여기서 매번
+// 새로 안 걸어도 된다(그래서 이 함수를 몇 번을 다시 불러도 리스너가 중복되지 않는다).
+function renderMemberRow() {
+  const leadLabelById = new Map(lastRows.filter(r => r.isLead).map(l => [l.id, l.label || l.projectName]));
+  const members = lastRows.filter(r => !r.isLead);
+  // 팀장을 바꿔도 팀원 목록이 그대로 다 보이면, 지금 보는 게 어느 팀장 소속 팀원인지 헷갈린다 —
+  // 대화창의 "소속 팀원" chip과 마찬가지로 지금 선택된 팀장의 팀원만 보여준다. "+ 새 팀장"/"터미널
+  // 세션 이어가기"처럼 새로 만드는 동작 중(대화창이 설정 폼으로 바뀌는 상태)엔 아직 어느 팀장도
+  // "선택"된 게 아니므로 팀원 목록도 같이 비워서, 예전 팀장의 팀원이 계속 보이는 걸 막는다.
+  const isCreatingLead = getEffectiveLeadMode() !== 'none';
+  const visibleMembers = isCreatingLead ? [] : members.filter(m => m.leadId === selectedLeadId);
+  memberRowEl.innerHTML = isCreatingLead
+    ? ''
+    : visibleMembers.length
+      ? visibleMembers.map(row => renderMemberCard(row, leadLabelById)).join('')
+      : '<div class="empty-hint">이 팀장 소속의 팀원이 없습니다.</div>';
+}
+
+// 팀장/팀원 카드의 액션 버튼들은 폴링·선택 변경마다 innerHTML이 통째로 다시 그려지므로, 매번
+// addEventListener를 새로 걸면 예전 리스너가 안 지워진 채 쌓일 위험이 있다 — 그래서 작업 탭
+// 전체에 한 번만 위임 리스너를 걸어서 이 문제 자체를 없앤다. capture:true로 걸어서, 팀장 카드
+// 자체의 클릭(selectLead) 리스너보다 먼저 처리하고 stopPropagation으로 그쪽을 막을 수 있게 한다.
+const workTabEl = document.getElementById('work-tab');
+workTabEl.addEventListener('click', async e => {
+  const attachBtn = e.target.closest('[data-attach]');
+  if (attachBtn) {
+    e.stopPropagation();
+    try {
+      await window.api.openInTerminal(attachBtn.dataset.attach);
+    } catch (err) {
+      console.error('터미널 열기 실패:', err);
+    }
+    return;
+  }
+  const filesBtn = e.target.closest('[data-files]');
+  if (filesBtn) {
+    e.stopPropagation();
+    await showFileList(filesBtn.dataset.files);
+    return;
+  }
+  const refreshBtn = e.target.closest('[data-refresh-member]');
+  if (refreshBtn) {
+    refreshBtn.disabled = true;
+    try {
+      await refreshBoardNow();
+    } catch (err) {
+      console.error('새로고침 실패:', err);
+    } finally {
+      refreshBtn.disabled = false;
+    }
+    return;
+  }
+  const stopBtn = e.target.closest('[data-stop-member]');
+  if (stopBtn) {
+    stopBtn.disabled = true;
+    try {
+      await window.api.stopBackgroundSession(stopBtn.dataset.stopMember);
+    } catch (err) {
+      console.error('팀원 세션 종료 실패:', err);
+    } finally {
+      await refreshBoardNow();
+    }
+  }
+}, true);
 
 // 3초 폴링을 기다리지 않고 지금 바로 보드를 다시 그린다 — 카드의 새로고침/삭제 버튼에서 쓴다.
 async function refreshBoardNow() {
@@ -690,10 +943,11 @@ async function refreshBoardNow() {
 // ---------------- 작업 탭: 팀원 직접 추가 ----------------
 
 function updateMemberSectionVisibility() {
+  const hasSelectedLead = !!selectedLeadId && getEffectiveLeadMode() === 'none';
   addMemberPanelEl.hidden = !showAddMember;
   addMemberBtn.hidden = showAddMember;
-  addMemberBtn.disabled = !selectedLeadId;
-  addMemberBtn.title = selectedLeadId ? '' : '먼저 위에서 팀장을 선택하세요';
+  addMemberBtn.disabled = !hasSelectedLead;
+  addMemberBtn.title = hasSelectedLead ? '' : '먼저 위에서 팀장을 선택하세요';
 }
 
 addMemberBtn.addEventListener('click', () => {
@@ -704,7 +958,7 @@ addMemberBtn.addEventListener('click', () => {
   memberCustomPickedDir = null;
   memberDirSelect.value = '';
   memberTemplateSelect.value = '';
-  memberRoleInput.value = '';
+  setRoleValue(memberRoleSelect, memberRoleCustom, '');
   memberInstructionEl.value = '';
   addMemberSubmitBtn.disabled = true;
   updateMemberSectionVisibility();
@@ -721,15 +975,17 @@ memberTemplateSelect.addEventListener('change', async () => {
     const templates = await window.api.getMemberTemplates();
     const tpl = templates.find(t => t.id === memberTemplateSelect.value);
     if (!tpl) return;
-    memberRoleInput.value = tpl.role;
+    setRoleValue(memberRoleSelect, memberRoleCustom, tpl.role);
     memberInstructionEl.value = tpl.instruction;
-    if (tpl.category === 'worker' && tpl.path) {
-      // 일꾼 템플릿은 디렉토리가 고정돼 있으니 그대로 채운다.
-      memberCustomPickedDir = null;
+    if (tpl.path) {
+      // 디렉토리가 고정된 템플릿은 그대로 채운다 — 그 경로가 즐겨찾기에 등록 안 돼있으면
+      // memberDirSelect 옵션 목록에 아예 없어서 .value 대입이 조용히 실패하니, customDir로
+      // 넣어서 옵션에 강제로 포함시킨 뒤 채운다.
+      memberCustomPickedDir = tpl.path;
       await renderFavorites(); // 드롭다운을 다시 그려서 tpl.path가 선택 가능한 상태로 만든 뒤
       memberDirSelect.value = tpl.path;
     }
-    // 전반 역할 템플릿은 디렉토리가 없으므로 memberDirSelect는 그대로 두고 사용자가 직접 고르게 한다.
+    // 디렉토리가 없는 템플릿은 memberDirSelect를 그대로 두고 사용자가 직접 고르게 한다.
     addMemberSubmitBtn.disabled = !memberDirSelect.value;
   } catch (err) {
     addMemberStatusEl.textContent = `템플릿을 불러오지 못했습니다: ${errMsg(err)}`;
@@ -761,11 +1017,11 @@ addMemberSubmitBtn.addEventListener('click', async () => {
   addMemberSubmitBtn.disabled = true;
   addMemberStatusEl.textContent = '추가하는 중...';
   try {
-    const id = await window.api.launchMember(selectedLeadId, memberDirSelect.value, memberInstructionEl.value.trim(), memberRoleInput.value.trim());
+    const id = await window.api.launchMember(selectedLeadId, memberDirSelect.value, memberInstructionEl.value.trim(), getRoleValue(memberRoleSelect, memberRoleCustom));
     if (id) {
       addMemberStatusEl.textContent = `팀원을 추가했습니다(${id}).`;
       memberInstructionEl.value = '';
-      memberRoleInput.value = '';
+      setRoleValue(memberRoleSelect, memberRoleCustom, '');
       memberTemplateSelect.value = '';
       showAddMember = false;
       updateMemberSectionVisibility();
@@ -883,7 +1139,14 @@ async function renderFavorites() {
   setSelectValuePreserving(memberDirSelect, buildDirOptionsHtml(favs, memberCustomPickedDir, '-- 등록된 디렉토리에서 선택 --'), memberCustomPickedDir);
   addMemberSubmitBtn.disabled = !memberDirSelect.value;
 
-  setSelectValuePreserving(newTplDirSelect, buildDirOptionsHtml(favs, tplCustomPickedDir, '-- 팀장 디렉토리에서 선택 (비우면 공용) --'), tplCustomPickedDir);
+  setSelectValuePreserving(newTplDirSelect, buildDirOptionsHtml(favs, tplCustomPickedDir, '-- 이 팀원이 일할 디렉토리 선택 (비워도 됨) --'), tplCustomPickedDir);
+
+  // "소속" — 공통(모든 팀장) 또는 등록된 팀장 디렉토리 중 하나(그 팀장 전용). 디렉토리(위 선택)와는
+  // 독립적인 축이라 별도 목록으로 관리한다.
+  const scopeOptions = ['<option value="shared">공통 (모든 팀장 사용 가능)</option>']
+    .concat(favs.map(f => `<option value="${escapeHtml(f.path)}">${escapeHtml(f.name)} 팀장 전용</option>`))
+    .join('');
+  setSelectValuePreserving(newTplScopeSelect, scopeOptions, newTplScopeSelect.value);
 }
 renderFavorites();
 
@@ -934,6 +1197,7 @@ launchBtn.addEventListener('click', async () => {
       launchStatusEl.textContent = `팀장 세션(${id})을 시작했습니다.`;
       formMode = 'none';
       selectedLeadId = id;
+      renderMemberRow(); // 새 팀장이라 소속 팀원이 없을 테니, 폴링 안 기다리고 바로 비워서 보여준다
     } else {
       launchStatusEl.textContent = '팀장 세션 시작에 실패했습니다 — claude CLI 실행 결과를 확인해주세요.';
     }
@@ -946,7 +1210,10 @@ launchBtn.addEventListener('click', async () => {
 
 // ---------------- 설정 탭 ②: 팀원 등록(역할 템플릿) ----------------
 
-function renderTemplateCard(t) {
+function renderTemplateCard(t, favNameByPath) {
+  const dirLine = t.path
+    ? `<div class="tpl-path">${escapeHtml(favNameByPath.get(t.path) || t.path)}</div>`
+    : '<div class="tpl-path">(쓸 때마다 대상 디렉토리를 고름)</div>';
   return `
     <div class="template-card ${t.approved ? 'approved' : ''}">
       <div class="tpl-top">
@@ -954,28 +1221,63 @@ function renderTemplateCard(t) {
         <input class="tpl-role" value="${escapeHtml(t.role)}" placeholder="역할" readonly title="등록 후에는 역할을 바꿀 수 없습니다 — 새로 등록해주세요" />
         <span class="remove" data-remove-tpl="${escapeHtml(t.id)}">×</span>
       </div>
+      ${dirLine}
       <textarea class="tpl-instruction" rows="2" readonly title="등록 후에는 기본 지시를 바꿀 수 없습니다 — 새로 등록해주세요">${escapeHtml(t.instruction)}</textarea>
-      ${t.category === 'worker' ? `
+      ${t.path ? `
       <div class="tpl-bottom">
         <label class="tpl-approved-label">
           <input type="checkbox" data-approve-tpl="${escapeHtml(t.id)}" ${t.approved ? 'checked' : ''} />
-          사전승인 (모든 팀장에게 자동 안내)
+          사전승인 (소속 팀장에게 자동 안내)
         </label>
       </div>` : ''}
     </div>
   `;
 }
 
-function renderTplGroup(title, path, list) {
+function renderTplGroup(title, list, favNameByPath) {
   return `
     <div class="tpl-group">
-      <div class="tpl-group-title">${escapeHtml(title)}${path ? `<span class="tpl-group-path">${escapeHtml(path)}</span>` : ''}</div>
-      ${list.map(renderTemplateCard).join('')}
+      <div class="tpl-group-title">${escapeHtml(title)}</div>
+      ${list.map(t => renderTemplateCard(t, favNameByPath)).join('')}
     </div>
   `;
 }
 
-// 팀장(프로젝트) 소속과 공용 역할을 그룹으로 묶어서 보여준다 — 어디서 쓰이는 팀원인지 한눈에 구분되게.
+// "소속"(공통 또는 특정 팀장 전용)으로 그룹을 묶어서 보여준다 — 어느 팀장이 쓸 수 있는 팀원인지
+// 한눈에 구분되게. 팀원 자신이 일할 디렉토리(path)는 카드 안에 별도로 표시한다.
+//
+// 작업 탭 드롭다운(memberTemplateSelect)은 "지금 선택된 팀장"에 따라 필터링되는데, selectedLeadId는
+// 팀장을 새로 띄우거나 카드를 클릭하거나 폴링으로 자동 선택되는 등 여러 경로로 바뀐다 — 그때마다
+// 매번 이 무거운 함수(IPC 두 번 호출) 전체를 다시 부르는 대신, 마지막으로 불러온 템플릿 목록을
+// 캐싱해두고 드롭다운만 즉시(동기적으로) 다시 그리는 rebuildMemberTemplateSelect를 따로 둔다.
+let cachedTemplates = [];
+let cachedFavNameByPath = new Map();
+
+function rebuildMemberTemplateSelect() {
+  const shared = cachedTemplates.filter(t => !t.scope || t.scope === 'shared');
+  const byLead = new Map();
+  cachedTemplates.filter(t => t.scope && t.scope !== 'shared').forEach(t => {
+    if (!byLead.has(t.scope)) byLead.set(t.scope, []);
+    byLead.get(t.scope).push(t);
+  });
+
+  const currentLeadDir = lastRows.find(r => r.isLead && r.id === selectedLeadId)?.cwd;
+  const tplOption = t => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.name)}${t.role ? ` (${escapeHtml(t.role)})` : ''}</option>`;
+  const optgroups = [];
+  if (shared.length) optgroups.push(`<optgroup label="공통">${shared.map(tplOption).join('')}</optgroup>`);
+  [...byLead.entries()].forEach(([leadDir, list]) => {
+    if (leadDir !== currentLeadDir) return;
+    optgroups.push(`<optgroup label="${escapeHtml(cachedFavNameByPath.get(leadDir) || dirLabel(leadDir))} 팀장 전용">${list.map(tplOption).join('')}</optgroup>`);
+  });
+  // 3초 폴링마다 이 함수가 다시 불릴 수 있어서, innerHTML을 그냥 덮어쓰면 사용자가 방금 고른 값이
+  // 매번 초기화돼버린다 — 다른 select들과 같은 패턴으로 지금 선택값을 보존한다.
+  setSelectValuePreserving(
+    memberTemplateSelect,
+    `<option value="">-- 등록된 팀원 템플릿에서 불러오기 (선택) --</option>${optgroups.join('')}`,
+    memberTemplateSelect.value,
+  );
+}
+
 async function renderMemberTemplates() {
   let templates, favs;
   try {
@@ -985,19 +1287,20 @@ async function renderMemberTemplates() {
     return;
   }
   const favNameByPath = new Map(favs.map(f => [f.path, f.name]));
+  cachedTemplates = templates;
+  cachedFavNameByPath = favNameByPath;
 
-  const general = templates.filter(t => t.category === 'general');
-  const byPath = new Map();
-  templates.filter(t => t.category === 'worker').forEach(t => {
-    const key = t.path || '';
-    if (!byPath.has(key)) byPath.set(key, []);
-    byPath.get(key).push(t);
+  const shared = templates.filter(t => !t.scope || t.scope === 'shared');
+  const byLead = new Map();
+  templates.filter(t => t.scope && t.scope !== 'shared').forEach(t => {
+    if (!byLead.has(t.scope)) byLead.set(t.scope, []);
+    byLead.get(t.scope).push(t);
   });
 
   const groups = [];
-  if (general.length) groups.push(renderTplGroup('공용 (프로젝트 안 가림)', null, general));
-  [...byPath.entries()].forEach(([dirPath, list]) => {
-    groups.push(renderTplGroup(favNameByPath.get(dirPath) || dirLabel(dirPath), dirPath, list));
+  if (shared.length) groups.push(renderTplGroup('공통 (모든 팀장 사용 가능)', shared, favNameByPath));
+  [...byLead.entries()].forEach(([leadDir, list]) => {
+    groups.push(renderTplGroup(`${favNameByPath.get(leadDir) || dirLabel(leadDir)} 팀장 전용`, list, favNameByPath));
   });
 
   memberTemplatesListEl.innerHTML = groups.length ? groups.join('') : '<div class="empty-hint">등록된 팀원이 없습니다.</div>';
@@ -1036,14 +1339,9 @@ async function renderMemberTemplates() {
     });
   });
 
-  // 작업 탭의 "등록된 팀원 템플릿에서 불러오기" 드롭다운도 같이 갱신 — 여기도 소속(공용/프로젝트)별로 묶는다.
-  const tplOption = t => `<option value="${escapeHtml(t.id)}">${escapeHtml(t.name)}${t.role ? ` (${escapeHtml(t.role)})` : ''}</option>`;
-  const optgroups = [];
-  if (general.length) optgroups.push(`<optgroup label="공용">${general.map(tplOption).join('')}</optgroup>`);
-  [...byPath.entries()].forEach(([dirPath, list]) => {
-    optgroups.push(`<optgroup label="${escapeHtml(favNameByPath.get(dirPath) || dirLabel(dirPath))}">${list.map(tplOption).join('')}</optgroup>`);
-  });
-  memberTemplateSelect.innerHTML = `<option value="">-- 등록된 팀원 템플릿에서 불러오기 (선택) --</option>${optgroups.join('')}`;
+  // 작업 탭의 "등록된 팀원 템플릿에서 불러오기" 드롭다운도 같이 갱신 — 지금 선택된 팀장 전용
+  // 템플릿 중 "다른 팀장 전용"인 건 빼고, 공통 + 이 팀장 전용만 보여준다.
+  rebuildMemberTemplateSelect();
 }
 renderMemberTemplates();
 
@@ -1060,13 +1358,14 @@ pickTplDirBtn.addEventListener('click', async () => {
 });
 
 tplAddBtn.addEventListener('click', async () => {
-  const category = newTplDirSelect.value ? 'worker' : 'general';
+  const scope = newTplScopeSelect.value || 'shared';
   try {
-    await window.api.addMemberTemplate(category, newTplDirSelect.value, newTplName.value.trim(), newTplRole.value.trim(), newTplInstruction.value.trim());
+    await window.api.addMemberTemplate(scope, newTplDirSelect.value, newTplName.value.trim(), getRoleValue(newTplRoleSelect, newTplRoleCustom), newTplInstruction.value.trim());
     newTplName.value = '';
-    newTplRole.value = '';
+    setRoleValue(newTplRoleSelect, newTplRoleCustom, '');
     newTplInstruction.value = '';
     newTplDirSelect.value = '';
+    newTplScopeSelect.value = 'shared';
     tplCustomPickedDir = null;
   } catch (err) {
     console.error('팀원 템플릿 등록 실패:', err);
