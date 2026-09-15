@@ -193,7 +193,16 @@ section h2, .section-header h2 { font-size: 12px; text-transform: uppercase; col
   margin-top: 0;
 }
 #file-list-panel { width: 720px; }
-#file-list-panel .section-header { margin-bottom: 8px; }
+/* .modal-panel 자체도 스크롤 컨테이너(overflow-y:auto)라서, 안에 있는 이 헤더(닫기 버튼 포함)도
+   .diff-back-btn과 똑같이 스크롤하면 같이 밀려 올라가 사라진다 — 같은 패턴이라 같이 고정한다.
+   배경색이 부모(.modal-panel)와 같아서, sticky 기준선(top:0) 위 패딩 영역과 자연스럽게 이어진다. */
+#file-list-panel .section-header {
+  margin-bottom: 8px;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--surface);
+}
 #file-list-content { max-height: 65vh; overflow-y: auto; }
 .file-list-item {
   display: flex;
@@ -217,7 +226,10 @@ section h2, .section-header h2 { font-size: 12px; text-transform: uppercase; col
 .file-list-path { flex: 1; min-width: 0; word-break: break-all; color: var(--text); }
 .file-list-count { flex-shrink: 0; color: var(--accent-2); font-size: 10px; }
 
-.diff-back-btn { background: var(--border-2); color: var(--text); font-size: 11px; padding: 3px 8px; margin-bottom: 8px; }
+/* #file-list-content(scroll 컨테이너) 안의 평범한 인라인 요소라서 스크롤하면 같이 밀려 올라가
+   사라졌다 — sticky로 스크롤해도 상단에 고정되게 한다. 이미 불투명한 배경이 있어서 아래 내용이
+   비쳐 보이지 않는다. */
+.diff-back-btn { background: var(--border-2); color: var(--text); font-size: 11px; padding: 3px 8px; margin-bottom: 8px; position: sticky; top: 0; z-index: 2; }
 .diff-path { color: var(--accent-3); font-size: 12px; word-break: break-all; margin-bottom: 8px; }
 .diff-box {
   font-family: ui-monospace, "Cascadia Code", Consolas, monospace;

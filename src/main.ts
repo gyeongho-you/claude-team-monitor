@@ -354,6 +354,14 @@ const MEMBER_CLEANUP_GRACE_MS = 15000;
 const MEMBER_CLEANUP_MISS_THRESHOLD = 2;
 const memberMissStreaks = new Map<string, number>();
 
+// 팀장도 팀원 정리와 완전히 같은 TOCTOU를 겪는다 — 멀쩡히 응답 중이던 팀장도 채팅을 보낼 때마다
+// stop→resume이 도는데, 그 짧은 재기동 구간엔 agents 스냅샷에서 한 번 빠질 수 있다. 그 순간 바로
+// "오프라인"으로 분류해버리면 온라인 목록(카드)에서 사라지고 히스토리 탭으로 밀려난다(채팅을 자주
+// 보낼수록 자주 재현됨). 팀원과 동일하게 연속 미스 카운터를 둬서 threshold 이상 연속으로 못 잡힐
+// 때만 오프라인으로 분류한다.
+const LEAD_OFFLINE_MISS_THRESHOLD = 2;
+const leadMissStreaks = new Map<string, number>();
+
 // 보드에는 "내가 띄운 팀장"과 "팀장이 등록한 팀원"만 보여준다 — 그 외(사용자가 따로 열어둔 무관한
 // 세션 등)는 team-lead 체계 밖이므로 제외한다. interactive 세션은 애초에 짧은 id가 없어서 자동으로 빠진다.
 async function buildSessionRows(): Promise<{ rows: SessionRow[]; requests: MemberRequest[] }> {
@@ -420,8 +428,28 @@ async function buildSessionRows(): Promise<{ rows: SessionRow[]; requests: Membe
 
   // 지금 떠있지 않은 팀장은 기록을 지우지 않고 "오프라인"으로 남겨둔다 — PC 재부팅 등으로 프로세스가
   // 죽어도 세션 자체는 claude 쪽에 남아있어서 --bg --resume으로 다시 깨울 수 있기 때문이다(대화창에서
-  // 메시지를 보내면 자동으로 이 절차를 탄다, resumeLead 참고).
-  const offlineLeads = leads.filter(l => !agentIdSet.has(l.id));
+  // 메시지를 보내면 자동으로 이 절차를 탄다, resumeLead 참고). 단, agents 스냅샷에 한 번 안 잡힌
+  // 것만으로 바로 오프라인 처리하지 않는다(LEAD_OFFLINE_MISS_THRESHOLD 주석 참고) — 연속 미스가
+  // threshold 미만이면 이번 폴링에서만 목록에 안 잡히고, 다음 폴링에 스스로 복구된다.
+  const offlineLeads: LeadRecord[] = [];
+  leads.forEach(l => {
+    if (agentIdSet.has(l.id)) {
+      leadMissStreaks.delete(l.id);
+      return;
+    }
+    const misses = (leadMissStreaks.get(l.id) ?? 0) + 1;
+    if (misses < LEAD_OFFLINE_MISS_THRESHOLD) {
+      leadMissStreaks.set(l.id, misses);
+      return;
+    }
+    offlineLeads.push(l);
+  });
+  // 다른 경로로 이미 사라진(현재는 없지만 혹시 모를) leadId의 미스 카운터를 정리해 Map이 무한정
+  // 자라지 않게 한다 — 팀원 정리 로직과 동일한 방어.
+  const currentLeadIds = new Set(leads.map(l => l.id));
+  for (const key of leadMissStreaks.keys()) {
+    if (!currentLeadIds.has(key)) leadMissStreaks.delete(key);
+  }
   let leadsDirty = false;
   const offlineRows: SessionRow[] = offlineLeads.map(l => {
     const projectName = resolveProjectName(l.sessionId, l.targetDir);
@@ -1047,10 +1075,26 @@ ipcMain.handle('get-lead-transcript', (_e, leadId: string) => {
   return getTranscript(projectName, lead.sessionId);
 });
 
+// claude CLI에는 이미 생성(응답) 중인 세션에 중간에 끼어들어 입력만 추가하는 기능이 없다(claude
+// --help로 확인) — 개입할 수 있는 유일한 수단인 stop→resume은 하던 응답을 그대로 끊어버린다. 그래서
+// 팀장이 지금 busy면 곧바로 stop→resume하지 않고, 팀원 추가 알림(queueLeadNotice)과 완전히 같은
+// 패턴으로 메시지를 큐(pendingNotices)에 원문 그대로 쌓아둔 뒤, buildSessionRows의 폴링이 그 팀장의
+// idle/blocked 전환을 감지했을 때 자동으로 resumeLead에 전달하게 한다. "끊지 않고 대기시켰다가
+// idle 되면 전달"이 지금 이 CLI로 가능한 최선이다.
 ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string) => {
   const lead = loadLeads().find(l => l.id === leadId);
-  if (!lead) return null;
-  return queueLeadOperation(leadId, () => resumeLead(lead.sessionId, lead.targetDir, message));
+  if (!lead) return { status: 'not-found' as const };
+
+  const agents = await fetchAgents();
+  const agent = agents.find(a => a.id === leadId);
+  const isBusy = !!agent && (agent.status || agent.state || '').toLowerCase() === 'busy';
+  if (isBusy) {
+    queueLeadNotice(leadId, message);
+    return { status: 'queued' as const };
+  }
+
+  const id = await queueLeadOperation(leadId, () => resumeLead(lead.sessionId, lead.targetDir, message));
+  return { status: 'sent' as const, id };
 });
 
 ipcMain.handle('update-lead-label', (_e, leadId: string, label: string) => {

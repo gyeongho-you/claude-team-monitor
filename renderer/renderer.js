@@ -219,6 +219,11 @@ let lastLeadIds = new Set();
 // 같은 팀장에 여러 조작이 겹치면 세션이 갈라질 수 있어서(main.ts의 leadId 큐 참고), 진행 중엔 관련
 // 버튼을 비활성화해 사용자가 겹쳐서 누르는 걸 막는다.
 const busyLeadIds = new Set();
+// 팀장이 busy라 곧바로 stop→resume하지 못하고 큐에 쌓아둔(main.ts send-to-lead 참고) 메시지 원문 —
+// leadId당 하나씩만 기억한다. renderChat()이 폴링마다 이 안내를 대화창 맨 아래에 다시 붙여줘서,
+// 무한정 응답을 기다리는 것처럼 보이지 않게 한다. 실제로 전달돼서 트랜스크립트에 같은 프롬프트가
+// 나타나면 renderChat()이 알아서 지운다.
+const queuedChatMessages = new Map();
 
 // 역할 선택(정해진 역할 드롭다운 + "직접 입력") 공용 헬퍼 — work 탭 팀원 직접 추가와 설정 탭
 // 템플릿 등록 두 군데에서 똑같이 쓴다. 실제 값은 하나(select 값, 단 __custom__이면 custom input 값).
@@ -410,6 +415,14 @@ async function renderChat() {
     chatTranscriptEl.innerHTML = `<p style="color:#f14c4c">대화 기록을 불러오지 못했습니다: ${escapeHtml(errMsg(err))}</p>`;
     return;
   }
+
+  // 대기열에 넣어둔 메시지가 실제로 전달됐는지 확인한다 — resumeLead는 메시지를 가공 없이 그대로
+  // 프롬프트로 쓰므로, 트랜스크립트에 똑같은 prompt가 나타나면 전달된 것으로 판단할 수 있다.
+  const queuedForThisLead = queuedChatMessages.get(selectedLeadId);
+  if (queuedForThisLead && transcript.some(t => t.prompt === queuedForThisLead)) {
+    queuedChatMessages.delete(selectedLeadId);
+  }
+
   const row = lastRows.find(r => r.isLead && r.id === selectedLeadId);
   const ownStatus = row && !row.offline ? (row.status || row.state || '').toLowerCase() : '';
   const isBusy = ownStatus === 'busy';
@@ -420,12 +433,20 @@ async function renderChat() {
       ? '<div class="chat-working">⏳ 팀원 작업 대기중...</div>'
       : '';
 
+  const stillQueued = queuedChatMessages.get(selectedLeadId);
+  const queuedTurnHtml = stillQueued ? `
+    <div class="chat-turn">
+      <div class="chat-prompt">▸ ${escapeHtml(stillQueued)}</div>
+      <div class="chat-answer chat-pending">팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.</div>
+    </div>
+  ` : '';
+
   // 3초마다 도는 폴링 갱신마다 무조건 맨 아래로 스크롤하면, 옛날 대화를 읽으려고 위로 스크롤해둔 걸
   // 계속 끌어내린다 — 이미 맨 아래 근처에 있을 때만("계속 따라가기") 다시 맨 아래로 붙인다.
   const wasNearBottom = chatTranscriptEl.scrollHeight - chatTranscriptEl.scrollTop - chatTranscriptEl.clientHeight < 40;
 
   if (!transcript || transcript.length === 0) {
-    chatTranscriptEl.innerHTML = '<p style="color:#777">아직 대화 기록이 없습니다 (첫 응답을 기다리는 중일 수 있습니다).</p>' + busyBanner;
+    chatTranscriptEl.innerHTML = '<p style="color:#777">아직 대화 기록이 없습니다 (첫 응답을 기다리는 중일 수 있습니다).</p>' + queuedTurnHtml + busyBanner;
   } else {
     chatTranscriptEl.innerHTML = transcript.map(t => `
       <div class="chat-turn">
@@ -433,7 +454,7 @@ async function renderChat() {
         <div class="chat-prompt">▸ ${escapeHtml(cleanPrompt(t.prompt))}</div>
         <div class="chat-answer">${escapeHtml(t.answer)}</div>
       </div>
-    `).join('') + busyBanner;
+    `).join('') + queuedTurnHtml + busyBanner;
   }
   if (wasNearBottom) chatTranscriptEl.scrollTop = chatTranscriptEl.scrollHeight;
   updateBusyUI();
@@ -514,16 +535,27 @@ async function sendChatMessage() {
   if (wasNearBottom) chatTranscriptEl.scrollTop = chatTranscriptEl.scrollHeight;
 
   try {
-    const id = await window.api.sendToLead(leadId, message);
-    if (!id) {
+    const result = await window.api.sendToLead(leadId, message);
+    if (!result || result.status === 'not-found') {
       // 오프라인 팀장을 이어하려다 실패한 경우(세션 만료 등) 여기서 걸린다 — 조용히 넘어가지 않는다.
       optimisticTurn.remove();
       chatTranscriptEl.insertAdjacentHTML('beforeend', '<p style="color:#f14c4c">이어하기에 실패했습니다 — 세션이 만료됐거나 claude CLI 실행에 문제가 있을 수 있습니다.</p>');
       return;
     }
+    if (result.status === 'queued') {
+      // 팀장이 지금 작업 중이면 claude CLI 자체에 실행 중인 세션에 끼어들어 입력만 추가하는 기능이
+      // 없어서(claude --help 확인) stop→resume으로 끊는 수밖에 없다 — main.ts가 끊지 않고 큐에
+      // 담아뒀다가 팀장이 idle/blocked가 되면 자동으로 전달한다. 그때까지 무한정 기다리는 것처럼
+      // 보이지 않도록 안내로 바꾸고, queuedChatMessages에 기억해서 renderChat이 폴링마다 계속
+      // 보여주게 한다(전달되면 자동으로 사라짐).
+      queuedChatMessages.set(leadId, message);
+      const answerEl = optimisticTurn.querySelector('.chat-answer');
+      if (answerEl) answerEl.textContent = '팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.';
+      return;
+    }
     // resumeLead가 다른 짧은 id로 깨어날 수 있다(main.ts resumeLead 주석 참고) — 반영하지 않으면
     // 대화창 선택이 풀려서 방금 보낸 대화가 사라진 것처럼 보인다.
-    selectedLeadId = id;
+    selectedLeadId = result.id;
     await renderChat();
   } catch (err) {
     optimisticTurn.remove();
