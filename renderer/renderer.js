@@ -303,6 +303,23 @@ function updateBusyUI() {
   });
 }
 
+// addMemberBtn에 이미 있던 "왜 비활성화됐는지" title 힌트 패턴을, 디렉토리/세션 미선택으로
+// 비활성화되는 다른 버튼(launchBtn/adoptBtn/addMemberSubmitBtn)에도 똑같이 적용한다.
+function syncLaunchBtnState() {
+  launchBtn.disabled = !targetDirSelect.value;
+  launchBtn.title = targetDirSelect.value ? '' : '먼저 디렉토리를 선택하세요';
+}
+
+function syncAdoptBtnState() {
+  adoptBtn.disabled = !adoptableSelect.value;
+  adoptBtn.title = adoptableSelect.value ? '' : '먼저 연결할 세션을 선택하세요';
+}
+
+function syncAddMemberSubmitBtnState() {
+  addMemberSubmitBtn.disabled = !memberDirSelect.value;
+  addMemberSubmitBtn.title = memberDirSelect.value ? '' : '먼저 디렉토리를 선택하세요';
+}
+
 function buildDirOptionsHtml(favs, customDir, placeholder) {
   const options = [`<option value="">${placeholder}</option>`];
   favs.forEach(f => options.push(`<option value="${escapeHtml(f.path)}">${escapeHtml(f.name)} (${escapeHtml(f.path)})</option>`));
@@ -534,6 +551,11 @@ async function sendChatMessage() {
   chatTranscriptEl.appendChild(optimisticTurn);
   if (wasNearBottom) chatTranscriptEl.scrollTop = chatTranscriptEl.scrollHeight;
 
+  // 버튼이 disabled로 회색이 되는 것만으로는(updateBusyUI) "전송 중"인지 "다른 이유로 잠김"인지
+  // 구분이 잘 안 된다는 피드백이 있어서, 전송 자체가 진행 중인 동안엔 버튼 라벨도 짧게 바꿔준다.
+  const originalSendLabel = chatSendBtn.textContent;
+  chatSendBtn.textContent = '전송 중...';
+
   try {
     const result = await window.api.sendToLead(leadId, message);
     if (!result || result.status === 'not-found') {
@@ -561,6 +583,7 @@ async function sendChatMessage() {
     optimisticTurn.remove();
     chatTranscriptEl.insertAdjacentHTML('beforeend', `<p style="color:#f14c4c">이어하기 중 오류가 발생했습니다: ${escapeHtml(errMsg(err))}</p>`);
   } finally {
+    chatSendBtn.textContent = originalSendLabel;
     busyLeadIds.delete(leadId);
     updateBusyUI();
   }
@@ -681,7 +704,7 @@ async function renderAdoptableSessions() {
   });
 
   adoptableSelect.innerHTML = options.join('');
-  adoptBtn.disabled = true;
+  syncAdoptBtnState();
   adoptStatusEl.textContent = adoptableEntriesByValue.size === 0
     ? '연결할 수 있는 세션이 없습니다.'
     : '';
@@ -690,7 +713,7 @@ async function renderAdoptableSessions() {
 refreshAdoptableBtn.addEventListener('click', renderAdoptableSessions);
 
 adoptableSelect.addEventListener('change', () => {
-  adoptBtn.disabled = !adoptableSelect.value;
+  syncAdoptBtnState();
 });
 
 adoptBtn.addEventListener('click', async () => {
@@ -768,10 +791,17 @@ document.querySelector('.tab-btn[data-tab="cleanup"]').addEventListener('click',
 // 경고 색으로만 알려주고, 실제 이어짐 여부는 시도해봐야 안다(sendChatMessage의 실패 처리 참고).
 // daily-journal이 남기는 summary([F]/[T]/[S] 구조로 파일·도구·핵심을 정리한 것)가 있으면 그걸 쓰고,
 // 없으면 prompt/answer 원문을 잘라서 보여준다.
+// 원본 문자열 기준으로 길이를 재서 자르고(이스케이프 후에 자르면 "&amp;" 같은 엔티티가 중간에
+// 잘려 보일 수 있다), 잘렸을 때만 끝에 말줄임표를 붙인다 — 안 그러면 문장이 뚝 끊긴 것처럼 보인다.
+function truncateForPreview(str, len) {
+  if (!str) return '';
+  return str.length > len ? `${escapeHtml(str.slice(0, len))}…` : escapeHtml(str);
+}
+
 function formatPreview(preview, promptLen, answerLen) {
   if (!preview) return '(대화 기록 없음)';
   if (preview.summary) return escapeHtml(preview.summary);
-  return `${escapeHtml(preview.prompt).slice(0, promptLen)}\n→ ${escapeHtml(preview.answer).slice(0, answerLen)}`;
+  return `${truncateForPreview(preview.prompt, promptLen)}\n→ ${truncateForPreview(preview.answer, answerLen)}`;
 }
 
 function historyRiskBadge(row) {
@@ -992,7 +1022,7 @@ addMemberBtn.addEventListener('click', () => {
   memberTemplateSelect.value = '';
   setRoleValue(memberRoleSelect, memberRoleCustom, '');
   memberInstructionEl.value = '';
-  addMemberSubmitBtn.disabled = true;
+  syncAddMemberSubmitBtnState();
   updateMemberSectionVisibility();
 });
 
@@ -1018,14 +1048,14 @@ memberTemplateSelect.addEventListener('change', async () => {
       memberDirSelect.value = tpl.path;
     }
     // 디렉토리가 없는 템플릿은 memberDirSelect를 그대로 두고 사용자가 직접 고르게 한다.
-    addMemberSubmitBtn.disabled = !memberDirSelect.value;
+    syncAddMemberSubmitBtnState();
   } catch (err) {
     addMemberStatusEl.textContent = `템플릿을 불러오지 못했습니다: ${errMsg(err)}`;
   }
 });
 
 memberDirSelect.addEventListener('change', () => {
-  addMemberSubmitBtn.disabled = !memberDirSelect.value;
+  syncAddMemberSubmitBtnState();
 });
 
 pickMemberDirBtn.addEventListener('click', async () => {
@@ -1058,7 +1088,7 @@ addMemberSubmitBtn.addEventListener('click', async () => {
       showAddMember = false;
       updateMemberSectionVisibility();
     } else {
-      addMemberStatusEl.textContent = '팀원 추가에 실패했습니다 — claude CLI 실행 결과를 확인해주세요.';
+      addMemberStatusEl.textContent = '팀원 추가에 실패했습니다 — 터미널을 직접 열어 claude --version, claude --bg가 정상 동작하는지 확인해보세요(CLI 미설치·PATH 문제·로그인 만료가 흔한 원인입니다).';
     }
   } catch (err) {
     addMemberStatusEl.textContent = `팀원 추가 중 오류가 발생했습니다: ${errMsg(err)}`;
@@ -1076,7 +1106,17 @@ function renderRequests(requests) {
   }
   requestsListEl.innerHTML = requests.map(req => {
     const isStop = req.type === 'stop-member';
-    const title = isStop ? `팀원 종료 요청 — ${req.memberId}` : (req.requestedDir || '');
+    let title;
+    if (isStop) {
+      // req.memberId는 짧은 세션 id라 사람이 읽고 뭔지 알 수 없다 — 아직 떠있는 팀원이면
+      // dirLabel/역할처럼 다른 곳에서 쓰는 것과 같은 방식으로 사람이 읽을 수 있게 바꿔서 보여준다.
+      const memberRow = lastRows.find(r => !r.isLead && r.id === req.memberId);
+      title = memberRow
+        ? `팀원 종료 요청 — ${dirLabel(memberRow.cwd)}${memberRow.role ? ` (${memberRow.role})` : ''}`
+        : `팀원 종료 요청 — ${req.memberId}(이미 종료된 세션이라 상세 정보를 알 수 없음)`;
+    } else {
+      title = req.requestedDir || '';
+    }
     return `
     <div class="request-card">
       <div class="req-dir">${isStop ? '⏹ ' : ''}${escapeHtml(title)}</div>
@@ -1166,10 +1206,10 @@ async function renderFavorites() {
   });
 
   setSelectValuePreserving(targetDirSelect, buildDirOptionsHtml(favs, customPickedDir, '-- 등록된 디렉토리에서 선택 --'), customPickedDir);
-  launchBtn.disabled = !targetDirSelect.value;
+  syncLaunchBtnState();
 
   setSelectValuePreserving(memberDirSelect, buildDirOptionsHtml(favs, memberCustomPickedDir, '-- 등록된 디렉토리에서 선택 --'), memberCustomPickedDir);
-  addMemberSubmitBtn.disabled = !memberDirSelect.value;
+  syncAddMemberSubmitBtnState();
 
   setSelectValuePreserving(newTplDirSelect, buildDirOptionsHtml(favs, tplCustomPickedDir, '-- 이 팀원이 일할 디렉토리 선택 (비워도 됨) --'), tplCustomPickedDir);
 
@@ -1183,7 +1223,7 @@ async function renderFavorites() {
 renderFavorites();
 
 targetDirSelect.addEventListener('change', () => {
-  launchBtn.disabled = !targetDirSelect.value;
+  syncLaunchBtnState();
 });
 
 pickDirBtn.addEventListener('click', async () => {
@@ -1231,7 +1271,7 @@ launchBtn.addEventListener('click', async () => {
       selectedLeadId = id;
       renderMemberRow(); // 새 팀장이라 소속 팀원이 없을 테니, 폴링 안 기다리고 바로 비워서 보여준다
     } else {
-      launchStatusEl.textContent = '팀장 세션 시작에 실패했습니다 — claude CLI 실행 결과를 확인해주세요.';
+      launchStatusEl.textContent = '팀장 세션 시작에 실패했습니다 — 터미널을 직접 열어 claude --version, claude --bg가 정상 동작하는지 확인해보세요(CLI 미설치·PATH 문제·로그인 만료가 흔한 원인입니다).';
     }
   } catch (err) {
     launchStatusEl.textContent = `팀장 세션 시작 중 오류가 발생했습니다: ${errMsg(err)}`;
@@ -1250,10 +1290,11 @@ function renderTemplateCard(t, favNameByPath) {
     <div class="template-card ${t.approved ? 'approved' : ''}">
       <div class="tpl-top">
         <input class="tpl-name" data-name="${escapeHtml(t.id)}" value="${escapeHtml(t.name)}" />
-        <input class="tpl-role" value="${escapeHtml(t.role)}" placeholder="역할" readonly title="등록 후에는 역할을 바꿀 수 없습니다 — 새로 등록해주세요" />
+        <input class="tpl-role" value="🔒 ${escapeHtml(t.role)}" placeholder="역할" readonly title="등록 후에는 역할을 바꿀 수 없습니다 — 새로 등록해주세요" />
         <span class="remove" data-remove-tpl="${escapeHtml(t.id)}">×</span>
       </div>
       ${dirLine}
+      <div class="readonly-hint">🔒 등록 후에는 아래 지시를 수정할 수 없습니다 — 바꾸려면 새로 등록하세요</div>
       <textarea class="tpl-instruction" rows="2" readonly title="등록 후에는 기본 지시를 바꿀 수 없습니다 — 새로 등록해주세요">${escapeHtml(t.instruction)}</textarea>
       ${t.path ? `
       <div class="tpl-bottom">

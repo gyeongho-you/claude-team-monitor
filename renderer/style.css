@@ -497,7 +497,7 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
   background: var(--bg);
 }
 .template-card .tpl-role {
-  width: 100px;
+  width: 120px;
   background: transparent;
   border: 1px solid transparent;
   color: var(--accent-2);
@@ -506,6 +506,10 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 }
 .template-card [readonly] { cursor: default; opacity: 0.75; }
 .template-card [readonly]:focus { border-color: transparent; background: transparent; outline: none; }
+/* readonly 필드가 title 툴팁(마우스를 올려야만 보임)과 흐린 opacity만으로는 "수정 불가"임이 잘
+   안 드러난다는 피드백이 있어서, 항상 보이는 자물쇠 안내 줄을 textarea 위에 하나 더 붙인다
+   (tpl-role은 값 앞에 🔒를 직접 붙여서 처리 — renderer.js 참고). */
+.template-card .readonly-hint { color: var(--text-dim); font-size: 10px; margin-bottom: 3px; }
 .template-card .tpl-instruction {
   width: 100%;
   background: transparent;
