@@ -4,8 +4,12 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import { exec, execFile, spawn } from 'child_process';
+import { trackFirstMiss, pruneMissingKeys } from './lib/firstMissTracker';
+import { resolveWithinCwd } from './lib/pathGuard';
+import { getStatus } from '../renderer/lib/status';
+import { writeJsonFileAtomic } from './lib/jsonFile';
+import { TEAM_MEMBER_BRIEFING, TEAM_MEMBER_STANDBY_NOTE } from './lib/teamMemberBriefing';
 
-const POLL_INTERVAL_MS = 3000;
 const CLAUDE_HOME = path.join(os.homedir(), '.claude');
 const SESSION_EDITS_DIR = path.join(CLAUDE_HOME, 'session-edits');
 const JOURNAL_DATA_DIR = path.join(CLAUDE_HOME, 'daily-journal', 'data');
@@ -20,6 +24,42 @@ const PENDING_NOTICES_PATH = path.join(app.getPath('userData'), 'pendingNotices.
 const REQUESTS_DIR = path.join(CLAUDE_HOME, 'claude-team-monitor', 'requests');
 // 팀장이 실제로 띄운 팀원을 등록해두는 곳 — 이게 있어야 "무관하게 떠있는 다른 세션"과 "진짜 내 팀원"을 구분한다.
 const MEMBERS_DIR = path.join(CLAUDE_HOME, 'claude-team-monitor', 'members');
+
+// ---------------- 타이밍 상수 ----------------
+// 유예/타임아웃 값들이 파일 전체에 흩어져 있으면 서로 값이 겹치거나 모순되는지 한눈에 알기
+// 어려워서 한곳에 모아둔다.
+
+const POLL_INTERVAL_MS = 3000;
+
+// 방금 등록된 팀원은 claude agents --json 스냅샷에 아직 안 잡혔을 수 있다(팀장이 방금 스폰한
+// 직후의 타이밍 차이) — 그 유예 기간 안에는 "떠있지 않다"고 오판해 등록 파일을 지우지 않는다.
+const MEMBER_CLEANUP_GRACE_MS = 15000;
+
+// 유예 기간이 지난, 멀쩡히 동작 중이던 팀원도 claude stop→resume되는 그 짧은 순간(프로세스가 잠깐
+// 사라졌다가 새 pid로 재기동되는 구간)엔 agents 스냅샷에서 한 번 빠질 수 있다(실측 재현됨 — 살아있는
+// 팀원 4명의 등록 파일이 단 한 번의 폴링 미스로 전부 삭제됨). 그래서 한 번 빠진 것만으로 바로 지우지
+// 않고, 일정 시간(MEMBER_MISS_GRACE_MS) 안에 다시 잡히면 봐준다.
+//
+// 처음엔 "연속으로 N번 못 잡혔을 때만" 식의 폴링 횟수 기반 카운터였는데, renderer.js의
+// sendChatMessage가 채팅 전송 직후 refreshBoardNow()로 buildSessionRows()를 즉시 한 번 더
+// 호출하도록 바뀌면서(3초 정기 폴링과는 별개로) 회귀가 생겼다 — 팀장 프로세스가 실제로
+// 재기동되기도 전에 그 즉시호출이 미스 카운트를 1 소모해버려서, 정기 폴링이 3초 뒤 딱 한 번만
+// 더 못 잡혀도 threshold(2)에 도달해 곧바로 오프라인/삭제 처리됐다(실측 재현됨 — "채팅 보내면
+// 팀장/팀원 목록이 통째로 사라졌다가 그다음 폴링에 다시 뜸"). 즉 "폴링 몇 번"은 buildSessionRows가
+// 얼마나 자주 불리는지에 따라 실제 경과 시간이 고무줄처럼 늘었다 줄었다 해서 유예 시간을 보장하지
+// 못한다. 그래서 횟수 대신 "처음 못 잡힌 시각"을 저장해두고 실제 경과 시간으로 판단한다 —
+// buildSessionRows가 짧은 간격으로 몇 번을 더 불리든(즉시호출+정기폴링 등) 결과가 달라지지 않는다.
+const MEMBER_MISS_GRACE_MS = 8000;
+
+// 팀장도 팀원 정리와 완전히 같은 TOCTOU를 겪는다 — 멀쩡히 응답 중이던 팀장도 채팅을 보낼 때마다
+// stop→resume이 도는데, 그 짧은 재기동 구간엔 agents 스냅샷에서 한 번 빠질 수 있다. 그 순간 바로
+// "오프라인"으로 분류해버리면 온라인 목록(카드)에서 사라지고 히스토리 탭으로 밀려난다(채팅을 자주
+// 보낼수록 자주 재현됨). 팀원과 동일한 이유로, 그리고 팀원과 똑같이 카운터 기반이었다가 겪은 같은
+// 회귀 때문에(위 MEMBER_MISS_GRACE_MS 주석 참고) "처음 못 잡힌 시각" 기준으로 판단한다.
+const LEAD_OFFLINE_GRACE_MS = 8000;
+
+const RUN_CLAUDE_TIMEOUT_MS = 30000; // claude --bg가 이 시간 안에도 안 끝나면 행(hang)으로 간주하고 포기한다.
+const STOP_SESSION_TIMEOUT_MS = 15000;
 
 type AgentEntry = {
   id?: string;
@@ -48,7 +88,6 @@ type TranscriptEntry = { time: string; prompt: string; answer: string };
 type MemberRecord = {
   memberId: string;
   leadId: string;
-  dir: string;
   createdAt: number;
   role?: string; // 예: "reviewer" — 일반 구현 팀원과 구분해 화면에 표시하기 위한 선택 필드
 };
@@ -150,16 +189,6 @@ function getGitChangedFiles(cwd: string): Promise<{ file: string; status: string
       resolve(files);
     });
   });
-}
-
-// file 인자에 상대경로 탈출(예: "../../../../etc/passwd")이 섞여 있으면 path.join(cwd, file)이
-// cwd 밖의 임의 파일을 가리킬 수 있다 — 실제로 join한 절대경로가 cwd 하위인지 확인해서, 벗어나면
-// null을 돌려줘 호출부가 거부하게 한다.
-function resolveWithinCwd(cwd: string, file: string): string | null {
-  const resolvedCwd = path.resolve(cwd);
-  const resolvedFile = path.resolve(cwd, file);
-  if (resolvedFile !== resolvedCwd && !resolvedFile.startsWith(resolvedCwd + path.sep)) return null;
-  return resolvedFile;
 }
 
 // 목록의 파일 하나를 눌렀을 때 실제 내용을 보여준다. git이 추적 중인 변경이면 diff를, 아직 추적
@@ -311,16 +340,6 @@ function readJsonArraySafe<T>(filePath: string): T[] {
   return Array.isArray(parsed) ? parsed : [];
 }
 
-// 쓰는 도중 죽어도(정전, 강제 종료, 예외) 원본 파일이 잘린 채로 남지 않도록, 임시 파일에 먼저 쓰고
-// 같은 폴더 안에서 rename으로 교체한다(rename은 원자적이다). 실패하면 예외를 그대로 던진다 — 호출부에서
-// try/catch로 로깅/처리한다.
-function writeJsonFileAtomic(filePath: string, data: unknown): void {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf-8');
-  fs.renameSync(tmpPath, filePath);
-}
-
 // 이 필드를 추가하기 전에 만들어진 leads.json 레코드는 internalId가 없다 — 처음 읽을 때 한 번
 // 발급해서 즉시 저장해두면, 이후로는 다른 마이그레이션 없이 계속 같은 값을 쓸 수 있다.
 function loadLeads(): LeadRecord[] {
@@ -403,50 +422,19 @@ function loadMembers(): MemberRecord[] {
   }
 }
 
-// 방금 등록된 팀원은 claude agents --json 스냅샷에 아직 안 잡혔을 수 있다(팀장이 방금 스폰한
-// 직후의 타이밍 차이) — 그 유예 기간 안에는 "떠있지 않다"고 오판해 등록 파일을 지우지 않는다.
-const MEMBER_CLEANUP_GRACE_MS = 15000;
-
-// 유예 기간이 지난, 멀쩡히 동작 중이던 팀원도 claude stop→resume되는 그 짧은 순간(프로세스가 잠깐
-// 사라졌다가 새 pid로 재기동되는 구간)엔 agents 스냅샷에서 한 번 빠질 수 있다(실측 재현됨 — 살아있는
-// 팀원 4명의 등록 파일이 단 한 번의 폴링 미스로 전부 삭제됨). 그래서 한 번 빠진 것만으로 바로 지우지
-// 않고, 일정 시간(MEMBER_MISS_GRACE_MS) 안에 다시 잡히면 봐준다.
-//
-// 처음엔 "연속으로 N번 못 잡혔을 때만" 식의 폴링 횟수 기반 카운터였는데, renderer.js의
-// sendChatMessage가 채팅 전송 직후 refreshBoardNow()로 buildSessionRows()를 즉시 한 번 더
-// 호출하도록 바뀌면서(3초 정기 폴링과는 별개로) 회귀가 생겼다 — 팀장 프로세스가 실제로
-// 재기동되기도 전에 그 즉시호출이 미스 카운트를 1 소모해버려서, 정기 폴링이 3초 뒤 딱 한 번만
-// 더 못 잡혀도 threshold(2)에 도달해 곧바로 오프라인/삭제 처리됐다(실측 재현됨 — "채팅 보내면
-// 팀장/팀원 목록이 통째로 사라졌다가 그다음 폴링에 다시 뜸"). 즉 "폴링 몇 번"은 buildSessionRows가
-// 얼마나 자주 불리는지에 따라 실제 경과 시간이 고무줄처럼 늘었다 줄었다 해서 유예 시간을 보장하지
-// 못한다. 그래서 횟수 대신 "처음 못 잡힌 시각"을 저장해두고 실제 경과 시간으로 판단한다 —
-// buildSessionRows가 짧은 간격으로 몇 번을 더 불리든(즉시호출+정기폴링 등) 결과가 달라지지 않는다.
-// memberId별 값은 폴링 사이에도 유지해야 하므로 모듈 스코프에 둔다.
-const MEMBER_MISS_GRACE_MS = 8000;
+// memberId별/leadId별 "처음 못 잡힌 시각"을 폴링 사이에도 유지해야 하므로 모듈 스코프에 둔다.
+// 유예 판정 자체(trackFirstMiss)는 순수 함수로 뽑아서 lib/firstMissTracker.ts에 있다 — 팀원
+// 정리와 팀장 오프라인 판정이 겪는 TOCTOU가 완전히 같아서 그 4단계 로직을 공용으로 쓴다.
 const memberFirstMissAt = new Map<string, number>();
-
-// 팀장도 팀원 정리와 완전히 같은 TOCTOU를 겪는다 — 멀쩡히 응답 중이던 팀장도 채팅을 보낼 때마다
-// stop→resume이 도는데, 그 짧은 재기동 구간엔 agents 스냅샷에서 한 번 빠질 수 있다. 그 순간 바로
-// "오프라인"으로 분류해버리면 온라인 목록(카드)에서 사라지고 히스토리 탭으로 밀려난다(채팅을 자주
-// 보낼수록 자주 재현됨). 팀원과 동일한 이유로, 그리고 팀원과 똑같이 카운터 기반이었다가 겪은 같은
-// 회귀 때문에(위 MEMBER_MISS_GRACE_MS 주석 참고) "처음 못 잡힌 시각" 기준으로 판단한다.
-const LEAD_OFFLINE_GRACE_MS = 8000;
 const leadFirstMissAt = new Map<string, number>();
 
-// 보드에는 "내가 띄운 팀장"과 "팀장이 등록한 팀원"만 보여준다 — 그 외(사용자가 따로 열어둔 무관한
-// 세션 등)는 team-lead 체계 밖이므로 제외한다. interactive 세션은 애초에 짧은 id가 없어서 자동으로 빠진다.
-async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; requests: MemberRequest[] }> {
-  // 아래 leadFirstMissAt/memberFirstMissAt 유예 판정에 쓸 기준 시각 — 이 함수 실행 도중 한 번만
-  // 고정해서 재는다(같은 호출 안에서 Date.now()를 여러 번 부르며 값이 갈리는 걸 방지).
-  const now = Date.now();
-  const agents = await fetchAgents();
-  const agentIdSet = new Set(agents.filter(a => !!a.id).map(a => a.id));
-  const leads = loadLeads();
-  const leadIds = new Set(leads.map(l => l.id));
-  const members = loadMembers();
-  const memberMap = new Map(members.map(m => [m.memberId, m]));
-
-  const liveRows: SessionRow[] = agents
+function computeLiveRows(
+  agents: AgentEntry[],
+  leads: LeadRecord[],
+  leadIds: Set<string>,
+  memberMap: Map<string, MemberRecord>,
+): SessionRow[] {
+  return agents
     .filter(a => !!a.id && (leadIds.has(a.id) || memberMap.has(a.id)))
     .map(a => {
       const projectName = resolveProjectName(a.sessionId, a.cwd);
@@ -464,11 +452,13 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
         offline: false,
       };
     });
+}
 
-  // 팀원이 busy → idle/done으로 바뀌면 팀장에게 확인해보라고 알려준다(큐에 쌓였다가 팀장이
-  // idle/blocked일 때 전달됨 — 아래 pendingNotices 처리 로직 재사용).
+// 팀원이 busy → idle/done으로 바뀌면 팀장에게 확인해보라고 알려준다(큐에 쌓였다가 팀장이
+// idle/blocked일 때 전달됨 — deliverPendingNotices의 pendingNotices 큐를 그대로 재사용).
+function notifyLeadsOfFinishedMembers(liveRows: SessionRow[], leads: LeadRecord[]): void {
   liveRows.filter(r => !r.isLead).forEach(r => {
-    const status = (r.status || r.state || '').toLowerCase();
+    const status = getStatus(r);
     const prevStatus = lastMemberStatus.get(r.id!);
     if (prevStatus === 'busy' && status && status !== 'busy' && r.leadId) {
       // MemberRecord.leadId는 등록 당시의 짧은 id라 그 뒤로 팀장이 재시작됐으면 이미 낡은 값일 수
@@ -483,52 +473,48 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
     }
     if (status) lastMemberStatus.set(r.id!, status);
   });
+}
 
-  // 대기 중인 팀원-추가 알림 중, 그 팀장이 지금 busy가 아니면(=억지로 끊어도 하던 작업이 없으면)
-  // 이 타이밍에 stop→resume으로 실제 전달한다. busy면 다음 폴링까지 큐에 그대로 둔다.
+// 대기 중인 팀원-추가 알림 중, 그 팀장이 지금 busy가 아니면(=억지로 끊어도 하던 작업이 없으면)
+// 이 타이밍에 stop→resume으로 실제 전달한다. busy면 다음 폴링까지 큐에 그대로 둔다.
+function deliverPendingNotices(agents: AgentEntry[], leads: LeadRecord[]): void {
   const pendingNotices = loadPendingNotices();
-  if (pendingNotices.length > 0) {
-    const stillPending: PendingNotice[] = [];
-    for (const notice of pendingNotices) {
-      const leadRec = leads.find(l => l.internalId === notice.leadInternalId);
-      const liveAgent = leadRec ? agents.find(a => a.id === leadRec.id) : undefined;
-      const isBusy = !!liveAgent && (liveAgent.status || liveAgent.state || '').toLowerCase() === 'busy';
-      if (leadRec && liveAgent && !isBusy) {
-        queueLeadOperation(leadRec.internalId, () => resumeLead(leadRec.internalId, notice.message))
-          .catch(() => { /* 실패해도 알림 자체는 소모(재시도 안 함) */ });
-        continue;
-      }
-      stillPending.push(notice);
+  if (pendingNotices.length === 0) return;
+  const stillPending: PendingNotice[] = [];
+  for (const notice of pendingNotices) {
+    const leadRec = leads.find(l => l.internalId === notice.leadInternalId);
+    const liveAgent = leadRec ? agents.find(a => a.id === leadRec.id) : undefined;
+    const isBusy = !!liveAgent && getStatus(liveAgent) === 'busy';
+    if (leadRec && liveAgent && !isBusy) {
+      queueLeadOperation(leadRec.internalId, () => resumeLead(leadRec.internalId, notice.message))
+        .catch(() => { /* 실패해도 알림 자체는 소모(재시도 안 함) */ });
+      continue;
     }
-    if (stillPending.length !== pendingNotices.length) savePendingNotices(stillPending);
+    stillPending.push(notice);
   }
+  if (stillPending.length !== pendingNotices.length) savePendingNotices(stillPending);
+}
 
-  // 지금 떠있지 않은 팀장은 기록을 지우지 않고 "오프라인"으로 남겨둔다 — PC 재부팅 등으로 프로세스가
-  // 죽어도 세션 자체는 claude 쪽에 남아있어서 --bg --resume으로 다시 깨울 수 있기 때문이다(대화창에서
-  // 메시지를 보내면 자동으로 이 절차를 탄다, resumeLead 참고). 단, agents 스냅샷에 한 번 안 잡힌
-  // 것만으로 바로 오프라인 처리하지 않는다(LEAD_OFFLINE_GRACE_MS 주석 참고) — 처음 못 잡힌
-  // 시각으로부터 유예 시간이 지나기 전이면 이번 폴링에서만 목록에 안 잡히고, 다음 폴링에 스스로
-  // 복구된다.
+// 지금 떠있지 않은 팀장은 기록을 지우지 않고 "오프라인"으로 남겨둔다 — PC 재부팅 등으로 프로세스가
+// 죽어도 세션 자체는 claude 쪽에 남아있어서 --bg --resume으로 다시 깨울 수 있기 때문이다(대화창에서
+// 메시지를 보내면 자동으로 이 절차를 탄다, resumeLead 참고). 단, agents 스냅샷에 한 번 안 잡힌
+// 것만으로 바로 오프라인 처리하지 않는다(LEAD_OFFLINE_GRACE_MS 주석 참고) — 처음 못 잡힌
+// 시각으로부터 유예 시간이 지나기 전이면 이번 폴링에서만 목록에 안 잡히고, 다음 폴링에 스스로
+// 복구된다. 만료돼도 leadFirstMissAt 기록은 지우지 않는다 — 지우면 다음 폴링에 "처음 못 잡힘"부터
+// 다시 시작해 유예 시간 동안 또 온라인처럼 보이므로, 다시 잡힐 때까지 계속 만료 상태를 유지해야 한다.
+function computeOfflineLeads(leads: LeadRecord[], agentIdSet: Set<string | undefined>, now: number): LeadRecord[] {
   const offlineLeads: LeadRecord[] = [];
   leads.forEach(l => {
-    if (agentIdSet.has(l.id)) {
-      leadFirstMissAt.delete(l.id);
-      return;
-    }
-    const firstMissAt = leadFirstMissAt.get(l.id);
-    if (firstMissAt === undefined) {
-      leadFirstMissAt.set(l.id, now);
-      return;
-    }
-    if (now - firstMissAt < LEAD_OFFLINE_GRACE_MS) return;
-    offlineLeads.push(l);
+    const result = trackFirstMiss(leadFirstMissAt, agentIdSet.has(l.id), l.id, now, LEAD_OFFLINE_GRACE_MS);
+    if (result === 'expired') offlineLeads.push(l);
   });
   // 다른 경로로 이미 사라진(현재는 없지만 혹시 모를) leadId의 기록을 정리해 Map이 무한정 자라지
   // 않게 한다 — 팀원 정리 로직과 동일한 방어.
-  const currentLeadIds = new Set(leads.map(l => l.id));
-  for (const key of leadFirstMissAt.keys()) {
-    if (!currentLeadIds.has(key)) leadFirstMissAt.delete(key);
-  }
+  pruneMissingKeys(leadFirstMissAt, new Set(leads.map(l => l.id)));
+  return offlineLeads;
+}
+
+function buildOfflineRows(offlineLeads: LeadRecord[], leads: LeadRecord[]): SessionRow[] {
   let leadsDirty = false;
   const offlineRows: SessionRow[] = offlineLeads.map(l => {
     const projectName = resolveProjectName(l.sessionId, l.targetDir);
@@ -552,33 +538,52 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
     };
   });
   if (leadsDirty) saveLeads(leads);
+  return offlineRows;
+}
 
-  const rows = [...liveRows, ...offlineRows];
-
-  // 팀원은 팀장과 달리 일회성 하위 작업 단위라 이어할 필요가 적어서, 종료되면 정리한다 — 단,
-  // 방금(MEMBER_CLEANUP_GRACE_MS 이내) 등록된 팀원은 봐주고(TOCTOU), 처음 못 잡힌 시각으로부터
-  // MEMBER_MISS_GRACE_MS가 지나기 전이면(=stop→resume 재기동 구간일 수 있음) 아직 지우지 않는다.
+// 팀원은 팀장과 달리 일회성 하위 작업 단위라 이어할 필요가 적어서, 종료되면 정리한다 — 단,
+// 방금(MEMBER_CLEANUP_GRACE_MS 이내) 등록된 팀원은 봐주고(TOCTOU), 처음 못 잡힌 시각으로부터
+// MEMBER_MISS_GRACE_MS가 지나기 전이면(=stop→resume 재기동 구간일 수 있음) 아직 지우지 않는다.
+// 팀장과 달리 만료되면 등록 파일 자체를 지우므로, firstMiss 기록도 즉시 같이 지운다.
+function cleanupStaleMembers(members: MemberRecord[], agentIdSet: Set<string | undefined>, now: number): void {
   const currentMemberIds = new Set(members.map(m => m.memberId));
   members.forEach(m => {
     if (now - m.createdAt < MEMBER_CLEANUP_GRACE_MS) return;
-    if (agentIdSet.has(m.memberId)) {
-      memberFirstMissAt.delete(m.memberId);
-      return;
-    }
-    const firstMissAt = memberFirstMissAt.get(m.memberId);
-    if (firstMissAt === undefined) {
-      memberFirstMissAt.set(m.memberId, now);
-      return;
-    }
-    if (now - firstMissAt < MEMBER_MISS_GRACE_MS) return;
+    const result = trackFirstMiss(memberFirstMissAt, agentIdSet.has(m.memberId), m.memberId, now, MEMBER_MISS_GRACE_MS);
+    if (result !== 'expired') return;
     memberFirstMissAt.delete(m.memberId);
     try { fs.unlinkSync(path.join(MEMBERS_DIR, `${m.memberId}.json`)); } catch { /* ignore */ }
   });
   // 등록 파일이 다른 경로(수동 종료 버튼 등)로 이미 사라진 memberId의 기록은 여기서 정리해야
   // Map이 무한정 자라지 않는다.
-  for (const key of memberFirstMissAt.keys()) {
-    if (!currentMemberIds.has(key)) memberFirstMissAt.delete(key);
-  }
+  pruneMissingKeys(memberFirstMissAt, currentMemberIds);
+}
+
+// 보드에는 "내가 띄운 팀장"과 "팀장이 등록한 팀원"만 보여준다 — 그 외(사용자가 따로 열어둔 무관한
+// 세션 등)는 team-lead 체계 밖이므로 제외한다. interactive 세션은 애초에 짧은 id가 없어서 자동으로 빠진다.
+//
+// 책임이 여럿(실시간 스냅샷 구성, 팀원 완료 알림, 대기열 배달, 팀장 오프라인 판정, 팀원 정리)이라
+// 각각을 위 헬퍼로 뽑고, 여기서는 순서대로 호출해 조합만 한다.
+async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; requests: MemberRequest[] }> {
+  // 아래 leadFirstMissAt/memberFirstMissAt 유예 판정에 쓸 기준 시각 — 이 함수 실행 도중 한 번만
+  // 고정해서 재는다(같은 호출 안에서 Date.now()를 여러 번 부르며 값이 갈리는 걸 방지).
+  const now = Date.now();
+  const agents = await fetchAgents();
+  const agentIdSet = new Set(agents.filter(a => !!a.id).map(a => a.id));
+  const leads = loadLeads();
+  const leadIds = new Set(leads.map(l => l.id));
+  const members = loadMembers();
+  const memberMap = new Map(members.map(m => [m.memberId, m]));
+
+  const liveRows = computeLiveRows(agents, leads, leadIds, memberMap);
+  notifyLeadsOfFinishedMembers(liveRows, leads);
+  deliverPendingNotices(agents, leads);
+
+  const offlineLeads = computeOfflineLeads(leads, agentIdSet, now);
+  const offlineRows = buildOfflineRows(offlineLeads, leads);
+  const rows = [...liveRows, ...offlineRows];
+
+  cleanupStaleMembers(members, agentIdSet, now);
 
   const requests = loadPendingRequests();
   return { rows, requests };
@@ -640,8 +645,8 @@ function installTeamLeadSkill(): void {
   }
 }
 
-// 예전 포맷(문자열 배열, 또는 approvedForMembers가 섞여있던 중간 포맷)을 전부 {path,name}으로
-// 정규화한다. approvedForMembers는 이제 MemberTemplate.approved로 대체됐으므로 무시한다.
+// favorites.json은 항상 {path,name} 객체 배열로만 저장돼왔다(문자열 배열이나 approvedForMembers가
+// 섞인 예전 포맷은 실제 데이터에 존재한 적이 없어 정규화 로직이 필요 없다) — 그대로 읽기만 한다.
 function loadFavorites(): Favorite[] {
   return readJsonArraySafe<Favorite>(FAVORITES_PATH);
 }
@@ -690,9 +695,6 @@ function approvedMemberBriefing(callerDir: string): { paths: string[]; text: str
   }
   return { paths: approvedWithPath.map(t => t.path!), text: parts.join('\n\n') };
 }
-
-const RUN_CLAUDE_TIMEOUT_MS = 30000; // claude --bg가 이 시간 안에도 안 끝나면 행(hang)으로 간주하고 포기한다.
-const STOP_SESSION_TIMEOUT_MS = 15000;
 
 // claude가 네이티브 실행 파일(.exe)이 아니라 .cmd/.bat 같은 셸 스크립트로 설치돼 있으면, Windows에서는
 // shell:false로 spawn해도 Node가 내부적으로 cmd.exe를 거쳐 실행한다 — 이 경로는 인자 이스케이프 방식이
@@ -972,25 +974,9 @@ function registerMember(member: MemberRecord): void {
   }
 }
 
-// 팀원은 사람이 실시간으로 지켜보는 세션이 아니다 — 이 브리핑 없이 그냥 지시문만 던지면, 스킬을
-// 하나 물고 개인 인터랙티브 세션처럼 굴다가 애매하면 "어느 경로를 리뷰할까요?" 식으로 되묻고
-// 멈춰버린다(실측: 아무도 안 보고 있으니 그 질문엔 영원히 답이 안 옴). 그래서 모든 팀원 프롬프트
-// 맨 앞에 이 원칙을 박아넣는다. 지침이 여러 개라 가독성을 위해 항목별로 줄바꿈해서 이어붙인다 —
-// 실제로 팀원에게 전달되는 내용(의미)은 한 줄이었을 때와 동일하다.
-const TEAM_MEMBER_BRIEFING = [
-  '너는 지금 "팀장" 세션이 배정한 "팀원" 세션이다. 사람이 실시간으로 지켜보며 답해주는 세션이 아니니, 중간에 사용자에게 되묻지 말고 스스로 판단해서 진행해라.',
-  '정보가 부족하면 저장소 안에서 직접 조사해서 합리적으로 판단하고, 정말로 진행이 불가능할 때만 왜 막혔는지를 최종 답변에 명확히 남기고 멈춰라(질문만 던지고 끝내지 마라).',
-  'AskUserQuestion 같은 화살표 선택형 인터랙티브 도구는 절대 쓰지 마라 — 백그라운드 세션이라 실제 터미널이 안 붙어있어서 그 메뉴에 아무도 응답할 수 없고, 세션이 그대로 영구히 멈춘다(텍스트로 되묻는 것보다 훨씬 심각하게 막힘).',
-  '같은 이유로 EnterWorktree/ExitWorktree 도구도 쓰지 마라 — 사전 승인 안 된 경로로 permission root를 옮기려 하면 "진행할까요? Yes/No" 확인 프롬프트가 뜨는데 이것도 아무도 응답 못 해서 똑같이 멈춘다(실측 확인). 워크트리가 필요하면 `git worktree add <경로> <브랜치>`를 Bash로 직접 실행하고, 그 경로를 Edit/Write/Bash의 대상 경로로 그냥 지정해서 작업해라 — permission root 자체를 옮기는 도구만 피하면 된다.',
-  '작업을 마치면 무엇을 확인했고 결과가 무엇인지 최종 답변에 구조적으로 정리해라 — 그 답변이 팀장에게 전달되는 유일한 보고 내용이다.',
-].join('\n\n');
-
-// launchMember로 처음 띄울 때 instruction을 곧바로 실행 지시로 붙이면, 실사용해보니 지시가
-// 구체적일수록(예: "정합성/버그/로직 문제를 자세히 리뷰해라") 팀원이 팀장의 확인 없이 곧장 전체
-// 작업을 스스로 벌여버려서 사용자가 당황하는 일이 잦았다. 그래서 최초 실행에서는 instruction을
-// "앞으로 맡을 작업에 대한 참고용 사전 지시"로만 전달하고, 실제 개시는 항상 팀장이 이어서 보내는
-// 다음 메시지에서 시작되도록 못 박는다 — 최초 실행은 항상 "대기" 상태로 끝나야 한다.
-const TEAM_MEMBER_STANDBY_NOTE = '아래는 앞으로 맡을 작업에 대한 참고용 사전 지시다 — 이번 턴에서 곧바로 실행하지 마라. 내용을 확인했다는 짧은 준비 완료 응답만 남기고(예: "확인했습니다. 아래 작업을 맡을 준비가 됐습니다."), 실제로 작업을 시작하라는 팀장의 다음 메시지가 올 때까지 기다려라. 팀장이 다시 메시지를 보내기 전까지는 어떤 파일도 고치거나 만들지 마라.';
+// TEAM_MEMBER_BRIEFING/TEAM_MEMBER_STANDBY_NOTE는 lib/teamMemberBriefing.ts에 있다 —
+// TEAM_MEMBER_BRIEFING은 SKILL.md에도 문자 그대로 복사돼있어야 해서(팀장이 직접 띄우는
+// 팀원도 같은 브리핑을 받아야 함), tests/skillBriefingSync.test.js가 그 동기화를 검증한다.
 
 // 팀장이 알아서 판단해서 띄우는 것과 별개로, 사용자가 직접 특정 역할(코드리뷰 등)을 주고
 // 팀원을 띄운다 — 어떤 팀장 소속으로 붙일지는 사용자가 고른다(대화창에서 선택 중인 팀장 등).
@@ -1000,7 +986,7 @@ async function launchMember(leadId: string, targetDir: string, instruction: stri
   const prompt = `${TEAM_MEMBER_BRIEFING}\n\n${roleLine}${TEAM_MEMBER_STANDBY_NOTE}\n\n"""\n${instruction}\n"""`;
   const id = await runClaudeBg(['--bg', prompt], targetDir);
   if (!id) return null;
-  registerMember({ memberId: id, leadId, dir: targetDir, createdAt: Date.now(), role: role || undefined });
+  registerMember({ memberId: id, leadId, createdAt: Date.now(), role: role || undefined });
 
   // 팀장이 스스로 띄운 게 아니라서 알려주지 않으면 이 팀원의 존재도 결과도 영원히 모른다 — 다만
   // 팀장이 지금 다른 작업으로 busy일 수 있어서 즉시 stop→resume으로 끼어들지 않고 큐에 쌓아둔다.
@@ -1199,7 +1185,7 @@ ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string) => {
 
   const agents = await fetchAgents();
   const agent = agents.find(a => a.id === leadId);
-  const isBusy = !!agent && (agent.status || agent.state || '').toLowerCase() === 'busy';
+  const isBusy = !!agent && getStatus(agent) === 'busy';
   if (isBusy) {
     const noticeId = queueLeadNotice(lead.internalId, message);
     return { status: 'queued' as const, id: noticeId };

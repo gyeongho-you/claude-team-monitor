@@ -227,13 +227,17 @@ let lastLeadIds = new Set();
 // 같은 팀장에 여러 조작이 겹치면 세션이 갈라질 수 있어서(main.ts의 leadId 큐 참고), 진행 중엔 관련
 // 버튼을 비활성화해 사용자가 겹쳐서 누르는 걸 막는다.
 const busyLeadIds = new Set();
-// 팀장이 busy라 곧바로 stop→resume하지 못하고 큐에 쌓아둔(main.ts send-to-lead 참고) 메시지들 —
-// leadId -> Array<{ id, message }>. 팀장 하나에게 busy 상태에서 여러 메시지를 연달아 보내도 전부
-// 화면에 남아있어야 해서 배열로 각각 독립적으로 추적한다(id는 main.ts PendingNotice.id와 매칭돼서
-// 개별 취소/전달완료 판정에 쓰인다). renderChat()이 폴링마다 이 안내들을 대화창 맨 아래에 다시
-// 붙여줘서, 무한정 응답을 기다리는 것처럼 보이지 않게 한다. 실제로 전달돼서 트랜스크립트에 같은
-// 프롬프트가 나타나면 그 항목만 renderChat()이 알아서 지운다.
-const queuedChatMessages = new Map();
+// 서버 트랜스크립트에 아직 안 나타난(=응답이 안 끝난) 채팅 턴들 — leadId -> Array<{ id, message, kind }>.
+// kind는 'queued'(팀장이 busy라 main.ts가 큐에 쌓아뒀다가 idle/blocked 되면 자동 전달 — id는
+// main.ts PendingNotice.id라 취소 IPC에 쓰인다) 또는 'in-flight'(즉시 stop→resume으로 보내서 지금
+// 응답을 기다리는 중 — 취소할 서버측 대상이 없다)다. 원래는 즉시 전송 건을 optimisticTurn이라는
+// 별도 DOM 노드로 그냥 붙여서 처리했는데, 그 직후 refreshBoardNow()가 renderChat()으로 대화창을
+// 서버 트랜스크립트로 통째로 덮어써버려서(아직 이 턴이 없으니) 화면이 순간적으로 예전 상태로
+// 되돌아가는 버그가 있었다 — 그래서 대기열과 완전히 같은 메커니즘으로 합쳤다. 팀장 하나에게 여러
+// 메시지가 겹쳐도 전부 화면에 남아있어야 해서 배열로 각각 독립적으로 추적하고, renderChat()이
+// 폴링마다 이 안내들을 대화창 맨 아래에 다시 붙여줘서 무한정 기다리는 것처럼 보이지 않게 한다.
+// 실제로 응답이 와서 트랜스크립트에 같은 프롬프트가 나타나면 그 항목만 renderChat()이 알아서 지운다.
+const pendingChatTurns = new Map();
 
 // 역할 선택(정해진 역할 드롭다운 + "직접 입력") 공용 헬퍼 — work 탭 팀원 직접 추가와 설정 탭
 // 템플릿 등록 두 군데에서 똑같이 쓴다. 실제 값은 하나(select 값, 단 __custom__이면 custom input 값).
@@ -271,14 +275,14 @@ wireRoleFields(newTplRoleSelect, newTplRoleCustom);
 
 function statusClass(row) {
   if (row.offline) return 'status-offline';
-  const s = row.state === 'done' ? 'done' : (row.status || row.state || '').toLowerCase();
+  const s = getStatus(row);
   if (['idle', 'busy', 'blocked', 'done'].includes(s)) return `status-${s}`;
   return '';
 }
 
 function statusLabelKo(row) {
   if (row.offline) return '오프라인';
-  const s = row.state === 'done' ? 'done' : (row.status || row.state || '').toLowerCase();
+  const s = getStatus(row);
   if (s === 'busy') return '● 작업 중';
   if (s === 'blocked') return '⚠ 확인 필요';
   if (s === 'done') return '완료';
@@ -363,11 +367,11 @@ function setSelectValuePreserving(selectEl, options, preferredValue) {
 // 팀장이 idle/완료 상태여도, 자기 팀원이 아직 작업 중이면 실제로는 "끝난 게" 아니라 그 결과를
 // 기다리는 중이다 — 완료/대기 중이라고 뜨면 사용자가 "아 끝났나보다" 하고 놓치기 쉬우니 구분한다.
 function hasBusyMember(leadId) {
-  return lastRows.some(r => !r.isLead && r.leadId === leadId && (r.status || r.state || '').toLowerCase() === 'busy');
+  return lastRows.some(r => !r.isLead && r.leadId === leadId && getStatus(r) === 'busy');
 }
 
 function renderLeadCard(row) {
-  const ownStatus = row.offline ? '' : (row.state === 'done' ? 'done' : (row.status || row.state || '').toLowerCase());
+  const ownStatus = row.offline ? '' : getStatus(row);
   const waitingOnMember = !row.offline && (ownStatus === 'idle' || ownStatus === 'done') && hasBusyMember(row.id);
   const statusLabel = waitingOnMember ? '⏳ 팀원 작업 대기중' : statusLabelKo(row);
   const cardStatusClass = waitingOnMember ? 'status-busy' : statusClass(row);
@@ -416,6 +420,39 @@ function cleanPrompt(prompt) {
   return p || '(초기 지시 없음)';
 }
 
+// 팀장 세션의 트랜스크립트에는 사용자가 직접 타이핑한 메시지 말고도, Claude Code 하네스가
+// 자동으로 주입하는 백그라운드 작업 완료 알림이나(<task-notification> XML 블록), 이 앱 자신이
+// queueLeadNotice로 큐에 쌓아뒀다가 전달하는 [알림] 문구가 그대로 prompt로 남는다(실측: 실제
+// 팀장 세션 트랜스크립트에서 두 패턴 다 확인). 사용자가 보낸 것처럼 "▸ "로 보이면 헷갈리므로
+// 구분해서 표시한다.
+function isAutoInjectedPrompt(prompt) {
+  const p = (prompt || '').trim();
+  if (!p) return false;
+  return p.startsWith('<task-notification>') || p.startsWith('[알림]');
+}
+
+// <task-notification> 블록은 task-id/tool-use-id/output-file 경로 등 잡음이 많아 그대로 보여주면
+// 너무 길다 — status/summary 태그만 뽑아서 한 줄로 줄인다(실측 포맷: <status>completed</status>
+// <summary>Background command "..." completed (exit code 0)</summary>). 태그를 못 찾으면(포맷이
+// 달라졌으면) 그냥 앞부분만 잘라 보여준다. [알림] 문구는 이미 짧은 한국어 문장이라 그대로 둔다.
+function summarizeAutoInjectedPrompt(prompt) {
+  const p = (prompt || '').trim();
+  if (!p.startsWith('<task-notification>')) return p;
+  const status = p.match(/<status>([\s\S]*?)<\/status>/)?.[1]?.trim();
+  const summary = p.match(/<summary>([\s\S]*?)<\/summary>/)?.[1]?.trim();
+  if (summary) return status ? `[${status}] ${summary}` : summary;
+  return p.length > 150 ? `${p.slice(0, 150)}…` : p;
+}
+
+// 트랜스크립트 한 턴의 prompt 줄을 렌더링한다 — 자동 주입된 것이면 🔔 아이콘과 다른 스타일
+// (.chat-prompt-auto)로, 사용자가 직접 친 것이면 기존과 동일하게 "▸ "로 보여준다.
+function renderPromptLineHtml(prompt) {
+  if (isAutoInjectedPrompt(prompt)) {
+    return `<div class="chat-prompt chat-prompt-auto">🔔 ${escapeHtml(summarizeAutoInjectedPrompt(prompt))}</div>`;
+  }
+  return `<div class="chat-prompt">▸ ${escapeHtml(cleanPrompt(prompt))}</div>`;
+}
+
 // 팀장이 팀원 보고를 요약해서 최종 답변에 적어줘도 "그래서 뭐가 바뀌었는데?"는 여전히 안 보인다 —
 // 굳이 팀원 카드까지 내려가서 찾지 않아도, 팀장 대화창 바로 위에서 소속 팀원별 변경 파일을 바로
 // 열어볼 수 있게 한다(터미널 열기처럼 원본을 다 보여주는 게 아니라, 훑어보기 용도로 가볍게).
@@ -438,6 +475,75 @@ leadMembersChipsEl.addEventListener('click', e => {
   if (btn) showFileList(btn.dataset.files);
 });
 
+// 대기 중(큐/즉시전송 둘 다)인 메시지 중 실제로 서버 트랜스크립트에 나타난 게 있는지 항목별로
+// 확인해서 로컬 상태를 갱신한다 — resumeLead는 메시지를 가공 없이 그대로 프롬프트로 쓰므로,
+// 트랜스크립트에 똑같은 prompt가 나타나면 그 항목만 전달된(=응답까지 끝난) 것으로 판단할 수
+// 있다. 아직 안 나타난 나머지 항목들은 kind와 무관하게 그대로 유지한다.
+function syncQueuedMessagesWithTranscript(leadId, transcript) {
+  const listForLead = pendingChatTurns.get(leadId);
+  if (!listForLead || !listForLead.length) return;
+  const stillPending = listForLead.filter(item => !transcript.some(t => t.prompt === item.message));
+  if (stillPending.length === listForLead.length) return;
+  if (stillPending.length) pendingChatTurns.set(leadId, stillPending);
+  else pendingChatTurns.delete(leadId);
+}
+
+function removePendingChatTurn(leadId, itemId) {
+  const list = pendingChatTurns.get(leadId) || [];
+  const remaining = list.filter(item => item.id !== itemId);
+  if (remaining.length) pendingChatTurns.set(leadId, remaining);
+  else pendingChatTurns.delete(leadId);
+}
+
+function updatePendingChatTurn(leadId, itemId, patch) {
+  const list = pendingChatTurns.get(leadId) || [];
+  const item = list.find(i => i.id === itemId);
+  if (item) Object.assign(item, patch);
+}
+
+// resumeLead가 다른 짧은 id로 깨어나면(main.ts 주석 참고) selectedLeadId가 바뀌는데,
+// pendingChatTurns는 옛 id 밑에 남아있으면 새 id 기준으로 조회하는 renderChat()이 못 찾는다 —
+// 그 lead의 대기 항목 전부를 새 id 밑으로 옮긴다.
+function movePendingChatTurns(fromLeadId, toLeadId) {
+  if (fromLeadId === toLeadId) return;
+  const fromList = pendingChatTurns.get(fromLeadId);
+  if (!fromList || !fromList.length) return;
+  const toList = pendingChatTurns.get(toLeadId) || [];
+  pendingChatTurns.set(toLeadId, toList.concat(fromList));
+  pendingChatTurns.delete(fromLeadId);
+}
+
+// 팀장 자신이 busy인지, busy는 아니지만 소속 팀원이 아직 작업 중이라 사실상 대기 중인지를
+// 배너 문구로 계산한다.
+function computeBusyBannerHtml(row) {
+  const ownStatus = row && !row.offline ? getStatus(row) : '';
+  const isBusy = ownStatus === 'busy';
+  const waitingOnMember = !isBusy && !!row && (ownStatus === 'idle' || ownStatus === 'done') && hasBusyMember(row.id);
+  if (isBusy) return '<div class="chat-working">● 작업 중...</div>';
+  if (waitingOnMember) return '<div class="chat-working">⏳ 팀원 작업 대기중...</div>';
+  return '';
+}
+
+// 대기 중인 항목 전부를(가장 오래된 것부터, 배열에 push한 순서 그대로) 각각 별도의 chat-turn으로
+// 렌더링한다. kind==='queued'(팀장 busy라 큐에 쌓임)와 kind==='in-flight'(즉시 전송해서 응답
+// 대기 중)는 안내 문구가 다르고, in-flight는 서버측에 취소할 대상이 없으므로 취소 버튼을 아예
+// 안 보여준다. 취소 버튼 클릭은 chatTranscriptEl 위임 리스너 하나로 처리하므로(아래 참고) 여기선
+// 매번 새로 안 걸어도 된다. .chat-answer에 white-space:pre-wrap이 걸려있어서, 이 템플릿을 여러
+// 줄로 들여써서 만들면 그 들여쓰기/개행이 그대로 화면에 빈 줄로 보이고 취소 버튼도 엉뚱한 줄로
+// 밀려난다 — 한 줄로 이어서 만든다.
+function renderQueuedTurnsHtml(leadId) {
+  const list = pendingChatTurns.get(leadId) || [];
+  return list.map(item => {
+    const statusText = item.kind === 'queued'
+      ? '팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.'
+      : '응답을 기다리는 중...';
+    const cancelBtnHtml = item.kind === 'queued'
+      ? ` <button class="cancel-queued-btn" data-cancel-queued="${escapeHtml(item.id)}" data-cancel-lead="${escapeHtml(leadId)}">취소</button>`
+      : '';
+    return `<div class="chat-turn"><div class="chat-prompt">▸ ${escapeHtml(item.message)}</div><div class="chat-answer chat-pending">${statusText}${cancelBtnHtml}</div></div>`;
+  }).join('');
+}
+
 async function renderChat() {
   renderLeadMemberChips();
   if (!selectedLeadId) {
@@ -452,36 +558,11 @@ async function renderChat() {
     return;
   }
 
-  // 대기열에 넣어둔 메시지 중 실제로 전달된 게 있는지 항목별로 확인한다 — resumeLead는 메시지를
-  // 가공 없이 그대로 프롬프트로 쓰므로, 트랜스크립트에 똑같은 prompt가 나타나면 그 항목만 전달된
-  // 것으로 판단할 수 있다. 아직 안 전달된 나머지 항목들은 그대로 유지한다.
-  const queuedListForLead = queuedChatMessages.get(selectedLeadId);
-  if (queuedListForLead && queuedListForLead.length) {
-    const stillPending = queuedListForLead.filter(item => !transcript.some(t => t.prompt === item.message));
-    if (stillPending.length !== queuedListForLead.length) {
-      if (stillPending.length) queuedChatMessages.set(selectedLeadId, stillPending);
-      else queuedChatMessages.delete(selectedLeadId);
-    }
-  }
+  syncQueuedMessagesWithTranscript(selectedLeadId, transcript);
 
   const row = lastRows.find(r => r.isLead && r.id === selectedLeadId);
-  const ownStatus = row && !row.offline ? (row.status || row.state || '').toLowerCase() : '';
-  const isBusy = ownStatus === 'busy';
-  const waitingOnMember = !isBusy && !!row && (ownStatus === 'idle' || ownStatus === 'done') && hasBusyMember(row.id);
-  const busyBanner = isBusy
-    ? '<div class="chat-working">● 작업 중...</div>'
-    : waitingOnMember
-      ? '<div class="chat-working">⏳ 팀원 작업 대기중...</div>'
-      : '';
-
-  // 대기 중인 항목 전부를(가장 오래된 것부터, 배열에 push한 순서 그대로) 각각 별도의 chat-turn으로
-  // 보여주고, 각각에 취소 버튼을 붙인다. 클릭 리스너는 chatTranscriptEl 위임 하나로 처리한다
-  // (아래 chatTranscriptEl.addEventListener 참고) — 여기선 매번 새로 안 걸어도 된다.
-  const stillQueuedList = queuedChatMessages.get(selectedLeadId) || [];
-  // .chat-answer에 white-space:pre-wrap이 걸려있어서, 이 템플릿을 여러 줄로 들여써서 만들면
-  // 그 들여쓰기/개행이 그대로 화면에 빈 줄로 보이고 취소 버튼도 엉뚱한 줄로 밀려난다 — 한 줄로
-  // 이어서 만든다.
-  const queuedTurnHtml = stillQueuedList.map(item => `<div class="chat-turn"><div class="chat-prompt">▸ ${escapeHtml(item.message)}</div><div class="chat-answer chat-pending">팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다. <button class="cancel-queued-btn" data-cancel-queued="${escapeHtml(item.id)}" data-cancel-lead="${escapeHtml(selectedLeadId)}">취소</button></div></div>`).join('');
+  const busyBanner = computeBusyBannerHtml(row);
+  const queuedTurnHtml = renderQueuedTurnsHtml(selectedLeadId);
 
   // 3초마다 도는 폴링 갱신마다 무조건 맨 아래로 스크롤하면, 옛날 대화를 읽으려고 위로 스크롤해둔 걸
   // 계속 끌어내린다 — 이미 맨 아래 근처에 있을 때만("계속 따라가기") 다시 맨 아래로 붙인다.
@@ -493,7 +574,7 @@ async function renderChat() {
     chatTranscriptEl.innerHTML = transcript.map(t => `
       <div class="chat-turn">
         <div class="chat-time">${escapeHtml(t.time)}</div>
-        <div class="chat-prompt">▸ ${escapeHtml(cleanPrompt(t.prompt))}</div>
+        ${renderPromptLineHtml(t.prompt)}
         <div class="chat-answer">${escapeHtml(t.answer)}</div>
       </div>
     `).join('') + queuedTurnHtml + busyBanner;
@@ -527,10 +608,7 @@ chatTranscriptEl.addEventListener('click', async e => {
   // main.ts 쪽 파일에서 못 찾았어도(이미 전달됐거나 이미 취소됨) 사용자가 취소를 누른 의도는
   // 그대로 반영한다 — 실제로 이미 전달된 경우라면 다음 renderChat에서 트랜스크립트 비교로도
   // 결국 지워지므로 여기서 먼저 지워도 안전하다.
-  const list = queuedChatMessages.get(leadId) || [];
-  const remaining = list.filter(item => item.id !== noticeId);
-  if (remaining.length) queuedChatMessages.set(leadId, remaining);
-  else queuedChatMessages.delete(leadId);
+  removePendingChatTurn(leadId, noticeId);
   await renderChat();
 });
 
@@ -594,19 +672,18 @@ async function sendChatMessage() {
   busyLeadIds.add(leadId);
   updateBusyUI();
 
-  // 응답이 올 때까지(길게는 수십 초) 방금 보낸 메시지가 화면에 전혀 안 보이면 전송이 안 된 것처럼
-  // 보인다 — 실제 응답이 오기 전까지 낙관적으로 먼저 채팅창에 얹어서 보여준다. 응답이 오면
-  // renderChat()이 서버 기록 기준으로 다시 그리면서 이 임시 말풍선을 자연스럽게 대체한다.
-  const wasNearBottom = chatTranscriptEl.scrollHeight - chatTranscriptEl.scrollTop - chatTranscriptEl.clientHeight < 40;
-  const optimisticTurn = document.createElement('div');
-  optimisticTurn.className = 'chat-turn';
-  optimisticTurn.innerHTML = `
-    <div class="chat-time">${escapeHtml(new Date().toLocaleTimeString('ko-KR'))}</div>
-    <div class="chat-prompt">▸ ${escapeHtml(message)}</div>
-    <div class="chat-answer chat-pending">응답을 기다리는 중...</div>
-  `;
-  chatTranscriptEl.appendChild(optimisticTurn);
-  if (wasNearBottom) chatTranscriptEl.scrollTop = chatTranscriptEl.scrollHeight;
+  // 서버 응답(sendToLead의 IPC 왕복)을 기다리는 동안에도 방금 보낸 메시지가 즉시 보여야 전송이
+  // 된 것처럼 느껴진다 — 대기열(queued)과 완전히 같은 pendingChatTurns 구조에 우선 'in-flight'로
+  // 넣어서 지금 바로 renderChat()으로 그려준다. 서버가 실제로는 큐에 넣었다고 하면 아래에서
+  // kind를 'queued'로 바꾼다. 이렇게 하면 즉시 전송 건도 refreshBoardNow()가 renderChat()으로
+  // 화면을 서버 트랜스크립트로 통째로 다시 그려도(아직 이 턴이 없으니) 계속 보인다 — 예전엔
+  // optimisticTurn을 DOM에 직접 얹기만 해서, 그 직후 refreshBoardNow()가 화면을 덮어쓰며 이
+  // 메시지가 잠깐 사라졌다 나중에 다시 뜨는 것처럼 보이는 버그가 있었다.
+  const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const list = pendingChatTurns.get(leadId) || [];
+  list.push({ id: localId, message, kind: 'in-flight' });
+  pendingChatTurns.set(leadId, list);
+  renderChat();
 
   // 버튼이 disabled로 회색이 되는 것만으로는(updateBusyUI) "전송 중"인지 "다른 이유로 잠김"인지
   // 구분이 잘 안 된다는 피드백이 있어서, 전송 자체가 진행 중인 동안엔 버튼 라벨도 짧게 바꿔준다.
@@ -617,35 +694,33 @@ async function sendChatMessage() {
     const result = await window.api.sendToLead(leadId, message);
     if (!result || result.status === 'not-found') {
       // 오프라인 팀장을 이어하려다 실패한 경우(세션 만료 등) 여기서 걸린다 — 조용히 넘어가지 않는다.
-      optimisticTurn.remove();
+      removePendingChatTurn(leadId, localId);
+      await renderChat(); // pendingChatTurns에서 지운 in-flight 항목을 화면에서도 지운다
       chatTranscriptEl.insertAdjacentHTML('beforeend', '<p style="color:#f14c4c">이어하기에 실패했습니다 — 세션이 만료됐거나 claude CLI 실행에 문제가 있을 수 있습니다.</p>');
       return;
     }
     if (result.status === 'queued') {
       // 팀장이 지금 작업 중이면 claude CLI 자체에 실행 중인 세션에 끼어들어 입력만 추가하는 기능이
       // 없어서(claude --help 확인) stop→resume으로 끊는 수밖에 없다 — main.ts가 끊지 않고 큐에
-      // 담아뒀다가 팀장이 idle/blocked가 되면 자동으로 전달한다. 그때까지 무한정 기다리는 것처럼
-      // 보이지 않도록 안내로 바꾸고, queuedChatMessages에 추가해서 renderChat이 폴링마다 계속
-      // 보여주게 한다(전달되면 자동으로 사라짐). 같은 팀장에게 연달아 여러 개를 보내도 각각 독립적인
-      // 항목으로 남아야 하므로 덮어쓰지 않고 배열에 push한다 — result.id는 main.ts가 발급한
-      // PendingNotice의 id라 이후 취소/전달완료 판정에 쓰인다.
-      const queuedList = queuedChatMessages.get(leadId) || [];
-      queuedList.push({ id: result.id, message });
-      queuedChatMessages.set(leadId, queuedList);
-      const answerEl = optimisticTurn.querySelector('.chat-answer');
-      if (answerEl) answerEl.textContent = '팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.';
+      // 담아뒀다가 팀장이 idle/blocked가 되면 자동으로 전달한다. 방금 'in-flight'로 넣어둔 항목을
+      // 'queued'로 바꾸고 id도 main.ts가 발급한 PendingNotice.id로 갱신한다(이후 취소/전달완료
+      // 판정에 쓰인다).
+      updatePendingChatTurn(leadId, localId, { id: result.id, kind: 'queued' });
       // 3초 폴링을 기다리지 않고 팀장의 busy 표시 등을 바로 반영한다(카드 새로고침 버튼과 동일한 방식).
       await refreshBoardNow();
       return;
     }
     // resumeLead가 다른 짧은 id로 깨어날 수 있다(main.ts resumeLead 주석 참고) — 반영하지 않으면
-    // 대화창 선택이 풀려서 방금 보낸 대화가 사라진 것처럼 보인다.
+    // 대화창 선택이 풀려서 방금 보낸 대화가 사라진 것처럼 보인다. pendingChatTurns도 새 id 밑으로
+    // 옮겨야 renderChat()이 selectedLeadId 기준으로 계속 찾는다.
+    movePendingChatTurns(leadId, result.id);
     selectedLeadId = result.id;
     // renderChat()만 부르면 대화 내용만 갱신되고, 카드의 busy 표시 등은 다음 3초 폴링까지 그대로다 —
     // refreshBoardNow()가 renderBoard()를 거쳐 renderChat()까지 알아서 호출해주므로 이걸로 대체한다.
     await refreshBoardNow();
   } catch (err) {
-    optimisticTurn.remove();
+    removePendingChatTurn(leadId, localId);
+    await renderChat(); // pendingChatTurns에서 지운 in-flight 항목을 화면에서도 지운다
     chatTranscriptEl.insertAdjacentHTML('beforeend', `<p style="color:#f14c4c">이어하기 중 오류가 발생했습니다: ${escapeHtml(errMsg(err))}</p>`);
   } finally {
     chatSendBtn.textContent = originalSendLabel;

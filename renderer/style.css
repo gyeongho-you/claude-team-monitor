@@ -288,6 +288,9 @@ body.modal-open { overflow: hidden; }
 .chat-turn { margin-bottom: 10px; }
 .chat-turn .chat-time { color: var(--text-dim); font-size: 10px; }
 .chat-turn .chat-prompt { color: var(--accent-3); margin: 2px 0; white-space: pre-wrap; }
+/* 사용자가 직접 친 메시지가 아니라 하네스/앱이 자동으로 주입한 알림(task-notification, [알림] 등) —
+   사용자 메시지와 헷갈리지 않도록 톤을 낮추고 기울임으로 구분한다. */
+.chat-turn .chat-prompt.chat-prompt-auto { color: var(--text-dim); font-style: italic; }
 .chat-turn .chat-answer { color: var(--text); white-space: pre-wrap; margin-left: 8px; border-left: 2px solid var(--border-2); padding-left: 8px; }
 /* sendChatMessage가 응답이 오기 전까지 낙관적으로 얹어두는 말풍선 — 아직 확정된 내용이 아님을
    흐릿하게/기울임으로 표시해서 실제 답변과 구분되게 한다. */

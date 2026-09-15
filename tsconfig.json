@@ -4,12 +4,12 @@
     "module": "CommonJS",
     "lib": ["ES2022"],
     "strict": true,
+    "allowJs": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "outDir": "./dist",
-    "rootDir": "./src",
     "resolveJsonModule": true,
     "types": ["node", "electron"]
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*", "renderer/lib/**/*"]
 }
