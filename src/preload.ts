@@ -34,6 +34,7 @@ contextBridge.exposeInMainWorld('api', {
   getChangedFiles: (cwd: string) => ipcRenderer.invoke('get-changed-files', cwd),
   getFileDiff: (cwd: string, file: string) => ipcRenderer.invoke('get-file-diff', cwd, file),
   sendToLead: (leadId: string, message: string) => ipcRenderer.invoke('send-to-lead', leadId, message),
+  cancelQueuedMessage: (leadId: string, noticeId: string) => ipcRenderer.invoke('cancel-queued-message', leadId, noticeId),
   updateLeadLabel: (leadId: string, label: string) => ipcRenderer.invoke('update-lead-label', leadId, label),
   restartLead: (leadId: string, instruction: string) => ipcRenderer.invoke('restart-lead', leadId, instruction),
   endLeadWork: (leadId: string) => ipcRenderer.invoke('end-lead-work', leadId),

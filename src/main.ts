@@ -97,8 +97,10 @@ type MemberRequest = {
 };
 
 // 사용자가 "+ 팀원 직접 추가"로 팀장 몰래(?) 팀원을 붙였을 때, 팀장이 busy 상태에서 억지로
-// 끊기지 않도록 알림을 큐에 쌓아뒀다가 idle/blocked일 때만 전달한다.
-type PendingNotice = { leadId: string; message: string; createdAt: number };
+// 끊기지 않도록 알림을 큐에 쌓아뒀다가 idle/blocked일 때만 전달한다. id는 렌더러가 "이 항목이
+// 아직 전달됐는지/취소됐는지"를 개별적으로 추적할 수 있게 하는 용도다(같은 팀장에게 여러 개가
+// 동시에 쌓일 수 있어서 leadId만으로는 항목을 구분할 수 없다 — cancel-queued-message 참고).
+type PendingNotice = { id: string; leadId: string; message: string; createdAt: number };
 
 function getResourcesRoot(): string {
   // app.getAppPath()는 개발 중엔 프로젝트 루트, electron-packager로 패키징한 뒤엔
@@ -318,10 +320,25 @@ function savePendingNotices(notices: PendingNotice[]): void {
   }
 }
 
-function queueLeadNotice(leadId: string, message: string): void {
+// 생성한 알림의 id를 반환한다 — 채팅 큐잉처럼 호출부가 나중에 이 항목을 특정해서 취소해야 하는
+// 경우에 쓴다(다른 호출부는 반환값을 그냥 무시해도 된다).
+function queueLeadNotice(leadId: string, message: string): string {
   const notices = loadPendingNotices();
-  notices.push({ leadId, message, createdAt: Date.now() });
+  const id = `notice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  notices.push({ id, leadId, message, createdAt: Date.now() });
   savePendingNotices(notices);
+  return id;
+}
+
+// 아직 전달 안 된 대기열 항목을 사용자가 직접 취소할 수 있게 한다 — leadId+id가 둘 다 맞는
+// 항목만 지운다(다른 팀장의 것을 실수로 건드리지 않게). 이미 전달됐거나(폴링이 먼저 소모함)
+// 이미 취소돼서 못 찾으면 false — 렌더러는 이 경우도 로컬 상태만 정리하고 조용히 넘어간다.
+function cancelQueuedNotice(leadId: string, noticeId: string): boolean {
+  const notices = loadPendingNotices();
+  const filtered = notices.filter(n => !(n.leadId === leadId && n.id === noticeId));
+  if (filtered.length === notices.length) return false;
+  savePendingNotices(filtered);
+  return true;
 }
 
 // 팀원이 busy → idle/done으로 바뀌는 순간(=일을 마쳤을 가능성)을 감지하려고 폴링마다 마지막으로
@@ -349,22 +366,35 @@ const MEMBER_CLEANUP_GRACE_MS = 15000;
 // 유예 기간이 지난, 멀쩡히 동작 중이던 팀원도 claude stop→resume되는 그 짧은 순간(프로세스가 잠깐
 // 사라졌다가 새 pid로 재기동되는 구간)엔 agents 스냅샷에서 한 번 빠질 수 있다(실측 재현됨 — 살아있는
 // 팀원 4명의 등록 파일이 단 한 번의 폴링 미스로 전부 삭제됨). 그래서 한 번 빠진 것만으로 바로 지우지
-// 않고, 연속으로 이 횟수 이상 못 잡혔을 때만 정리한다. memberId별 연속 미스 횟수는 폴링 사이에도
-// 유지해야 하므로 모듈 스코프에 둔다.
-const MEMBER_CLEANUP_MISS_THRESHOLD = 2;
-const memberMissStreaks = new Map<string, number>();
+// 않고, 일정 시간(MEMBER_MISS_GRACE_MS) 안에 다시 잡히면 봐준다.
+//
+// 처음엔 "연속으로 N번 못 잡혔을 때만" 식의 폴링 횟수 기반 카운터였는데, renderer.js의
+// sendChatMessage가 채팅 전송 직후 refreshBoardNow()로 buildSessionRows()를 즉시 한 번 더
+// 호출하도록 바뀌면서(3초 정기 폴링과는 별개로) 회귀가 생겼다 — 팀장 프로세스가 실제로
+// 재기동되기도 전에 그 즉시호출이 미스 카운트를 1 소모해버려서, 정기 폴링이 3초 뒤 딱 한 번만
+// 더 못 잡혀도 threshold(2)에 도달해 곧바로 오프라인/삭제 처리됐다(실측 재현됨 — "채팅 보내면
+// 팀장/팀원 목록이 통째로 사라졌다가 그다음 폴링에 다시 뜸"). 즉 "폴링 몇 번"은 buildSessionRows가
+// 얼마나 자주 불리는지에 따라 실제 경과 시간이 고무줄처럼 늘었다 줄었다 해서 유예 시간을 보장하지
+// 못한다. 그래서 횟수 대신 "처음 못 잡힌 시각"을 저장해두고 실제 경과 시간으로 판단한다 —
+// buildSessionRows가 짧은 간격으로 몇 번을 더 불리든(즉시호출+정기폴링 등) 결과가 달라지지 않는다.
+// memberId별 값은 폴링 사이에도 유지해야 하므로 모듈 스코프에 둔다.
+const MEMBER_MISS_GRACE_MS = 8000;
+const memberFirstMissAt = new Map<string, number>();
 
 // 팀장도 팀원 정리와 완전히 같은 TOCTOU를 겪는다 — 멀쩡히 응답 중이던 팀장도 채팅을 보낼 때마다
 // stop→resume이 도는데, 그 짧은 재기동 구간엔 agents 스냅샷에서 한 번 빠질 수 있다. 그 순간 바로
 // "오프라인"으로 분류해버리면 온라인 목록(카드)에서 사라지고 히스토리 탭으로 밀려난다(채팅을 자주
-// 보낼수록 자주 재현됨). 팀원과 동일하게 연속 미스 카운터를 둬서 threshold 이상 연속으로 못 잡힐
-// 때만 오프라인으로 분류한다.
-const LEAD_OFFLINE_MISS_THRESHOLD = 2;
-const leadMissStreaks = new Map<string, number>();
+// 보낼수록 자주 재현됨). 팀원과 동일한 이유로, 그리고 팀원과 똑같이 카운터 기반이었다가 겪은 같은
+// 회귀 때문에(위 MEMBER_MISS_GRACE_MS 주석 참고) "처음 못 잡힌 시각" 기준으로 판단한다.
+const LEAD_OFFLINE_GRACE_MS = 8000;
+const leadFirstMissAt = new Map<string, number>();
 
 // 보드에는 "내가 띄운 팀장"과 "팀장이 등록한 팀원"만 보여준다 — 그 외(사용자가 따로 열어둔 무관한
 // 세션 등)는 team-lead 체계 밖이므로 제외한다. interactive 세션은 애초에 짧은 id가 없어서 자동으로 빠진다.
-async function buildSessionRows(): Promise<{ rows: SessionRow[]; requests: MemberRequest[] }> {
+async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; requests: MemberRequest[] }> {
+  // 아래 leadFirstMissAt/memberFirstMissAt 유예 판정에 쓸 기준 시각 — 이 함수 실행 도중 한 번만
+  // 고정해서 재는다(같은 호출 안에서 Date.now()를 여러 번 부르며 값이 갈리는 걸 방지).
+  const now = Date.now();
   const agents = await fetchAgents();
   const agentIdSet = new Set(agents.filter(a => !!a.id).map(a => a.id));
   const leads = loadLeads();
@@ -429,26 +459,28 @@ async function buildSessionRows(): Promise<{ rows: SessionRow[]; requests: Membe
   // 지금 떠있지 않은 팀장은 기록을 지우지 않고 "오프라인"으로 남겨둔다 — PC 재부팅 등으로 프로세스가
   // 죽어도 세션 자체는 claude 쪽에 남아있어서 --bg --resume으로 다시 깨울 수 있기 때문이다(대화창에서
   // 메시지를 보내면 자동으로 이 절차를 탄다, resumeLead 참고). 단, agents 스냅샷에 한 번 안 잡힌
-  // 것만으로 바로 오프라인 처리하지 않는다(LEAD_OFFLINE_MISS_THRESHOLD 주석 참고) — 연속 미스가
-  // threshold 미만이면 이번 폴링에서만 목록에 안 잡히고, 다음 폴링에 스스로 복구된다.
+  // 것만으로 바로 오프라인 처리하지 않는다(LEAD_OFFLINE_GRACE_MS 주석 참고) — 처음 못 잡힌
+  // 시각으로부터 유예 시간이 지나기 전이면 이번 폴링에서만 목록에 안 잡히고, 다음 폴링에 스스로
+  // 복구된다.
   const offlineLeads: LeadRecord[] = [];
   leads.forEach(l => {
     if (agentIdSet.has(l.id)) {
-      leadMissStreaks.delete(l.id);
+      leadFirstMissAt.delete(l.id);
       return;
     }
-    const misses = (leadMissStreaks.get(l.id) ?? 0) + 1;
-    if (misses < LEAD_OFFLINE_MISS_THRESHOLD) {
-      leadMissStreaks.set(l.id, misses);
+    const firstMissAt = leadFirstMissAt.get(l.id);
+    if (firstMissAt === undefined) {
+      leadFirstMissAt.set(l.id, now);
       return;
     }
+    if (now - firstMissAt < LEAD_OFFLINE_GRACE_MS) return;
     offlineLeads.push(l);
   });
-  // 다른 경로로 이미 사라진(현재는 없지만 혹시 모를) leadId의 미스 카운터를 정리해 Map이 무한정
-  // 자라지 않게 한다 — 팀원 정리 로직과 동일한 방어.
+  // 다른 경로로 이미 사라진(현재는 없지만 혹시 모를) leadId의 기록을 정리해 Map이 무한정 자라지
+  // 않게 한다 — 팀원 정리 로직과 동일한 방어.
   const currentLeadIds = new Set(leads.map(l => l.id));
-  for (const key of leadMissStreaks.keys()) {
-    if (!currentLeadIds.has(key)) leadMissStreaks.delete(key);
+  for (const key of leadFirstMissAt.keys()) {
+    if (!currentLeadIds.has(key)) leadFirstMissAt.delete(key);
   }
   let leadsDirty = false;
   const offlineRows: SessionRow[] = offlineLeads.map(l => {
@@ -477,31 +509,47 @@ async function buildSessionRows(): Promise<{ rows: SessionRow[]; requests: Membe
   const rows = [...liveRows, ...offlineRows];
 
   // 팀원은 팀장과 달리 일회성 하위 작업 단위라 이어할 필요가 적어서, 종료되면 정리한다 — 단,
-  // 방금(MEMBER_CLEANUP_GRACE_MS 이내) 등록된 팀원은 봐주고(TOCTOU), 연속 미스가
-  // MEMBER_CLEANUP_MISS_THRESHOLD회 미만이면(=stop→resume 재기동 구간일 수 있음) 아직 지우지 않는다.
+  // 방금(MEMBER_CLEANUP_GRACE_MS 이내) 등록된 팀원은 봐주고(TOCTOU), 처음 못 잡힌 시각으로부터
+  // MEMBER_MISS_GRACE_MS가 지나기 전이면(=stop→resume 재기동 구간일 수 있음) 아직 지우지 않는다.
   const currentMemberIds = new Set(members.map(m => m.memberId));
   members.forEach(m => {
-    if (Date.now() - m.createdAt < MEMBER_CLEANUP_GRACE_MS) return;
+    if (now - m.createdAt < MEMBER_CLEANUP_GRACE_MS) return;
     if (agentIdSet.has(m.memberId)) {
-      memberMissStreaks.delete(m.memberId);
+      memberFirstMissAt.delete(m.memberId);
       return;
     }
-    const misses = (memberMissStreaks.get(m.memberId) ?? 0) + 1;
-    if (misses < MEMBER_CLEANUP_MISS_THRESHOLD) {
-      memberMissStreaks.set(m.memberId, misses);
+    const firstMissAt = memberFirstMissAt.get(m.memberId);
+    if (firstMissAt === undefined) {
+      memberFirstMissAt.set(m.memberId, now);
       return;
     }
-    memberMissStreaks.delete(m.memberId);
+    if (now - firstMissAt < MEMBER_MISS_GRACE_MS) return;
+    memberFirstMissAt.delete(m.memberId);
     try { fs.unlinkSync(path.join(MEMBERS_DIR, `${m.memberId}.json`)); } catch { /* ignore */ }
   });
-  // 등록 파일이 다른 경로(수동 종료 버튼 등)로 이미 사라진 memberId의 미스 카운터는 여기서 정리해야
+  // 등록 파일이 다른 경로(수동 종료 버튼 등)로 이미 사라진 memberId의 기록은 여기서 정리해야
   // Map이 무한정 자라지 않는다.
-  for (const key of memberMissStreaks.keys()) {
-    if (!currentMemberIds.has(key)) memberMissStreaks.delete(key);
+  for (const key of memberFirstMissAt.keys()) {
+    if (!currentMemberIds.has(key)) memberFirstMissAt.delete(key);
   }
 
   const requests = loadPendingRequests();
   return { rows, requests };
+}
+
+// buildSessionRowsInternal은 이제 3초 정기 폴링뿐 아니라 refresh-board IPC(채팅 전송 직후 등)로도
+// 짧은 간격에 겹쳐 호출될 수 있다. 겹쳐 호출된 두 번의 실행은 각자 다른 시점에 `claude agents --json`을
+// 실행하는데(exec는 매번 새 프로세스를 띄우므로 소요 시간이 들쭉날쭉하다), 나중에 "시작"한 쪽이
+// 시스템 부하 등으로 먼저 "완료"해버리면, 더 늦게 완료된(=먼저 시작했지만 더 느렸던) 호출의 오래된
+// 스냅숏이 나중에 렌더러로 전달되어 방금 반영된 최신 상태(예: 막 idle로 바뀐 것)를 오래된 값(예:
+// busy)으로 덮어써버릴 수 있다 — 실제로는 끝났는데 화면엔 계속 "작업중"으로 남는 것처럼 보이는
+// 원인이 될 수 있다. 완료 순서가 항상 시작 순서와 같도록(=먼저 시작한 호출의 결과가 항상 먼저
+// 반영되도록) 아래처럼 직렬화한다 — 겹쳐 호출되면 앞선 호출이 끝난 뒤에야 다음 호출이 실제로 시작된다.
+let buildSessionRowsChain: Promise<unknown> = Promise.resolve();
+function buildSessionRows(): Promise<{ rows: SessionRow[]; requests: MemberRequest[] }> {
+  const run = buildSessionRowsChain.then(buildSessionRowsInternal, buildSessionRowsInternal);
+  buildSessionRowsChain = run.catch(() => undefined);
+  return run;
 }
 
 function loadPendingRequests(): MemberRequest[] {
@@ -1096,13 +1144,16 @@ ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string) => {
   const agent = agents.find(a => a.id === leadId);
   const isBusy = !!agent && (agent.status || agent.state || '').toLowerCase() === 'busy';
   if (isBusy) {
-    queueLeadNotice(leadId, message);
-    return { status: 'queued' as const };
+    const noticeId = queueLeadNotice(leadId, message);
+    return { status: 'queued' as const, id: noticeId };
   }
 
   const id = await queueLeadOperation(leadId, () => resumeLead(lead.sessionId, lead.targetDir, message));
   return { status: 'sent' as const, id };
 });
+
+// 대기열에 쌓아둔 메시지 중 아직 전달 안 된 것을 사용자가 취소할 수 있게 한다(채팅창의 "취소" 버튼).
+ipcMain.handle('cancel-queued-message', (_e, leadId: string, noticeId: string) => cancelQueuedNotice(leadId, noticeId));
 
 ipcMain.handle('update-lead-label', (_e, leadId: string, label: string) => {
   const leads = loadLeads();

@@ -291,6 +291,8 @@ body.modal-open { overflow: hidden; }
 /* sendChatMessage가 응답이 오기 전까지 낙관적으로 얹어두는 말풍선 — 아직 확정된 내용이 아님을
    흐릿하게/기울임으로 표시해서 실제 답변과 구분되게 한다. */
 .chat-turn .chat-answer.chat-pending { color: var(--text-dim); font-style: italic; }
+/* 대기열 항목의 취소 버튼 — 안내 문구 옆에 작게 붙는다(전송/재시작 등 다른 보조 버튼과 톤 맞춤). */
+.chat-turn .cancel-queued-btn { margin-left: 6px; font-size: 10px; padding: 1px 6px; background: var(--border-2); color: var(--text); font-style: normal; }
 .chat-input-row { display: flex; gap: 6px; }
 #chat-input { flex: 1; height: 50px; background: var(--bg); border: 1px solid var(--border-2); color: var(--text); padding: 6px; resize: vertical; }
 

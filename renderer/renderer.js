@@ -225,10 +225,12 @@ let lastLeadIds = new Set();
 // 같은 팀장에 여러 조작이 겹치면 세션이 갈라질 수 있어서(main.ts의 leadId 큐 참고), 진행 중엔 관련
 // 버튼을 비활성화해 사용자가 겹쳐서 누르는 걸 막는다.
 const busyLeadIds = new Set();
-// 팀장이 busy라 곧바로 stop→resume하지 못하고 큐에 쌓아둔(main.ts send-to-lead 참고) 메시지 원문 —
-// leadId당 하나씩만 기억한다. renderChat()이 폴링마다 이 안내를 대화창 맨 아래에 다시 붙여줘서,
-// 무한정 응답을 기다리는 것처럼 보이지 않게 한다. 실제로 전달돼서 트랜스크립트에 같은 프롬프트가
-// 나타나면 renderChat()이 알아서 지운다.
+// 팀장이 busy라 곧바로 stop→resume하지 못하고 큐에 쌓아둔(main.ts send-to-lead 참고) 메시지들 —
+// leadId -> Array<{ id, message }>. 팀장 하나에게 busy 상태에서 여러 메시지를 연달아 보내도 전부
+// 화면에 남아있어야 해서 배열로 각각 독립적으로 추적한다(id는 main.ts PendingNotice.id와 매칭돼서
+// 개별 취소/전달완료 판정에 쓰인다). renderChat()이 폴링마다 이 안내들을 대화창 맨 아래에 다시
+// 붙여줘서, 무한정 응답을 기다리는 것처럼 보이지 않게 한다. 실제로 전달돼서 트랜스크립트에 같은
+// 프롬프트가 나타나면 그 항목만 renderChat()이 알아서 지운다.
 const queuedChatMessages = new Map();
 
 // 역할 선택(정해진 역할 드롭다운 + "직접 입력") 공용 헬퍼 — work 탭 팀원 직접 추가와 설정 탭
@@ -439,11 +441,16 @@ async function renderChat() {
     return;
   }
 
-  // 대기열에 넣어둔 메시지가 실제로 전달됐는지 확인한다 — resumeLead는 메시지를 가공 없이 그대로
-  // 프롬프트로 쓰므로, 트랜스크립트에 똑같은 prompt가 나타나면 전달된 것으로 판단할 수 있다.
-  const queuedForThisLead = queuedChatMessages.get(selectedLeadId);
-  if (queuedForThisLead && transcript.some(t => t.prompt === queuedForThisLead)) {
-    queuedChatMessages.delete(selectedLeadId);
+  // 대기열에 넣어둔 메시지 중 실제로 전달된 게 있는지 항목별로 확인한다 — resumeLead는 메시지를
+  // 가공 없이 그대로 프롬프트로 쓰므로, 트랜스크립트에 똑같은 prompt가 나타나면 그 항목만 전달된
+  // 것으로 판단할 수 있다. 아직 안 전달된 나머지 항목들은 그대로 유지한다.
+  const queuedListForLead = queuedChatMessages.get(selectedLeadId);
+  if (queuedListForLead && queuedListForLead.length) {
+    const stillPending = queuedListForLead.filter(item => !transcript.some(t => t.prompt === item.message));
+    if (stillPending.length !== queuedListForLead.length) {
+      if (stillPending.length) queuedChatMessages.set(selectedLeadId, stillPending);
+      else queuedChatMessages.delete(selectedLeadId);
+    }
   }
 
   const row = lastRows.find(r => r.isLead && r.id === selectedLeadId);
@@ -456,13 +463,19 @@ async function renderChat() {
       ? '<div class="chat-working">⏳ 팀원 작업 대기중...</div>'
       : '';
 
-  const stillQueued = queuedChatMessages.get(selectedLeadId);
-  const queuedTurnHtml = stillQueued ? `
+  // 대기 중인 항목 전부를(가장 오래된 것부터, 배열에 push한 순서 그대로) 각각 별도의 chat-turn으로
+  // 보여주고, 각각에 취소 버튼을 붙인다. 클릭 리스너는 chatTranscriptEl 위임 하나로 처리한다
+  // (아래 chatTranscriptEl.addEventListener 참고) — 여기선 매번 새로 안 걸어도 된다.
+  const stillQueuedList = queuedChatMessages.get(selectedLeadId) || [];
+  const queuedTurnHtml = stillQueuedList.map(item => `
     <div class="chat-turn">
-      <div class="chat-prompt">▸ ${escapeHtml(stillQueued)}</div>
-      <div class="chat-answer chat-pending">팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.</div>
+      <div class="chat-prompt">▸ ${escapeHtml(item.message)}</div>
+      <div class="chat-answer chat-pending">
+        팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.
+        <button class="cancel-queued-btn" data-cancel-queued="${escapeHtml(item.id)}" data-cancel-lead="${escapeHtml(selectedLeadId)}">취소</button>
+      </div>
     </div>
-  ` : '';
+  `).join('');
 
   // 3초마다 도는 폴링 갱신마다 무조건 맨 아래로 스크롤하면, 옛날 대화를 읽으려고 위로 스크롤해둔 걸
   // 계속 끌어내린다 — 이미 맨 아래 근처에 있을 때만("계속 따라가기") 다시 맨 아래로 붙인다.
@@ -482,6 +495,31 @@ async function renderChat() {
   if (wasNearBottom) chatTranscriptEl.scrollTop = chatTranscriptEl.scrollHeight;
   updateBusyUI();
 }
+
+// 대기열 항목의 "취소" 버튼 — chatTranscriptEl이 폴링마다(그리고 renderChat 호출마다) innerHTML을
+// 통째로 다시 그리므로, 다른 곳(leadMembersChipsEl/fileListContentEl)과 같은 패턴으로 위임 리스너
+// 하나만 걸어둔다.
+chatTranscriptEl.addEventListener('click', async e => {
+  const btn = e.target.closest('[data-cancel-queued]');
+  if (!btn) return;
+  const leadId = btn.dataset.cancelLead;
+  const noticeId = btn.dataset.cancelQueued;
+  btn.disabled = true;
+  try {
+    await window.api.cancelQueuedMessage(leadId, noticeId);
+  } catch (err) {
+    console.error('대기열 메시지 취소 실패:', err);
+  } finally {
+    // main.ts 쪽 파일에서 못 찾았어도(이미 전달됐거나 이미 취소됨) 사용자가 취소를 누른 의도는
+    // 그대로 반영한다 — 실제로 이미 전달된 경우라면 다음 renderChat에서 트랜스크립트 비교로도
+    // 결국 지워지므로 여기서 먼저 지워도 안전하다.
+    const list = queuedChatMessages.get(leadId) || [];
+    const remaining = list.filter(item => item.id !== noticeId);
+    if (remaining.length) queuedChatMessages.set(leadId, remaining);
+    else queuedChatMessages.delete(leadId);
+    await renderChat();
+  }
+});
 
 // formMode('none'/'launch'/'adopt')만으로는 "팀장이 0개라 launch 폼이 기본으로 뜬 상태"를 못
 // 구분해서, 대화창/팀원 목록 양쪽에서 써야 하는 이 계산을 함수 하나로 뽑아둔다.
@@ -574,9 +612,13 @@ async function sendChatMessage() {
       // 팀장이 지금 작업 중이면 claude CLI 자체에 실행 중인 세션에 끼어들어 입력만 추가하는 기능이
       // 없어서(claude --help 확인) stop→resume으로 끊는 수밖에 없다 — main.ts가 끊지 않고 큐에
       // 담아뒀다가 팀장이 idle/blocked가 되면 자동으로 전달한다. 그때까지 무한정 기다리는 것처럼
-      // 보이지 않도록 안내로 바꾸고, queuedChatMessages에 기억해서 renderChat이 폴링마다 계속
-      // 보여주게 한다(전달되면 자동으로 사라짐).
-      queuedChatMessages.set(leadId, message);
+      // 보이지 않도록 안내로 바꾸고, queuedChatMessages에 추가해서 renderChat이 폴링마다 계속
+      // 보여주게 한다(전달되면 자동으로 사라짐). 같은 팀장에게 연달아 여러 개를 보내도 각각 독립적인
+      // 항목으로 남아야 하므로 덮어쓰지 않고 배열에 push한다 — result.id는 main.ts가 발급한
+      // PendingNotice의 id라 이후 취소/전달완료 판정에 쓰인다.
+      const queuedList = queuedChatMessages.get(leadId) || [];
+      queuedList.push({ id: result.id, message });
+      queuedChatMessages.set(leadId, queuedList);
       const answerEl = optimisticTurn.querySelector('.chat-answer');
       if (answerEl) answerEl.textContent = '팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.';
       // 3초 폴링을 기다리지 않고 팀장의 busy 표시 등을 바로 반영한다(카드 새로고침 버튼과 동일한 방식).
