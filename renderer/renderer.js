@@ -494,6 +494,15 @@ leadMembersChipsEl.addEventListener('click', e => {
 //   같은 팀장 앞으로 쌓인 여러 건을 번호를 매겨 하나로 합쳐서 보낼 수 있어서, 더 이상 원문
 //   메시지가 트랜스크립트 prompt와 정확히 일치하는지로 판단할 수 없다 — 대신 서버
 //   (pendingNotices.json)에 그 notice id가 아직 남아있는지로 판단한다.
+// get-lead-transcript는 그 세션(sessionId)의 "오늘"이 아니라 stop→resume으로 이어온 전체 기간의
+// 기록을 통째로 돌려준다 — 실측으로 확인해보니 "그래", "커밋해줘", "이어서" 같은 짧고 흔한 지시는
+// 몇 주에 걸쳐 같은 세션 안에서 수십 번씩 반복 등장한다. transcript 전체를 대상으로 "같은 prompt가
+// 있는지"만 보면, 지금 막 보낸 메시지가 예전에 이미 보냈던 것과 문구가 같다는 이유만으로 응답이
+// 오기도 전에 "이미 전달됨"으로 오판해서 pendingChatTurns에서 즉시 지워버린다 — 대기 중 말풍선이
+// busy 배너와 함께 그려지지도 못하고 사라지는 버그가 바로 이것이다(실사용 재현: "busy 배너는 뜨는데
+// 그 위에 말풍선이 안 뜬다"). 그래서 각 항목이 큐/즉시전송으로 넘어간 시점의 transcript 길이를
+// item.transcriptBaselineLen에 한 번만 기록해두고(그 뒤로는 절대 안 바꿈), 그 길이 이후에 새로 추가된
+// 항목에서만 일치를 찾는다 — 이미 지나간 과거 기록은 매칭 대상에서 아예 제외한다.
 async function syncQueuedMessagesWithTranscript(leadId, transcript) {
   const listForLead = pendingChatTurns.get(leadId);
   if (!listForLead || !listForLead.length) return;
@@ -532,15 +541,23 @@ async function syncQueuedMessagesWithTranscript(leadId, transcript) {
       if (item.kind === 'queued' && !remainingQueuedIds.has(item.id)) {
         item.kind = 'in-flight';
         item.matchBySubstring = true;
+        // 배달이 막 시작된 시점 — 이 시점까지 쌓인 기록은 전부 "이미 지나간 것"으로 보고 매칭
+        // 대상에서 뺀다(아래 baseline 설명 참고).
+        if (item.transcriptBaselineLen === undefined) item.transcriptBaselineLen = transcript.length;
       }
     }
   }
 
   const stillPending = currentList.filter(item => {
     if (item.kind === 'queued') return remainingQueuedIds ? remainingQueuedIds.has(item.id) : true;
+    // 이 항목을 처음 보는 순간(즉시전송으로 push된 직후 첫 렌더)의 transcript 길이를 기준선으로
+    // 고정한다 — 그 이후로는 절대 다시 계산하지 않는다. 항상 최신 transcript.length로 다시 계산하면
+    // "아직 응답이 안 와서 길이가 그대로인" 정상적인 경우와 구별이 안 된다.
+    if (item.transcriptBaselineLen === undefined) item.transcriptBaselineLen = transcript.length;
+    const newEntries = transcript.slice(item.transcriptBaselineLen);
     const delivered = item.matchBySubstring
-      ? transcript.some(t => t.prompt.includes(item.message))
-      : transcript.some(t => t.prompt === item.message);
+      ? newEntries.some(t => t.prompt.includes(item.message))
+      : newEntries.some(t => t.prompt === item.message);
     return !delivered;
   });
   if (stillPending.length === currentList.length) return;
