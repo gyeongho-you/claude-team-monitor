@@ -154,7 +154,11 @@ type MemberRequest = {
 // 동시에 쌓일 수 있어서 leadId만으로는 항목을 구분할 수 없다 — cancel-queued-message 참고).
 // leadInternalId는 LeadRecord.internalId다(짧은 id가 아님) — restartLead가 짧은 id/sessionId를
 // 바꿔도 큐에 쌓인 알림이 여전히 같은 팀장을 가리켜야 하기 때문이다.
-type PendingNotice = { id: string; leadInternalId: string; message: string; createdAt: number };
+// origin은 이 알림이 사용자가 직접 채팅으로 보낸 메시지인지('user', send-to-lead 경로), 시스템이
+// 자동으로 만든 알림인지('system', 팀원 완료 알림·직접 추가 알림 등)를 구분한다 — deliverPendingNotices가
+// 같은 팀장 앞으로 쌓인 것이어도 이 둘을 절대 한 덩어리로 묶지 않기 위해 쓴다(섞어서 묶으면
+// isAutoInjectedPrompt가 '[알림]' 문구 때문에 사용자 메시지까지 자동알림으로 오판해 잘못 표시된다).
+type PendingNotice = { id: string; leadInternalId: string; message: string; createdAt: number; origin: 'user' | 'system' };
 
 function getResourcesRoot(): string {
   // app.getAppPath()는 개발 중엔 프로젝트 루트, electron-packager로 패키징한 뒤엔
@@ -383,10 +387,11 @@ function savePendingNotices(notices: PendingNotice[]): void {
 
 // 생성한 알림의 id를 반환한다 — 채팅 큐잉처럼 호출부가 나중에 이 항목을 특정해서 취소해야 하는
 // 경우에 쓴다(다른 호출부는 반환값을 그냥 무시해도 된다). leadInternalId는 LeadRecord.internalId다.
-function queueLeadNotice(leadInternalId: string, message: string): string {
+// origin은 위 PendingNotice 타입 주석 참고 — 호출부가 반드시 맞는 값을 넘겨야 한다.
+function queueLeadNotice(leadInternalId: string, message: string, origin: 'user' | 'system'): string {
   const notices = loadPendingNotices();
   const id = `notice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  notices.push({ id, leadInternalId, message, createdAt: Date.now() });
+  notices.push({ id, leadInternalId, message, createdAt: Date.now(), origin });
   savePendingNotices(notices);
   return id;
 }
@@ -482,6 +487,7 @@ function notifyLeadsOfFinishedMembers(liveRows: SessionRow[], leads: LeadRecord[
         queueLeadNotice(
           leadRecForMember.internalId,
           `[알림] 팀원 ${r.id}(${r.cwd}${r.role ? `, 역할: ${r.role}` : ''})가 작업을 마친 것 같습니다(상태: ${status}). stop→resume으로 "방금 한 작업을 한국어로 짧게 요약해줘"처럼 확인하고, 결과를 파악해서 필요하면 최종 보고에 반영하세요.`,
+          'system',
         );
       }
     }
@@ -502,21 +508,29 @@ function combinePendingNoticeMessages(notices: PendingNotice[]): string {
 
 // 대기 중인 알림 중, 그 팀장이 지금 busy가 아니면(=억지로 끊어도 하던 작업이 없으면) 이 타이밍에
 // stop→resume으로 실제 전달한다. busy면 다음 폴링까지 큐에 그대로 둔다. 같은 팀장 앞으로 쌓인
-// 알림은(원래 쌓인 순서 그대로) 하나로 합쳐서 단 한 번의 resumeLead 호출로만 보낸다 — 그 팀장
-// 몫으로 그룹핑된 notice는 전부 한 번에 stillPending에서 빠진다.
+// 알림은(원래 쌓인 순서 그대로) 하나로 합쳐서 resumeLead 호출로 보낸다 — 단, leadInternalId뿐
+// 아니라 origin('user'/'system')까지 같아야 같은 그룹으로 묶는다. 사용자가 직접 보낸 채팅
+// 메시지와 시스템이 자동으로 만든 '[알림]'류 알림을 한 덩어리로 합쳐버리면, isAutoInjectedPrompt가
+// 섞여 들어간 '[알림]' 문구 때문에 사용자 메시지까지 자동알림으로 오판해 화면에 잘못 표시된다
+// (실사용 재현) — 그래서 두 origin은 절대 같은 그룹에 넣지 않는다. 같은 팀장 앞에 두 그룹이
+// 동시에 쌓여있으면 각각 combinePendingNoticeMessages로 따로 묶어서 queueLeadOperation(같은
+// internalId 키)에 순서대로 넣는다 — 이미 있는 leadId별 직렬 큐 덕분에 두 번째 resumeLead는
+// 첫 번째가 끝난 뒤에 자연스럽게 실행된다. 그룹 몫으로 처리된 notice는 전부 한 번에
+// stillPending에서 빠진다.
 function deliverPendingNotices(agents: AgentEntry[], leads: LeadRecord[]): void {
   const pendingNotices = loadPendingNotices();
   if (pendingNotices.length === 0) return;
 
-  const byLead = new Map<string, PendingNotice[]>();
+  const byLeadAndOrigin = new Map<string, PendingNotice[]>();
   for (const notice of pendingNotices) {
-    const list = byLead.get(notice.leadInternalId) ?? [];
+    const key = `${notice.leadInternalId}|${notice.origin}`;
+    const list = byLeadAndOrigin.get(key) ?? [];
     list.push(notice);
-    byLead.set(notice.leadInternalId, list);
+    byLeadAndOrigin.set(key, list);
   }
 
   const stillPending: PendingNotice[] = [];
-  for (const notices of byLead.values()) {
+  for (const notices of byLeadAndOrigin.values()) {
     const leadRec = leads.find(l => l.internalId === notices[0].leadInternalId);
     const liveAgent = leadRec ? agents.find(a => a.id === leadRec.id) : undefined;
     const isBusy = !!liveAgent && getStatus(liveAgent) === 'busy';
@@ -870,7 +884,14 @@ function queueLeadOperation<T>(internalId: string, fn: () => Promise<T>): Promis
 async function resumeLead(internalId: string, message: string): Promise<string | null> {
   const current = loadLeads().find(l => l.internalId === internalId);
   if (!current) return null;
-  await stopSession(current.id);
+  // 히스토리 탭에서 이미 오프라인인(agents 스냅샷에 안 잡히는) 팀장에게 메시지를 보내도 여기까지
+  // 그대로 들어온다 — restartLead와 같은 이유로, 실제로 떠있을 때만 stop을 호출한다(없는 프로세스에
+  // claude stop을 걸어 시간을 낭비하고 이어지는 runClaudeBg 타임아웃과 겹치는 걸 막기 위함).
+  const agents = await fetchAgents();
+  const isCurrentlyLive = agents.some(a => a.id === current.id);
+  if (isCurrentlyLive) {
+    await stopSession(current.id);
+  }
   const newId = await runClaudeBg(['--bg', '--resume', current.sessionId, message], current.targetDir);
   // stop 후 resume하면 보통 같은 짧은 id로 깨어나지만(실측 확인), 혹시 달라지는 경우를 대비해 갱신해둔다.
   if (newId && newId !== current.id) {
@@ -895,7 +916,15 @@ async function resumeLead(internalId: string, message: string): Promise<string |
 async function restartLead(internalId: string, instruction: string): Promise<{ id: string } | { error: string }> {
   const current = loadLeads().find(l => l.internalId === internalId);
   if (!current) return { error: '팀장 레코드를 찾을 수 없습니다(이미 삭제됐거나 internalId가 어긋났을 수 있음).' };
-  await stopSession(current.id);
+  // 히스토리 탭에서 이미 오프라인인(agents 스냅샷에 안 잡히는) 팀장을 골라 재시작해도 여기까지
+  // 그대로 들어온다 — 이 경우 claude stop을 걸 실제 프로세스가 없으니 불필요하게 시간만 쓰고
+  // (실사용 재현: 그 뒤 이어지는 runClaudeBg의 45초 타임아웃과 겹쳐 재시작 실패로 이어짐),
+  // 지금 실제로 떠있을 때만 stop을 호출한다.
+  const agents = await fetchAgents();
+  const isCurrentlyLive = agents.some(a => a.id === current.id);
+  if (isCurrentlyLive) {
+    await stopSession(current.id);
+  }
   installTeamLeadSkill();
   const { paths: approvedMembers, text: approvedText } = approvedMemberBriefing(current.targetDir);
   const prompt = `/team-lead ${instruction}\n\n${approvedText}`;
@@ -1062,7 +1091,7 @@ async function launchMember(leadId: string, targetDir: string, instruction: stri
   // queueLeadNotice는 internalId를 받으므로, IPC로 넘어온 짧은 id(leadId)를 여기서 변환한다.
   const leadRec = loadLeads().find(l => l.id === leadId);
   if (leadRec) {
-    queueLeadNotice(leadRec.internalId, `[알림] 사용자가 직접 팀원을 추가했습니다 — 이름: ${label}, 디렉토리: ${targetDir}${role ? `, 역할: ${role}` : ''}, 사전 지시(참고용): "${instruction}", 세션 id: ${id}. 이 팀원은 이미 팀원 공통 브리핑(백그라운드 세션 유의사항)을 전달받은 상태이며, 지금 준비 완료 응답만 남기고 대기 중이니, 필요하면 관리 대상에 추가하고 실제 작업을 시작하라는 메시지를 직접 보내라(stop→resume). 완료되면 확인해서 최종 보고에 포함시켜라.`);
+    queueLeadNotice(leadRec.internalId, `[알림] 사용자가 직접 팀원을 추가했습니다 — 이름: ${label}, 디렉토리: ${targetDir}${role ? `, 역할: ${role}` : ''}, 사전 지시(참고용): "${instruction}", 세션 id: ${id}. 이 팀원은 이미 팀원 공통 브리핑(백그라운드 세션 유의사항)을 전달받은 상태이며, 지금 준비 완료 응답만 남기고 대기 중이니, 필요하면 관리 대상에 추가하고 실제 작업을 시작하라는 메시지를 직접 보내라(stop→resume). 완료되면 확인해서 최종 보고에 포함시켜라.`, 'system');
   }
 
   return id;
@@ -1254,7 +1283,7 @@ ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string) => {
   const agent = agents.find(a => a.id === leadId);
   const isBusy = !!agent && getStatus(agent) === 'busy';
   if (isBusy) {
-    const noticeId = queueLeadNotice(lead.internalId, message);
+    const noticeId = queueLeadNotice(lead.internalId, message, 'user');
     return { status: 'queued' as const, id: noticeId };
   }
 

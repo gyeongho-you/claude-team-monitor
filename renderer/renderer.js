@@ -1048,7 +1048,7 @@ function renderHistoryCard(row) {
       </div>
       <div class="history-meta">${escapeHtml(row.cwd)} · ${relativeAge(row.startedAt)} 시작</div>
       ${row.preview ? `<div class="history-preview">${formatPreview(row.preview, 80, 160)}</div>` : ''}
-      <div class="history-hint">눌러서 이어하기 — 작업 탭으로 이동해 대화창에서 메시지를 보내면 다시 깨어납니다</div>
+      <div class="history-hint">눌러서 이어하기 — 작업 탭으로 이동해 대화창에서 메시지를 보내면 다시 깨어나고, "새 작업 시작"을 누르면 이전 대화 없이 완전히 새로운 작업으로 다시 띄울 수도 있습니다</div>
     </div>
   `;
 }
