@@ -8,7 +8,7 @@
     "build": "npm run typecheck && esbuild src/main.ts src/preload.ts --bundle --platform=node --external:electron --outdir=dist",
     "start": "npm run build && electron .",
     "dist:win": "npm run build && electron-builder --win portable",
-    "pack:win": "npm run build && electron-packager . \"Claude Team Monitor\" --platform=win32 --arch=x64 --out=release --overwrite --ignore=\"^/src($|/)\" --ignore=\"^/release($|/)\" --ignore=\"^/tsconfig.json$\" --ignore=\"^/package-lock.json$\""
+    "pack:win": "npm run build && electron-packager . \"Claude Team Monitor\" --platform=win32 --arch=x64 --out=release --overwrite --ignore=\"^/src($|/)\" --ignore=\"^/release($|/)\" --ignore=\"^/tsconfig.json$\" --ignore=\"^/package-lock.json$\" --ignore=\"^/\\.claude($|/)\" --ignore=\"^/node_modules($|/)\""
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
