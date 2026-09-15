@@ -42,11 +42,13 @@ const restartInstructionEl = document.getElementById('restart-instruction');
 const restartConfirmBtn = document.getElementById('restart-confirm-btn');
 const restartCancelBtn = document.getElementById('restart-cancel-btn');
 const restartStatusEl = document.getElementById('restart-status');
+const restartPendingWarningEl = document.getElementById('restart-pending-warning');
 const endWorkBtn = document.getElementById('end-work-btn');
 const endWorkPanelEl = document.getElementById('end-work-panel');
 const endWorkConfirmBtn = document.getElementById('end-work-confirm-btn');
 const endWorkCancelBtn = document.getElementById('end-work-cancel-btn');
 const endWorkStatusEl = document.getElementById('end-work-status');
+const endWorkPendingWarningEl = document.getElementById('end-work-pending-warning');
 const modalBackdropEl = document.getElementById('modal-backdrop');
 const fileListPanelEl = document.getElementById('file-list-panel');
 const fileListCloseBtn = document.getElementById('file-list-close-btn');
@@ -301,11 +303,20 @@ function errMsg(err) {
 
 // 지금 선택된 팀장 카드 관련 버튼(전송/재시작)과, 요청 목록에서 같은 팀장에 걸린 승인/거부 버튼을
 // busyLeadIds 상태에 맞춰 켜고 끈다 — 폴링으로 화면이 다시 그려져도 매번 다시 적용해야 한다.
+// index.html에 이미 붙어있는 설명용 title(무슨 동작인지)을 busy로 잠겼을 때 잠깐 덮어썼다가,
+// 안 잠겼을 때 원래대로 되돌리기 위해 최초 1회 기억해둔다.
+const restartLeadBtnOriginalTitle = restartLeadBtn.title;
+const endWorkBtnOriginalTitle = endWorkBtn.title;
+
 function updateBusyUI() {
   const selectedBusy = !!selectedLeadId && busyLeadIds.has(selectedLeadId);
+  // launchBtn/adoptBtn/addMemberSubmitBtn과 같은 "왜 비활성화됐는지" title 힌트 패턴을 여기도 적용한다.
+  const busyTitle = '다른 작업이 진행 중입니다 — 끝난 뒤 다시 시도하세요';
   chatSendBtn.disabled = selectedBusy;
   restartLeadBtn.disabled = selectedBusy;
+  restartLeadBtn.title = selectedBusy ? busyTitle : restartLeadBtnOriginalTitle;
   endWorkBtn.disabled = selectedBusy;
+  endWorkBtn.title = selectedBusy ? busyTitle : endWorkBtnOriginalTitle;
   document.querySelectorAll('[data-team-lead]').forEach(btn => {
     if (busyLeadIds.has(btn.dataset.teamLead)) btn.disabled = true;
   });
@@ -467,15 +478,10 @@ async function renderChat() {
   // 보여주고, 각각에 취소 버튼을 붙인다. 클릭 리스너는 chatTranscriptEl 위임 하나로 처리한다
   // (아래 chatTranscriptEl.addEventListener 참고) — 여기선 매번 새로 안 걸어도 된다.
   const stillQueuedList = queuedChatMessages.get(selectedLeadId) || [];
-  const queuedTurnHtml = stillQueuedList.map(item => `
-    <div class="chat-turn">
-      <div class="chat-prompt">▸ ${escapeHtml(item.message)}</div>
-      <div class="chat-answer chat-pending">
-        팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.
-        <button class="cancel-queued-btn" data-cancel-queued="${escapeHtml(item.id)}" data-cancel-lead="${escapeHtml(selectedLeadId)}">취소</button>
-      </div>
-    </div>
-  `).join('');
+  // .chat-answer에 white-space:pre-wrap이 걸려있어서, 이 템플릿을 여러 줄로 들여써서 만들면
+  // 그 들여쓰기/개행이 그대로 화면에 빈 줄로 보이고 취소 버튼도 엉뚱한 줄로 밀려난다 — 한 줄로
+  // 이어서 만든다.
+  const queuedTurnHtml = stillQueuedList.map(item => `<div class="chat-turn"><div class="chat-prompt">▸ ${escapeHtml(item.message)}</div><div class="chat-answer chat-pending">팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다. <button class="cancel-queued-btn" data-cancel-queued="${escapeHtml(item.id)}" data-cancel-lead="${escapeHtml(selectedLeadId)}">취소</button></div></div>`).join('');
 
   // 3초마다 도는 폴링 갱신마다 무조건 맨 아래로 스크롤하면, 옛날 대화를 읽으려고 위로 스크롤해둔 걸
   // 계속 끌어내린다 — 이미 맨 아래 근처에 있을 때만("계속 따라가기") 다시 맨 아래로 붙인다.
@@ -504,21 +510,28 @@ chatTranscriptEl.addEventListener('click', async e => {
   if (!btn) return;
   const leadId = btn.dataset.cancelLead;
   const noticeId = btn.dataset.cancelQueued;
+  const answerEl = btn.closest('.chat-answer');
   btn.disabled = true;
   try {
     await window.api.cancelQueuedMessage(leadId, noticeId);
   } catch (err) {
     console.error('대기열 메시지 취소 실패:', err);
-  } finally {
-    // main.ts 쪽 파일에서 못 찾았어도(이미 전달됐거나 이미 취소됨) 사용자가 취소를 누른 의도는
-    // 그대로 반영한다 — 실제로 이미 전달된 경우라면 다음 renderChat에서 트랜스크립트 비교로도
-    // 결국 지워지므로 여기서 먼저 지워도 안전하다.
-    const list = queuedChatMessages.get(leadId) || [];
-    const remaining = list.filter(item => item.id !== noticeId);
-    if (remaining.length) queuedChatMessages.set(leadId, remaining);
-    else queuedChatMessages.delete(leadId);
-    await renderChat();
+    // 실패를 콘솔에만 남기면 사용자는 버튼이 그냥 안 눌리는 것처럼 보인다 — 항목 옆에 짧게
+    // 알려준다(다음 renderChat 때 자연스럽게 사라짐). 로컬 상태는 건드리지 않아서 다시 눌러 재시도할 수 있다.
+    if (answerEl) {
+      answerEl.insertAdjacentHTML('beforeend', `<div style="color:#f14c4c">취소 요청이 실패했습니다: ${escapeHtml(errMsg(err))}</div>`);
+    }
+    btn.disabled = false;
+    return;
   }
+  // main.ts 쪽 파일에서 못 찾았어도(이미 전달됐거나 이미 취소됨) 사용자가 취소를 누른 의도는
+  // 그대로 반영한다 — 실제로 이미 전달된 경우라면 다음 renderChat에서 트랜스크립트 비교로도
+  // 결국 지워지므로 여기서 먼저 지워도 안전하다.
+  const list = queuedChatMessages.get(leadId) || [];
+  const remaining = list.filter(item => item.id !== noticeId);
+  if (remaining.length) queuedChatMessages.set(leadId, remaining);
+  else queuedChatMessages.delete(leadId);
+  await renderChat();
 });
 
 // formMode('none'/'launch'/'adopt')만으로는 "팀장이 0개라 launch 폼이 기본으로 뜬 상태"를 못
@@ -641,10 +654,30 @@ async function sendChatMessage() {
   }
 }
 
+// 재시작/작업종료 확인 모달을 열 때, 그 팀장에게 아직 전달 안 된 대기열 메시지가 있으면 몇 건
+// 있는지 미리 경고해준다 — 재시작은 internalId가 그대로라 큐가 자연히 이어서 전달되지만, 작업종료는
+// 세션 자체를 멈추므로 그 전에 사용자가 알고 결정할 수 있어야 한다.
+async function updatePendingNoticeWarning(warningEl, leadId) {
+  if (!leadId) { warningEl.hidden = true; return; }
+  try {
+    const count = await window.api.getPendingNoticeCount(leadId);
+    if (count > 0) {
+      warningEl.textContent = `⚠ 아직 전달되지 않은 대기열 메시지가 ${count}건 있습니다.`;
+      warningEl.hidden = false;
+    } else {
+      warningEl.hidden = true;
+    }
+  } catch (err) {
+    console.error('대기열 메시지 수 확인 실패:', err);
+    warningEl.hidden = true;
+  }
+}
+
 restartLeadBtn.addEventListener('click', () => {
   showModal(restartLeadPanelEl);
   restartInstructionEl.value = '';
   restartStatusEl.textContent = '';
+  updatePendingNoticeWarning(restartPendingWarningEl, selectedLeadId);
 });
 
 restartCancelBtn.addEventListener('click', () => {
@@ -681,6 +714,7 @@ restartConfirmBtn.addEventListener('click', async () => {
 endWorkBtn.addEventListener('click', () => {
   showModal(endWorkPanelEl);
   endWorkStatusEl.textContent = '';
+  updatePendingNoticeWarning(endWorkPendingWarningEl, selectedLeadId);
 });
 
 endWorkCancelBtn.addEventListener('click', () => {
@@ -1342,11 +1376,11 @@ function renderTemplateCard(t, favNameByPath) {
     <div class="template-card ${t.approved ? 'approved' : ''}">
       <div class="tpl-top">
         <input class="tpl-name" data-name="${escapeHtml(t.id)}" value="${escapeHtml(t.name)}" />
-        <input class="tpl-role" value="🔒 ${escapeHtml(t.role)}" placeholder="역할" readonly title="등록 후에는 역할을 바꿀 수 없습니다 — 새로 등록해주세요" />
+        <input class="tpl-role" value="${escapeHtml(t.role)}" placeholder="역할" readonly title="등록 후에는 역할을 바꿀 수 없습니다 — 새로 등록해주세요" />
         <span class="remove" data-remove-tpl="${escapeHtml(t.id)}">×</span>
       </div>
       ${dirLine}
-      <div class="readonly-hint">🔒 등록 후에는 아래 지시를 수정할 수 없습니다 — 바꾸려면 새로 등록하세요</div>
+      <div class="readonly-hint">🔒 등록 후에는 역할·아래 지시를 수정할 수 없습니다 — 바꾸려면 새로 등록하세요</div>
       <textarea class="tpl-instruction" rows="2" readonly title="등록 후에는 기본 지시를 바꿀 수 없습니다 — 새로 등록해주세요">${escapeHtml(t.instruction)}</textarea>
       ${t.path ? `
       <div class="tpl-bottom">

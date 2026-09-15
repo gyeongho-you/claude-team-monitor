@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import { exec, execFile, spawn } from 'child_process';
 
 const POLL_INTERVAL_MS = 3000;
@@ -80,6 +81,12 @@ type LeadRecord = {
   approvedMembers: string[];
   label?: string; // 사용자가 직접 붙인 이름표 — 같은 디렉토리에서 팀장을 여러 개 띄웠을 때 구분용
   aiTitle?: string; // claude가 자동 생성한 세션 주제(네이티브 --resume 목록에 뜨는 것과 같은 것) — 한 번 찾으면 캐싱
+  // restartLead가 id/sessionId를 새 값으로 갈아치워도 절대 바뀌지 않는 내부 전용 식별자(레코드
+  // 생성 시 한 번만 발급). queueLeadOperation의 큐 키와 PendingNotice가 팀장을 가리키는 값으로
+  // 이걸 쓴다 — 그래야 재시작 도중/직후에 큐잉된 다른 작업(채팅 전송·요청 승인/거부·팀원 알림 등)이
+  // 재시작 전에 캡처해둔 옛 sessionId/짧은id로 leads.json을 다시 찾다가 못 찾아서 조용히
+  // 무동작으로 끝나는 일이 없다. 렌더러에는 노출하지 않는 백엔드 전용 값이다.
+  internalId: string;
 };
 
 // 'dir-approval': 사전 승인 안 된 디렉토리에 팀원을 새로 띄우고 싶을 때(requestedDir 사용).
@@ -100,7 +107,9 @@ type MemberRequest = {
 // 끊기지 않도록 알림을 큐에 쌓아뒀다가 idle/blocked일 때만 전달한다. id는 렌더러가 "이 항목이
 // 아직 전달됐는지/취소됐는지"를 개별적으로 추적할 수 있게 하는 용도다(같은 팀장에게 여러 개가
 // 동시에 쌓일 수 있어서 leadId만으로는 항목을 구분할 수 없다 — cancel-queued-message 참고).
-type PendingNotice = { id: string; leadId: string; message: string; createdAt: number };
+// leadInternalId는 LeadRecord.internalId다(짧은 id가 아님) — restartLead가 짧은 id/sessionId를
+// 바꿔도 큐에 쌓인 알림이 여전히 같은 팀장을 가리켜야 하기 때문이다.
+type PendingNotice = { id: string; leadInternalId: string; message: string; createdAt: number };
 
 function getResourcesRoot(): string {
   // app.getAppPath()는 개발 중엔 프로젝트 루트, electron-packager로 패키징한 뒤엔
@@ -143,6 +152,16 @@ function getGitChangedFiles(cwd: string): Promise<{ file: string; status: string
   });
 }
 
+// file 인자에 상대경로 탈출(예: "../../../../etc/passwd")이 섞여 있으면 path.join(cwd, file)이
+// cwd 밖의 임의 파일을 가리킬 수 있다 — 실제로 join한 절대경로가 cwd 하위인지 확인해서, 벗어나면
+// null을 돌려줘 호출부가 거부하게 한다.
+function resolveWithinCwd(cwd: string, file: string): string | null {
+  const resolvedCwd = path.resolve(cwd);
+  const resolvedFile = path.resolve(cwd, file);
+  if (resolvedFile !== resolvedCwd && !resolvedFile.startsWith(resolvedCwd + path.sep)) return null;
+  return resolvedFile;
+}
+
 // 목록의 파일 하나를 눌렀을 때 실제 내용을 보여준다. git이 추적 중인 변경이면 diff를, 아직 추적
 // 안 되는 새 파일(untracked)이면 diff 대상이 없으므로 파일 내용 자체를 "전부 추가"로 보여준다.
 // HEAD와 비교해야 한다 — `git diff --`(워킹트리 대 인덱스)만 쓰면 git add로 스테이징만 해두고
@@ -151,13 +170,19 @@ function getGitChangedFiles(cwd: string): Promise<{ file: string; status: string
 // 진짜 새 파일이므로 아래 catch(=untracked 처리) 경로로 폴백되는 게 오히려 맞다.
 function getFileDiff(cwd: string, file: string): Promise<{ diff: string; isNew: boolean; binary: boolean }> {
   return new Promise(resolve => {
+    const resolvedFile = resolveWithinCwd(cwd, file);
+    if (!resolvedFile) {
+      console.error('[getFileDiff] cwd 밖을 가리키는 file 인자를 거부합니다:', { cwd, file });
+      resolve({ diff: '', isNew: false, binary: false });
+      return;
+    }
     execFile('git', ['diff', 'HEAD', '--', file], { cwd, windowsHide: true, maxBuffer: 20 * 1024 * 1024 }, (err, stdout) => {
       if (!err && stdout.trim()) {
         resolve({ diff: stdout, isNew: false, binary: /^Binary files /m.test(stdout) });
         return;
       }
       try {
-        const buf = fs.readFileSync(path.join(cwd, file));
+        const buf = fs.readFileSync(resolvedFile);
         const isBinary = buf.subarray(0, 8000).includes(0); // NUL 바이트가 있으면 텍스트가 아닌 걸로 간주
         resolve({ diff: isBinary ? '' : buf.toString('utf-8'), isNew: true, binary: isBinary });
       } catch {
@@ -296,8 +321,19 @@ function writeJsonFileAtomic(filePath: string, data: unknown): void {
   fs.renameSync(tmpPath, filePath);
 }
 
+// 이 필드를 추가하기 전에 만들어진 leads.json 레코드는 internalId가 없다 — 처음 읽을 때 한 번
+// 발급해서 즉시 저장해두면, 이후로는 다른 마이그레이션 없이 계속 같은 값을 쓸 수 있다.
 function loadLeads(): LeadRecord[] {
-  return readJsonArraySafe<LeadRecord>(LEADS_PATH);
+  const leads = readJsonArraySafe<LeadRecord>(LEADS_PATH);
+  let dirty = false;
+  leads.forEach(l => {
+    if (!l.internalId) {
+      l.internalId = crypto.randomUUID();
+      dirty = true;
+    }
+  });
+  if (dirty) saveLeads(leads);
+  return leads;
 }
 
 function saveLeads(leads: LeadRecord[]): void {
@@ -321,21 +357,29 @@ function savePendingNotices(notices: PendingNotice[]): void {
 }
 
 // 생성한 알림의 id를 반환한다 — 채팅 큐잉처럼 호출부가 나중에 이 항목을 특정해서 취소해야 하는
-// 경우에 쓴다(다른 호출부는 반환값을 그냥 무시해도 된다).
-function queueLeadNotice(leadId: string, message: string): string {
+// 경우에 쓴다(다른 호출부는 반환값을 그냥 무시해도 된다). leadInternalId는 LeadRecord.internalId다.
+function queueLeadNotice(leadInternalId: string, message: string): string {
   const notices = loadPendingNotices();
   const id = `notice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  notices.push({ id, leadId, message, createdAt: Date.now() });
+  notices.push({ id, leadInternalId, message, createdAt: Date.now() });
   savePendingNotices(notices);
   return id;
 }
 
-// 아직 전달 안 된 대기열 항목을 사용자가 직접 취소할 수 있게 한다 — leadId+id가 둘 다 맞는
-// 항목만 지운다(다른 팀장의 것을 실수로 건드리지 않게). 이미 전달됐거나(폴링이 먼저 소모함)
-// 이미 취소돼서 못 찾으면 false — 렌더러는 이 경우도 로컬 상태만 정리하고 조용히 넘어간다.
-function cancelQueuedNotice(leadId: string, noticeId: string): boolean {
+// 아직 전달 안 된 대기열 항목을 사용자가 직접 취소할 수 있게 한다. 렌더러는 짧은 id(화면 표시용)만
+// 알고 있으므로 여기서 internalId로 변환해서 대조한다 — 다른 팀장의 것을 실수로 건드리지 않게.
+// 짧은 id가 이미 바뀌어서(재시작 등) 지금 못 찾더라도, id 자체가 이미 전역적으로 고유하므로
+// noticeId만으로 대조해 사용자가 화면에서 보고 누른 항목은 항상 취소되게 한다.
+// 이미 전달됐거나(폴링이 먼저 소모함) 이미 취소돼서 못 찾으면 false — 렌더러는 이 경우도 로컬
+// 상태만 정리하고 조용히 넘어간다.
+function cancelQueuedNotice(leadShortId: string, noticeId: string): boolean {
   const notices = loadPendingNotices();
-  const filtered = notices.filter(n => !(n.leadId === leadId && n.id === noticeId));
+  const leadRec = loadLeads().find(l => l.id === leadShortId);
+  const filtered = notices.filter(n => {
+    if (n.id !== noticeId) return true;
+    if (leadRec && n.leadInternalId !== leadRec.internalId) return true;
+    return false;
+  });
   if (filtered.length === notices.length) return false;
   savePendingNotices(filtered);
   return true;
@@ -427,10 +471,15 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
     const status = (r.status || r.state || '').toLowerCase();
     const prevStatus = lastMemberStatus.get(r.id!);
     if (prevStatus === 'busy' && status && status !== 'busy' && r.leadId) {
-      queueLeadNotice(
-        r.leadId,
-        `[알림] 팀원 ${r.id}(${r.cwd}${r.role ? `, 역할: ${r.role}` : ''})가 작업을 마친 것 같습니다(상태: ${status}). stop→resume으로 "방금 한 작업을 한국어로 짧게 요약해줘"처럼 확인하고, 결과를 파악해서 필요하면 최종 보고에 반영하세요.`,
-      );
+      // MemberRecord.leadId는 등록 당시의 짧은 id라 그 뒤로 팀장이 재시작됐으면 이미 낡은 값일 수
+      // 있다 — 지금 이 폴링 시점 기준으로 leads에서 다시 찾아 internalId로 바꿔서 큐잉한다.
+      const leadRecForMember = leads.find(l => l.id === r.leadId);
+      if (leadRecForMember) {
+        queueLeadNotice(
+          leadRecForMember.internalId,
+          `[알림] 팀원 ${r.id}(${r.cwd}${r.role ? `, 역할: ${r.role}` : ''})가 작업을 마친 것 같습니다(상태: ${status}). stop→resume으로 "방금 한 작업을 한국어로 짧게 요약해줘"처럼 확인하고, 결과를 파악해서 필요하면 최종 보고에 반영하세요.`,
+        );
+      }
     }
     if (status) lastMemberStatus.set(r.id!, status);
   });
@@ -441,15 +490,13 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
   if (pendingNotices.length > 0) {
     const stillPending: PendingNotice[] = [];
     for (const notice of pendingNotices) {
-      const liveLead = liveRows.find(r => r.isLead && r.id === notice.leadId);
-      const isBusy = !!liveLead && (liveLead.status || '').toLowerCase() === 'busy';
-      if (liveLead && !isBusy) {
-        const leadRec = leads.find(l => l.id === notice.leadId);
-        if (leadRec) {
-          queueLeadOperation(leadRec.id, () => resumeLead(leadRec.sessionId, leadRec.targetDir, notice.message))
-            .catch(() => { /* 실패해도 알림 자체는 소모(재시도 안 함) */ });
-          continue;
-        }
+      const leadRec = leads.find(l => l.internalId === notice.leadInternalId);
+      const liveAgent = leadRec ? agents.find(a => a.id === leadRec.id) : undefined;
+      const isBusy = !!liveAgent && (liveAgent.status || liveAgent.state || '').toLowerCase() === 'busy';
+      if (leadRec && liveAgent && !isBusy) {
+        queueLeadOperation(leadRec.internalId, () => resumeLead(leadRec.internalId, notice.message))
+          .catch(() => { /* 실패해도 알림 자체는 소모(재시도 안 함) */ });
+        continue;
       }
       stillPending.push(notice);
     }
@@ -743,30 +790,33 @@ function stopSession(id: string): Promise<void> {
   });
 }
 
-// 같은 팀장(leadId)에 대한 stop/resume류 작업(채팅 전송·요청 승인/거부·재시작·팀원 추가 알림)이
+// 같은 팀장(internalId)에 대한 stop/resume류 작업(채팅 전송·요청 승인/거부·재시작·팀원 추가 알림)이
 // 동시에 실행되면 세션이 복사본으로 갈라지거나 메시지가 엇갈릴 수 있다(stopSession 주석 참고) —
-// 그래서 leadId별로 이전 작업이 끝난 뒤에만 다음 작업이 시작되도록 직렬화한다.
+// 그래서 internalId별로 이전 작업이 끝난 뒤에만 다음 작업이 시작되도록 직렬화한다. 짧은 id(예:
+// leadId IPC 파라미터)를 키로 쓰면 restartLead가 짧은 id를 바꿔치기했을 때 새 작업이 다른 큐로
+// 갈라져서 직렬화가 깨지므로, 반드시 restartLead가 절대 바꾸지 않는 internalId를 키로 써야 한다.
 const leadOperationQueues = new Map<string, Promise<unknown>>();
 
-function queueLeadOperation<T>(leadId: string, fn: () => Promise<T>): Promise<T> {
-  const prev = leadOperationQueues.get(leadId) ?? Promise.resolve();
+function queueLeadOperation<T>(internalId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = leadOperationQueues.get(internalId) ?? Promise.resolve();
   const run = prev.then(fn, fn);
-  leadOperationQueues.set(leadId, run.then(() => undefined, () => undefined));
+  leadOperationQueues.set(internalId, run.then(() => undefined, () => undefined));
   return run;
 }
 
-// 큐에서 대기하는 동안 앞선 작업이 이미 이 팀장의 짧은 id를 바꿔놨을 수 있으므로, 넘겨받은 값을
-// 그대로 믿지 않고 sessionId(안 바뀜)로 leads.json에서 최신 레코드를 다시 찾아서 사용한다.
-// 호출부는 반드시 queueLeadOperation(leadId, ...)으로 감싸서 호출해야 한다.
-async function resumeLead(sessionId: string, targetDir: string, message: string): Promise<string | null> {
-  const current = loadLeads().find(l => l.sessionId === sessionId);
+// 큐에서 대기하는 동안 앞선 작업(예: 재시작)이 이미 이 팀장의 짧은 id/sessionId를 바꿔놨을 수
+// 있으므로, 넘겨받은 값을 그대로 믿지 않고 internalId(절대 안 바뀜)로 leads.json에서 최신
+// 레코드를 실행 시점에 다시 찾아서 사용한다. 호출부는 반드시 queueLeadOperation(internalId, ...)으로
+// 감싸서 호출해야 한다.
+async function resumeLead(internalId: string, message: string): Promise<string | null> {
+  const current = loadLeads().find(l => l.internalId === internalId);
   if (!current) return null;
   await stopSession(current.id);
-  const newId = await runClaudeBg(['--bg', '--resume', sessionId, message], targetDir);
+  const newId = await runClaudeBg(['--bg', '--resume', current.sessionId, message], current.targetDir);
   // stop 후 resume하면 보통 같은 짧은 id로 깨어나지만(실측 확인), 혹시 달라지는 경우를 대비해 갱신해둔다.
   if (newId && newId !== current.id) {
     const leads = loadLeads();
-    const rec = leads.find(l => l.sessionId === sessionId);
+    const rec = leads.find(l => l.internalId === internalId);
     if (rec) { rec.id = newId; saveLeads(leads); }
   }
   return newId;
@@ -774,21 +824,22 @@ async function resumeLead(sessionId: string, targetDir: string, message: string)
 
 // 지금 대화 맥락을 이어받지 않고, 같은 디렉토리에서 완전히 새 세션을 시작해서 같은 팀장 슬롯(id는
 // 바뀌지만 leads.json 레코드 자체와 이름표는 유지)에 덮어씌운다 — /clear 후 새 작업을 맡기는 느낌.
-// resumeLead와 마찬가지로 호출부는 queueLeadOperation(leadId, ...)으로 감싸야 한다.
-async function restartLead(sessionId: string, targetDir: string, instruction: string): Promise<string | null> {
-  const current = loadLeads().find(l => l.sessionId === sessionId);
+// resumeLead와 마찬가지로 호출부는 queueLeadOperation(internalId, ...)으로 감싸야 하고, 실행
+// 시점에 internalId로 최신 레코드를 다시 찾아야 한다(같은 이유).
+async function restartLead(internalId: string, instruction: string): Promise<string | null> {
+  const current = loadLeads().find(l => l.internalId === internalId);
   if (!current) return null;
   await stopSession(current.id);
   installTeamLeadSkill();
-  const { paths: approvedMembers, text: approvedText } = approvedMemberBriefing(targetDir);
+  const { paths: approvedMembers, text: approvedText } = approvedMemberBriefing(current.targetDir);
   const prompt = `/team-lead ${instruction}\n\n${approvedText}`;
 
-  const newId = await runClaudeBg(['--bg', prompt], targetDir);
+  const newId = await runClaudeBg(['--bg', prompt], current.targetDir);
   if (!newId) return null;
   const newSessionId = (await findSessionIdByShortId(newId)) ?? newId;
 
   const leads = loadLeads();
-  const rec = leads.find(l => l.sessionId === sessionId);
+  const rec = leads.find(l => l.internalId === internalId);
   if (rec) {
     rec.id = newId;
     rec.sessionId = newSessionId;
@@ -801,9 +852,10 @@ async function restartLead(sessionId: string, targetDir: string, instruction: st
 
 // "작업 종료" — 이 팀장이 띄운 팀원을 전부 먼저 끄고, 마지막에 팀장 자신을 끈다. 팀장 기록은
 // leads.json에서 지우지 않는다 — 다른 "종료"와 마찬가지로 오프라인/히스토리로 남아서 나중에
-// --resume으로 다시 부를 수 있어야 한다(완전 삭제가 아니라 "지금은 멈춤"이라는 의미).
-async function endLeadWork(sessionId: string): Promise<void> {
-  const lead = loadLeads().find(l => l.sessionId === sessionId);
+// --resume으로 다시 부를 수 있어야 한다(완전 삭제가 아니라 "지금은 멈춤"이라는 의미). internalId로
+// 실행 시점에 최신 레코드를 다시 찾는다(resumeLead/restartLead와 같은 이유).
+async function endLeadWork(internalId: string): Promise<void> {
+  const lead = loadLeads().find(l => l.internalId === internalId);
   if (!lead) return;
   const members = loadMembers().filter(m => m.leadId === lead.id);
   for (const m of members) {
@@ -832,7 +884,7 @@ async function launchTeamLead(targetDir: string, instruction: string): Promise<s
   const sessionId = (await findSessionIdByShortId(id)) ?? id;
 
   const leads = loadLeads();
-  leads.push({ id, sessionId, targetDir, launchedAt: Date.now(), approvedMembers });
+  leads.push({ id, sessionId, targetDir, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID() });
   saveLeads(leads);
 
   return id;
@@ -881,6 +933,7 @@ async function adoptLead(shortId: string): Promise<string | null> {
     targetDir: agent.cwd,
     launchedAt: agent.startedAt ?? Date.now(),
     approvedMembers,
+    internalId: crypto.randomUUID(),
   });
   saveLeads(leads);
   return agent.id!;
@@ -906,7 +959,7 @@ async function forkSessionAsLead(sessionId: string, cwd: string): Promise<string
   const newSessionId = (await findSessionIdByShortId(id)) ?? id;
   const { paths: approvedMembers } = approvedMemberBriefing(cwd);
   const leads = loadLeads();
-  leads.push({ id, sessionId: newSessionId, targetDir: cwd, launchedAt: Date.now(), approvedMembers });
+  leads.push({ id, sessionId: newSessionId, targetDir: cwd, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID() });
   saveLeads(leads);
   return id;
 }
@@ -953,7 +1006,11 @@ async function launchMember(leadId: string, targetDir: string, instruction: stri
   // 팀장이 지금 다른 작업으로 busy일 수 있어서 즉시 stop→resume으로 끼어들지 않고 큐에 쌓아둔다.
   // buildSessionRows가 폴링마다 이 큐를 보고, 팀장이 idle/blocked가 됐을 때만 실제로 전달한다.
   // (팀원은 대기 상태로 시작하므로, 이 알림을 받은 팀장이 실제 작업 개시 메시지를 별도로 보내야 한다.)
-  queueLeadNotice(leadId, `[알림] 사용자가 직접 팀원을 추가했습니다 — 디렉토리: ${targetDir}${role ? `, 역할: ${role}` : ''}, 사전 지시(참고용): "${instruction}", 세션 id: ${id}. 이 팀원은 이미 팀원 공통 브리핑(백그라운드 세션 유의사항)을 전달받은 상태이며, 지금 준비 완료 응답만 남기고 대기 중이니, 필요하면 관리 대상에 추가하고 실제 작업을 시작하라는 메시지를 직접 보내라(stop→resume). 완료되면 확인해서 최종 보고에 포함시켜라.`);
+  // queueLeadNotice는 internalId를 받으므로, IPC로 넘어온 짧은 id(leadId)를 여기서 변환한다.
+  const leadRec = loadLeads().find(l => l.id === leadId);
+  if (leadRec) {
+    queueLeadNotice(leadRec.internalId, `[알림] 사용자가 직접 팀원을 추가했습니다 — 디렉토리: ${targetDir}${role ? `, 역할: ${role}` : ''}, 사전 지시(참고용): "${instruction}", 세션 id: ${id}. 이 팀원은 이미 팀원 공통 브리핑(백그라운드 세션 유의사항)을 전달받은 상태이며, 지금 준비 완료 응답만 남기고 대기 중이니, 필요하면 관리 대상에 추가하고 실제 작업을 시작하라는 메시지를 직접 보내라(stop→resume). 완료되면 확인해서 최종 보고에 포함시켜라.`);
+  }
 
   return id;
 }
@@ -1087,8 +1144,8 @@ ipcMain.handle('approve-request', async (_e, requestId: string) => {
 
   if (req.type === 'stop-member') {
     if (req.memberId) await stopSession(req.memberId);
-    await queueLeadOperation(req.teamLeadId, () =>
-      resumeLead(lead.sessionId, lead.targetDir, `팀원 종료 요청이 승인됐습니다 — "${req.memberId}" 세션을 종료했습니다. 계속 진행하세요.`));
+    await queueLeadOperation(lead.internalId, () =>
+      resumeLead(lead.internalId, `팀원 종료 요청이 승인됐습니다 — "${req.memberId}" 세션을 종료했습니다. 계속 진행하세요.`));
     return true;
   }
 
@@ -1096,8 +1153,8 @@ ipcMain.handle('approve-request', async (_e, requestId: string) => {
     lead.approvedMembers.push(req.requestedDir!);
     saveLeads(leads);
   }
-  await queueLeadOperation(req.teamLeadId, () =>
-    resumeLead(lead.sessionId, lead.targetDir, `팀원 요청이 승인됐습니다 — "${req.requestedDir}"에 팀원을 띄워도 됩니다. 이어서 진행하세요.`));
+  await queueLeadOperation(lead.internalId, () =>
+    resumeLead(lead.internalId, `팀원 요청이 승인됐습니다 — "${req.requestedDir}"에 팀원을 띄워도 됩니다. 이어서 진행하세요.`));
   return true;
 });
 
@@ -1109,13 +1166,13 @@ ipcMain.handle('deny-request', async (_e, requestId: string) => {
   if (!lead) return false;
 
   if (req.type === 'stop-member') {
-    await queueLeadOperation(req.teamLeadId, () =>
-      resumeLead(lead.sessionId, lead.targetDir, `팀원 종료 요청이 거부됐습니다 — "${req.memberId}"는 종료하지 말고 계속 두세요.`));
+    await queueLeadOperation(lead.internalId, () =>
+      resumeLead(lead.internalId, `팀원 종료 요청이 거부됐습니다 — "${req.memberId}"는 종료하지 말고 계속 두세요.`));
     return true;
   }
 
-  await queueLeadOperation(req.teamLeadId, () =>
-    resumeLead(lead.sessionId, lead.targetDir, `팀원 요청이 거부됐습니다 — "${req.requestedDir}"에는 팀원을 띄우지 마세요. 다른 방법을 찾거나 사용자에게 다시 확인하세요.`));
+  await queueLeadOperation(lead.internalId, () =>
+    resumeLead(lead.internalId, `팀원 요청이 거부됐습니다 — "${req.requestedDir}"에는 팀원을 띄우지 마세요. 다른 방법을 찾거나 사용자에게 다시 확인하세요.`));
   return true;
 });
 
@@ -1144,16 +1201,24 @@ ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string) => {
   const agent = agents.find(a => a.id === leadId);
   const isBusy = !!agent && (agent.status || agent.state || '').toLowerCase() === 'busy';
   if (isBusy) {
-    const noticeId = queueLeadNotice(leadId, message);
+    const noticeId = queueLeadNotice(lead.internalId, message);
     return { status: 'queued' as const, id: noticeId };
   }
 
-  const id = await queueLeadOperation(leadId, () => resumeLead(lead.sessionId, lead.targetDir, message));
+  const id = await queueLeadOperation(lead.internalId, () => resumeLead(lead.internalId, message));
   return { status: 'sent' as const, id };
 });
 
 // 대기열에 쌓아둔 메시지 중 아직 전달 안 된 것을 사용자가 취소할 수 있게 한다(채팅창의 "취소" 버튼).
 ipcMain.handle('cancel-queued-message', (_e, leadId: string, noticeId: string) => cancelQueuedNotice(leadId, noticeId));
+
+// 재시작/작업종료 확인 모달에서 "이 팀장에게 아직 전달 안 된 대기열 메시지가 몇 건 있는지" 미리
+// 보여주기 위한 조회 전용 핸들러 — 렌더러는 짧은 id만 알고 있으므로 여기서 internalId로 변환해서 센다.
+ipcMain.handle('get-pending-notice-count', (_e, leadId: string) => {
+  const lead = loadLeads().find(l => l.id === leadId);
+  if (!lead) return 0;
+  return loadPendingNotices().filter(n => n.leadInternalId === lead.internalId).length;
+});
 
 ipcMain.handle('update-lead-label', (_e, leadId: string, label: string) => {
   const leads = loadLeads();
@@ -1166,13 +1231,13 @@ ipcMain.handle('restart-lead', async (_e, leadId: string, instruction: string) =
   const lead = loadLeads().find(l => l.id === leadId);
   if (!lead) return null;
   const finalInstruction = instruction.trim() || '지금 상황을 파악하고 다음 작업을 시작해줘.';
-  return queueLeadOperation(leadId, () => restartLead(lead.sessionId, lead.targetDir, finalInstruction));
+  return queueLeadOperation(lead.internalId, () => restartLead(lead.internalId, finalInstruction));
 });
 
 ipcMain.handle('end-lead-work', async (_e, leadId: string) => {
   const lead = loadLeads().find(l => l.id === leadId);
   if (!lead) return false;
-  await queueLeadOperation(leadId, () => endLeadWork(lead.sessionId));
+  await queueLeadOperation(lead.internalId, () => endLeadWork(lead.internalId));
   return true;
 });
 

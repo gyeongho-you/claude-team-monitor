@@ -45,6 +45,7 @@
           </div>
           <div id="restart-lead-panel" class="modal-panel" hidden>
             <p class="form-hint">지금 대화 맥락을 이어받지 않고, 같은 디렉토리에서 완전히 새 세션을 시작합니다. 이 팀장 카드(이름표)는 그대로 유지되고 내용만 새로워집니다 — 예전 대화가 필요하면 다시 못 부릅니다.</p>
+            <div id="restart-pending-warning" class="pending-warning" hidden></div>
             <textarea id="restart-instruction" placeholder="새 작업 지시 (비우면 기본 지시로 시작)"></textarea>
             <button id="restart-confirm-btn">새로 시작</button>
             <button id="restart-cancel-btn">취소</button>
@@ -52,6 +53,7 @@
           </div>
           <div id="end-work-panel" class="modal-panel" hidden>
             <p class="form-hint">이 팀장이 띄운 팀원을 먼저 전부 종료한 뒤, 팀장 자신도 종료합니다. 세션 자체는 지워지지 않고 "히스토리" 탭에서 나중에 다시 이어할 수 있습니다.</p>
+            <div id="end-work-pending-warning" class="pending-warning" hidden></div>
             <button id="end-work-confirm-btn">종료</button>
             <button id="end-work-cancel-btn">취소</button>
             <div id="end-work-status"></div>
