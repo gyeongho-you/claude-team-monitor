@@ -274,21 +274,29 @@ function setRoleValue(selectEl, customEl, value) {
 wireRoleFields(memberRoleSelect, memberRoleCustom);
 wireRoleFields(newTplRoleSelect, newTplRoleCustom);
 
+// 인터랙티브 선택 프롬프트(AskUserQuestion)나 권한 확인창에 멈춰서 아무도 응답 못 하는 세션을
+// 실제로 재현해서 claude agents --json을 확인해보니(claude stop으로 정리 완료), status는 그 사이
+// 'waiting'으로 나오고(실측: 정상적으로 질문을 띄운 경우) state는 'blocked'로 잡혔다 — getStatus가
+// state==='blocked'를 최우선 취급하도록 고쳤으니(status.js 참고) 보통은 여기 s==='blocked' 분기로
+// 들어온다. 'waiting'은 getStatus가 예외적으로 state 없이 status만 이 값을 줄 때를 대비한
+// 방어용 분기다 — 둘 다 같은 "사람이 봐야 한다" 경고로 취급한다.
 function statusClass(row) {
   if (row.offline) return 'status-offline';
   const s = getStatus(row);
   if (['idle', 'busy', 'blocked', 'done'].includes(s)) return `status-${s}`;
-  return '';
+  // 'waiting'을 포함해 그 외 처음 보는 값도 완전히 안심되는 무색보다는 경고색으로 — 최소한
+  // 눈에 띄어야 사용자가 확인해볼 이유가 생긴다.
+  return 'status-blocked';
 }
 
 function statusLabelKo(row) {
   if (row.offline) return '오프라인';
   const s = getStatus(row);
   if (s === 'busy') return '● 작업 중';
-  if (s === 'blocked') return '⚠ 확인 필요';
+  if (s === 'blocked' || s === 'waiting') return '⚠ 확인 필요';
   if (s === 'done') return '완료';
   if (s === 'idle') return '대기 중';
-  return '알수없음';
+  return '⚠ 확인 필요(원인 불명)';
 }
 
 function escapeHtml(str) {

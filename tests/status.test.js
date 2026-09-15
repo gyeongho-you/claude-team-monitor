@@ -18,6 +18,12 @@ test("getStatus: state가 정확히 'done'이면 status가 뭐든 done을 우선
   assert.equal(getStatus({ status: 'idle', state: 'done' }), 'done');
 });
 
+test("getStatus: state가 정확히 'blocked'이면 status가 뭐든(waiting/busy/idle 등) blocked를 우선한다", () => {
+  assert.equal(getStatus({ status: 'waiting', state: 'blocked' }), 'blocked');
+  assert.equal(getStatus({ status: 'busy', state: 'blocked' }), 'blocked');
+  assert.equal(getStatus({ status: 'idle', state: 'blocked' }), 'blocked');
+});
+
 test('getStatus: 둘 다 없으면 빈 문자열을 반환한다', () => {
   assert.equal(getStatus({}), '');
 });

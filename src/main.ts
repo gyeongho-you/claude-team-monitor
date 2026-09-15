@@ -73,7 +73,20 @@ const OFFLINE_GRACE_BUFFER_MS = 15000; // 폴링 지연·시스템 부하 등을
 // 팀원의 stop→resume은 이 앱이 아니라 팀장(외부 claude 세션)이 SKILL.md 안내대로 직접 거는
 // 것이라 RUN_CLAUDE_TIMEOUT_MS/STOP_SESSION_TIMEOUT_MS로 정확한 상한을 잴 수는 없지만, 같은
 // claude CLI를 쓰는 이상 같은 시스템 부하·콜드스타트 영향을 받으므로 팀장과 같은 값을 쓴다.
-const MEMBER_MISS_GRACE_MS = STOP_AND_RELAUNCH_WORST_CASE_MS + OFFLINE_GRACE_BUFFER_MS;
+//
+// 다만 팀원 쪽엔 팀장에게는 없는 추가 위험이 하나 더 있다 — resumeLead(팀장)는 이 앱이 stop
+// 직후 곧바로 프로그램적으로 resume을 걸어서 그 사이 지연이 STOP_AND_RELAUNCH_WORST_CASE_MS로
+// 정확히 상한이 잡히지만, 팀원의 stop→resume은 팀장(별도 LLM 세션)이 Bash 도구로 "claude stop"과
+// "claude --bg --resume"을 각각 별도 턴으로 실행하는 것이라, 그 두 명령 사이에 팀장 자신의
+// 추론/다른 도구 호출 시간이 얼마든지 끼어들 수 있다 — 이 구간은 이 앱이 전혀 통제할 수도, 상한을
+// 잴 수도 없다(팀장이 바쁘거나 시스템에 세션이 많이 떠있으면 임의로 길어진다 — 실측: 세션 6개만
+// 떠있어도 claude agents --json 자체가 500~940ms씩 걸림). 실사용 리포트로 재현됨: 팀원 프로세스는
+// 안 죽고 정상 작동 중이었는데 "여러 번 stop→resume을 반복하는 사이" 등록 파일만 사라짐 — 이
+// 외부 LLM 오케스트레이션 구간이 유력한 원인이라 팀원에게만 추가 여유분을 더 얹는다. 이 값으로도
+// 그 구간이 이론상 완전히 상한이 잡히는 건 아니지만(팀장이 얼마나 오래 걸릴지는 원천적으로 알 수
+// 없다), 재현된 사고 사례를 감안한 실용적 여유분이다.
+const MEMBER_EXTERNAL_LEAD_ORCHESTRATION_BUFFER_MS = 30000;
+const MEMBER_MISS_GRACE_MS = STOP_AND_RELAUNCH_WORST_CASE_MS + OFFLINE_GRACE_BUFFER_MS + MEMBER_EXTERNAL_LEAD_ORCHESTRATION_BUFFER_MS;
 
 // 팀장도 팀원 정리와 완전히 같은 TOCTOU를 겪는다 — 멀쩡히 응답 중이던 팀장도 채팅을 보낼 때마다
 // stop→resume이 도는데, 그 짧은 재기동 구간엔 agents 스냅샷에서 한 번 빠질 수 있다. 그 순간 바로
@@ -286,11 +299,156 @@ function getLatestPreview(projectName: string, sessionId: string): SessionRow['p
   return { time: last.time ?? '', prompt: last.prompt ?? '', answer: last.answer ?? '', summary: last.summary || undefined };
 }
 
-// 팀장과의 "대화" 패널용 — 그 세션 id로 필터링한 전체 왕복 기록(오늘자).
-function getTranscript(projectName: string, sessionId: string): TranscriptEntry[] {
-  return readJournalEntries(projectName)
+// 팀장과의 "대화" 패널용 — 그 세션 id로 필터링한 전체 왕복 기록. daily-journal이 특정 상황
+// (백그라운드 세션의 긴 턴, task-notification으로 재개된 턴 등 — claude-team-monitor 바깥의 별도
+// 이슈로 실측 확인됨)에서 기록을 통째로 누락할 수 있다 — 그러면 대화창이 텅 비거나 최근 턴만
+// 쏙 빠져 보인다. daily-journal 기록이 비었거나 원본 세션 파일보다 뒤처져 보이면, 원본 세션 파일
+// (~/.claude/projects/<cwd 인코딩>/<sessionId>.jsonl)에서 직접 읽어와 모자란 뒷부분만 이어붙인다.
+function getTranscript(projectName: string, sessionId: string, cwd: string): TranscriptEntry[] {
+  const journalEntries = readJournalEntries(projectName)
     .filter(e => e.sessionId === sessionId)
     .map(e => ({ time: e.time ?? '', prompt: e.prompt ?? '', answer: e.answer ?? '' }));
+  return fillMissingTranscriptFromRawSession(journalEntries, cwd, sessionId);
+}
+
+// "YYYY-MM-DD HH:MM"(daily-journal의 time 포맷, 분 단위) 문자열을 로컬 시각 기준 epoch ms로
+// 되돌린다 — 형식이 안 맞으면(예전 스키마 등) null.
+function parseJournalTimeLoose(time: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(time);
+  if (!m) return null;
+  const [, y, mo, d, h, mi] = m;
+  const ts = new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi)).getTime();
+  return Number.isNaN(ts) ? null : ts;
+}
+
+function formatRawSessionTimestamp(iso: string | undefined): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// 원본 세션 파일(~/.claude/projects/.../<sessionId>.jsonl)은 daily-journal과 포맷이 전혀 다르다 —
+// type:"user"/"assistant" 메시지가 순서대로 나열되고, message.content가 문자열이거나 배열
+// (tool_use 결과인 tool_result와 실제 텍스트인 text 블록이 섞인 배열)일 수 있다(실측 확인, 이
+// 프로젝트 자신의 세션 파일로 검증함). tool_result만 있는 user 메시지는 도구 실행 결과일 뿐
+// 사람이 보낸 프롬프트가 아니므로 건너뛴다 — 그 외(문자열이거나 text 블록이 있는 경우)는 새 턴의
+// 시작으로 보고, 그 다음에 오는 assistant 메시지들의 text 블록을 모아 답변으로 짝짓는다.
+function readRawSessionTranscript(cwd: string, sessionId: string): TranscriptEntry[] {
+  const file = path.join(PROJECTS_DIR, encodeProjectDirName(cwd), `${sessionId}.jsonl`);
+  let lines: string[];
+  try {
+    if (!fs.existsSync(file)) return [];
+    lines = fs.readFileSync(file, 'utf-8').split('\n');
+  } catch {
+    return [];
+  }
+
+  const entries: TranscriptEntry[] = [];
+  let currentPrompt: { time: string; prompt: string } | null = null;
+  let currentAnswerParts: string[] = [];
+  const flush = () => {
+    if (currentPrompt && currentPrompt.prompt.trim()) {
+      entries.push({ time: currentPrompt.time, prompt: currentPrompt.prompt, answer: currentAnswerParts.join('\n').trim() });
+    }
+    currentPrompt = null;
+    currentAnswerParts = [];
+  };
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let rec: any;
+    try { rec = JSON.parse(line); } catch { continue; }
+
+    if (rec.type === 'user' && rec.message) {
+      const content = rec.message.content;
+      let promptText: string | null = null;
+      if (typeof content === 'string') {
+        promptText = content;
+      } else if (Array.isArray(content) && content.length > 0 && !content.every((b: any) => b.type === 'tool_result')) {
+        const textParts = content.filter((b: any) => b.type === 'text').map((b: any) => b.text).filter(Boolean);
+        if (textParts.length) promptText = textParts.join('\n');
+      }
+      if (promptText !== null && promptText.trim()) {
+        flush();
+        currentPrompt = { time: formatRawSessionTimestamp(rec.timestamp), prompt: promptText };
+      }
+    } else if (rec.type === 'assistant' && rec.message && currentPrompt) {
+      const content = rec.message.content;
+      if (Array.isArray(content)) {
+        const textParts = content.filter((b: any) => b.type === 'text').map((b: any) => b.text).filter(Boolean);
+        if (textParts.length) currentAnswerParts.push(...textParts);
+      }
+    }
+  }
+  flush();
+  return entries;
+}
+
+// daily-journal 기록이 있으면 그게 더 깔끔하게 정제된 형태라 그대로 신뢰하고, 거기 없는(원본에는
+// 있는) 뒷부분만 원본 세션 파일에서 보완해서 이어붙인다 — 완전히 원본으로 교체하지 않는다.
+// 원본 세션 파일은 몇 MB씩 될 수 있어서(실측: 두 달치 프로젝트의 팀장 세션 파일이 1.7MB) 매번
+// 열어 전체를 재구성하면 3초 폴링마다 부담이 크다 — daily-journal의 마지막 기록 시각 이후로 원본
+// 파일이 수정된 적이 없으면(fs.statSync만으로 확인 가능, 파일을 열 필요가 없다) 새로 쌓인 턴이
+// 없다는 뜻이니 그냥 넘어간다.
+function fillMissingTranscriptFromRawSession(journalEntries: TranscriptEntry[], cwd: string, sessionId: string): TranscriptEntry[] {
+  if (journalEntries.length === 0) {
+    const raw = readRawSessionTranscript(cwd, sessionId);
+    return raw.length ? raw : journalEntries;
+  }
+
+  const file = path.join(PROJECTS_DIR, encodeProjectDirName(cwd), `${sessionId}.jsonl`);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    return journalEntries;
+  }
+  const lastJournalTime = parseJournalTimeLoose(journalEntries[journalEntries.length - 1].time);
+  // "YYYY-MM-DD HH:MM"은 분 단위까지만 있어서 실제 mtime과 최대 1분 가까이 차이날 수 있다 —
+  // 여유를 두고 비교한다.
+  if (lastJournalTime !== null && stat.mtimeMs <= lastJournalTime + 2 * 60 * 1000) {
+    return journalEntries;
+  }
+
+  const rawEntries = readRawSessionTranscript(cwd, sessionId);
+  if (rawEntries.length === 0) return journalEntries;
+
+  const cutIndex = findLastMatchingRawIndex(journalEntries[journalEntries.length - 1], rawEntries);
+  // daily-journal의 마지막 프롬프트를 원본에서 못 찾으면(문구 가공 등으로 정확히 안 맞을 수 있음)
+  // 개수 기준으로 대략 맞춰 보완한다 — 완벽하지 않아도 아예 안 보이는 것보다는 낫다.
+  const tail = cutIndex >= 0 ? rawEntries.slice(cutIndex + 1) : rawEntries.slice(journalEntries.length);
+  return tail.length ? journalEntries.concat(tail) : journalEntries;
+}
+
+// journalEntries의 마지막 항목과 똑같은 prompt 텍스트가 원본 세션 파일에 정확히 어디 있었는지
+// 찾는다. 이 앱이 자동으로 넣는 "[알림] 팀원 ... 완료" 같은 정형 문구는 같은 팀원이 같은 상태로
+// 여러 번 끝날 때마다 글자 하나 안 틀리고 그대로 반복될 수 있다(실측 확인) — 그래서 단순히
+// "원본 배열 끝에서부터 훑어 처음 일치하는 것"을 고르면, 훨씬 나중에 벌어진 무관한 재발생을
+// 잘못 짚어서 그 뒤로 아무것도 안 남는(보완 실패) 사고가 난다. daily-journal의 time과 원본
+// 프롬프트의 time이 완전히 같지는 않아도(대기열에 걸려있다 배달되면 최대 수십 분 차이날 수
+// 있음 — deliverPendingNotices 참고) 어느 정도는 가까울 수밖에 없으므로, 텍스트가 일치하는
+// 후보들 중 시간이 가장 가까운 것을 고른다.
+function findLastMatchingRawIndex(lastEntry: TranscriptEntry, rawEntries: TranscriptEntry[]): number {
+  const lastTime = parseJournalTimeLoose(lastEntry.time);
+  if (lastTime === null) {
+    for (let i = rawEntries.length - 1; i >= 0; i--) {
+      if (rawEntries[i].prompt === lastEntry.prompt) return i;
+    }
+    return -1;
+  }
+  const MATCH_SLACK_MS = 60 * 60 * 1000; // 대기열에서 오래 기다린 경우까지 감안한 여유
+  let bestIndex = -1;
+  let bestDiff = Infinity;
+  for (let i = rawEntries.length - 1; i >= 0; i--) {
+    if (rawEntries[i].prompt !== lastEntry.prompt) continue;
+    const rawTime = parseJournalTimeLoose(rawEntries[i].time);
+    if (rawTime === null) continue;
+    const diff = Math.abs(rawTime - lastTime);
+    if (diff <= MATCH_SLACK_MS && diff < bestDiff) { bestDiff = diff; bestIndex = i; }
+  }
+  return bestIndex;
 }
 
 // claude 자신이 세션마다 자동으로 붙이는 짧은 주제(claude agents --json의 name 필드, 네이티브
@@ -685,9 +843,19 @@ function cleanupStaleMembers(members: MemberRecord[], agentIdSet: Set<string | u
   const currentMemberIds = new Set(members.map(m => m.memberId));
   members.forEach(m => {
     if (now - m.createdAt < MEMBER_CLEANUP_GRACE_MS) return;
+    const firstMissAt = memberFirstMissAt.get(m.memberId);
     const result = trackFirstMiss(memberFirstMissAt, agentIdSet.has(m.memberId), m.memberId, now, MEMBER_MISS_GRACE_MS);
     if (result !== 'expired') return;
     memberFirstMissAt.delete(m.memberId);
+    // 실사용 리포트로 "팀원 프로세스는 안 죽었는데 등록 파일만 사라졌다"는 사고가 재현됐는데
+    // 원인을 확정 못 했다 — 다음에 재현되면 최소한 "얼마나 오래 못 잡혔었는지"와 "그 시점에
+    // 이 앱이 실제로 살아있다고 본 세션이 몇 개였는지"(시스템 부하 정황)는 바로 알 수 있게
+    // 지우기 직전에 로그를 남긴다.
+    console.error(
+      `[cleanupStaleMembers] 팀원 ${m.memberId}(팀장 ${m.leadId}) 등록 파일을 정리합니다 — ` +
+      `${firstMissAt !== undefined ? now - firstMissAt : '알 수 없음'}ms 동안 agents 스냅샷에서 못 잡힘 ` +
+      `(유예 ${MEMBER_MISS_GRACE_MS}ms), 현재 살아있는 세션 수=${agentIdSet.size}`
+    );
     try { fs.unlinkSync(path.join(MEMBERS_DIR, `${m.memberId}.json`)); } catch { /* ignore */ }
   });
   // 등록 파일이 다른 경로(수동 종료 버튼 등)로 이미 사라진 memberId의 기록은 여기서 정리해야
@@ -1357,7 +1525,7 @@ ipcMain.handle('get-lead-transcript', (_e, leadId: string) => {
   const lead = loadLeads().find(l => l.id === leadId);
   if (!lead) return [];
   const projectName = resolveProjectName(lead.sessionId, lead.targetDir);
-  return getTranscript(projectName, lead.sessionId);
+  return getTranscript(projectName, lead.sessionId, lead.targetDir);
 });
 
 // claude CLI에는 이미 생성(응답) 중인 세션에 중간에 끼어들어 입력만 추가하는 기능이 없다(claude
