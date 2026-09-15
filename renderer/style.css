@@ -169,10 +169,14 @@ section h2, .section-header h2 { font-size: 12px; text-transform: uppercase; col
 }
 #restart-lead-btn, #end-work-btn { background: #5a4a2a; color: #fff; font-size: 11px; padding: 3px 8px; }
 #end-work-btn { background: #5a2a2a; }
+/* 모달이 하나라도 떠있는 동안(renderer.js showModal/hideModal이 토글) 배경 스크롤을 잠근다 —
+   안 그러면 모달 안 스크롤을 끝까지 내렸을 때 스크롤 체이닝으로 메인 화면까지 같이 스크롤된다. */
+body.modal-open { overflow: hidden; }
 #modal-backdrop {
   position: fixed;
   inset: 0;
   background: var(--overlay);
+  backdrop-filter: blur(2px);
   z-index: 900;
 }
 .modal-panel {
@@ -185,6 +189,7 @@ section h2, .section-header h2 { font-size: 12px; text-transform: uppercase; col
   max-width: 90vw;
   max-height: 80vh;
   overflow-y: auto;
+  overscroll-behavior: contain;
   background: var(--surface);
   border: 1px solid var(--border-2);
   border-radius: 8px;
@@ -203,7 +208,7 @@ section h2, .section-header h2 { font-size: 12px; text-transform: uppercase; col
   z-index: 3;
   background: var(--surface);
 }
-#file-list-content { max-height: 65vh; overflow-y: auto; }
+#file-list-content { max-height: 65vh; overflow-y: auto; overscroll-behavior: contain; }
 .file-list-item {
   display: flex;
   align-items: baseline;

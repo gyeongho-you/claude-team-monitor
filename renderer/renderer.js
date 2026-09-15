@@ -59,11 +59,17 @@ const ALL_MODAL_PANELS = () => [restartLeadPanelEl, endWorkPanelEl, fileListPane
 function showModal(panelEl) {
   panelEl.hidden = false;
   modalBackdropEl.hidden = false;
+  // 모달 안 스크롤을 끝까지 내리면 스크롤 체이닝으로 배경(메인 화면)까지 같이 스크롤되던 문제 —
+  // 모달이 하나라도 떠있는 동안엔 배경 스크롤 자체를 잠근다(overscroll-behavior는 CSS 쪽 이중 방어).
+  document.body.classList.add('modal-open');
 }
 
 function hideModal(panelEl) {
   panelEl.hidden = true;
-  if (ALL_MODAL_PANELS().every(p => p.hidden)) modalBackdropEl.hidden = true;
+  if (ALL_MODAL_PANELS().every(p => p.hidden)) {
+    modalBackdropEl.hidden = true;
+    document.body.classList.remove('modal-open');
+  }
 }
 
 modalBackdropEl.addEventListener('click', () => {
@@ -573,12 +579,16 @@ async function sendChatMessage() {
       queuedChatMessages.set(leadId, message);
       const answerEl = optimisticTurn.querySelector('.chat-answer');
       if (answerEl) answerEl.textContent = '팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.';
+      // 3초 폴링을 기다리지 않고 팀장의 busy 표시 등을 바로 반영한다(카드 새로고침 버튼과 동일한 방식).
+      await refreshBoardNow();
       return;
     }
     // resumeLead가 다른 짧은 id로 깨어날 수 있다(main.ts resumeLead 주석 참고) — 반영하지 않으면
     // 대화창 선택이 풀려서 방금 보낸 대화가 사라진 것처럼 보인다.
     selectedLeadId = result.id;
-    await renderChat();
+    // renderChat()만 부르면 대화 내용만 갱신되고, 카드의 busy 표시 등은 다음 3초 폴링까지 그대로다 —
+    // refreshBoardNow()가 renderBoard()를 거쳐 renderChat()까지 알아서 호출해주므로 이걸로 대체한다.
+    await refreshBoardNow();
   } catch (err) {
     optimisticTurn.remove();
     chatTranscriptEl.insertAdjacentHTML('beforeend', `<p style="color:#f14c4c">이어하기 중 오류가 발생했습니다: ${escapeHtml(errMsg(err))}</p>`);
