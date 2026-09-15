@@ -428,6 +428,14 @@ function loadMembers(): MemberRecord[] {
 const memberFirstMissAt = new Map<string, number>();
 const leadFirstMissAt = new Map<string, number>();
 
+// 팀장이 agents 스냅샷에 이번 폴링에서만 못 잡힌(유예 구간, 아직 오프라인 확정 전) 순간에 보여줄
+// "마지막으로 살아있던 스냅숏" — liveRows에 잡힐 때마다 갱신한다. 이게 없으면 stop→resume 재기동
+// 구간(채팅 즉시전송마다 정상적으로 발생함)에 그 팀장이 liveRows에도 offlineRows에도 안 잡혀서
+// rows에서 통째로 빠지고, 그 결과 renderer.js의 lastLeadIds에서도 빠져 selectedLeadId가 null로
+// 리셋되면서 대화창 패널(leadChatPanelEl) 자체가 순간적으로 숨겨지는 버그로 이어진다(실사용 재현:
+// 즉시 전송할 때마다 화면이 잠깐 지워졌다 돌아옴 — pendingChatTurns 통합 수정과는 별개의 원인).
+const lastKnownLiveLeadRow = new Map<string, SessionRow>();
+
 function computeLiveRows(
   agents: AgentEntry[],
   leads: LeadRecord[],
@@ -475,22 +483,44 @@ function notifyLeadsOfFinishedMembers(liveRows: SessionRow[], leads: LeadRecord[
   });
 }
 
-// 대기 중인 팀원-추가 알림 중, 그 팀장이 지금 busy가 아니면(=억지로 끊어도 하던 작업이 없으면)
-// 이 타이밍에 stop→resume으로 실제 전달한다. busy면 다음 폴링까지 큐에 그대로 둔다.
+// 대기 중이던 알림이 한 팀장 앞으로 여러 건 쌓여있으면 번호를 매겨 하나로 합친다 — 개별로
+// 따로 보내면 stop→resume 사이클이 N번 쉴 틈 없이 연달아 실행돼서(1) 사이클 사이의 짧은 idle
+// 순간을 폴링이 못 잡아 계속 busy처럼 보이고, (2) 나중에 새로 쌓인 메시지(예: 팀장 질문에 대한
+// 사용자 답변)가 먼저 쌓여있던 알림들보다 늦게 배달돼서 대화 흐름이 꼬인다. 1건뿐이면 불필요한
+// 안내문/번호 없이 원문 그대로 보낸다.
+function combinePendingNoticeMessages(notices: PendingNotice[]): string {
+  if (notices.length === 1) return notices[0].message;
+  const lines = notices.map((n, i) => `${i + 1}) ${n.message}`);
+  return `[대기 중이던 메시지 ${notices.length}건을 순서대로 전달합니다]\n\n${lines.join('\n\n')}`;
+}
+
+// 대기 중인 알림 중, 그 팀장이 지금 busy가 아니면(=억지로 끊어도 하던 작업이 없으면) 이 타이밍에
+// stop→resume으로 실제 전달한다. busy면 다음 폴링까지 큐에 그대로 둔다. 같은 팀장 앞으로 쌓인
+// 알림은(원래 쌓인 순서 그대로) 하나로 합쳐서 단 한 번의 resumeLead 호출로만 보낸다 — 그 팀장
+// 몫으로 그룹핑된 notice는 전부 한 번에 stillPending에서 빠진다.
 function deliverPendingNotices(agents: AgentEntry[], leads: LeadRecord[]): void {
   const pendingNotices = loadPendingNotices();
   if (pendingNotices.length === 0) return;
-  const stillPending: PendingNotice[] = [];
+
+  const byLead = new Map<string, PendingNotice[]>();
   for (const notice of pendingNotices) {
-    const leadRec = leads.find(l => l.internalId === notice.leadInternalId);
+    const list = byLead.get(notice.leadInternalId) ?? [];
+    list.push(notice);
+    byLead.set(notice.leadInternalId, list);
+  }
+
+  const stillPending: PendingNotice[] = [];
+  for (const notices of byLead.values()) {
+    const leadRec = leads.find(l => l.internalId === notices[0].leadInternalId);
     const liveAgent = leadRec ? agents.find(a => a.id === leadRec.id) : undefined;
     const isBusy = !!liveAgent && getStatus(liveAgent) === 'busy';
     if (leadRec && liveAgent && !isBusy) {
-      queueLeadOperation(leadRec.internalId, () => resumeLead(leadRec.internalId, notice.message))
+      const message = combinePendingNoticeMessages(notices);
+      queueLeadOperation(leadRec.internalId, () => resumeLead(leadRec.internalId, message))
         .catch(() => { /* 실패해도 알림 자체는 소모(재시도 안 함) */ });
       continue;
     }
-    stillPending.push(notice);
+    stillPending.push(...notices);
   }
   if (stillPending.length !== pendingNotices.length) savePendingNotices(stillPending);
 }
@@ -498,10 +528,11 @@ function deliverPendingNotices(agents: AgentEntry[], leads: LeadRecord[]): void 
 // 지금 떠있지 않은 팀장은 기록을 지우지 않고 "오프라인"으로 남겨둔다 — PC 재부팅 등으로 프로세스가
 // 죽어도 세션 자체는 claude 쪽에 남아있어서 --bg --resume으로 다시 깨울 수 있기 때문이다(대화창에서
 // 메시지를 보내면 자동으로 이 절차를 탄다, resumeLead 참고). 단, agents 스냅샷에 한 번 안 잡힌
-// 것만으로 바로 오프라인 처리하지 않는다(LEAD_OFFLINE_GRACE_MS 주석 참고) — 처음 못 잡힌
-// 시각으로부터 유예 시간이 지나기 전이면 이번 폴링에서만 목록에 안 잡히고, 다음 폴링에 스스로
-// 복구된다. 만료돼도 leadFirstMissAt 기록은 지우지 않는다 — 지우면 다음 폴링에 "처음 못 잡힘"부터
-// 다시 시작해 유예 시간 동안 또 온라인처럼 보이므로, 다시 잡힐 때까지 계속 만료 상태를 유지해야 한다.
+// 것만으로 바로 오프라인 처리하지 않는다(LEAD_OFFLINE_GRACE_MS 주석 참고) — 처음 못 잡힌 시각으로부터
+// 유예 시간이 지나기 전이면 "오프라인 확정" 전인 유예 구간으로 보고(buildGraceRows가 이 구간을
+// 화면에서 처리한다), 유예 시간이 지나야 진짜 오프라인으로 확정한다. 만료돼도 leadFirstMissAt
+// 기록은 지우지 않는다 — 지우면 다음 폴링에 "처음 못 잡힘"부터 다시 시작해 유예 시간 동안 또
+// 온라인처럼 보이므로, 다시 잡힐 때까지 계속 만료 상태를 유지해야 한다.
 function computeOfflineLeads(leads: LeadRecord[], agentIdSet: Set<string | undefined>, now: number): LeadRecord[] {
   const offlineLeads: LeadRecord[] = [];
   leads.forEach(l => {
@@ -512,6 +543,23 @@ function computeOfflineLeads(leads: LeadRecord[], agentIdSet: Set<string | undef
   // 않게 한다 — 팀원 정리 로직과 동일한 방어.
   pruneMissingKeys(leadFirstMissAt, new Set(leads.map(l => l.id)));
   return offlineLeads;
+}
+
+// agents 스냅샷에 이번엔 안 잡혔지만(agentIdSet에 없음) 아직 오프라인으로 확정되지도 않은(유예
+// 구간, offlineLeads에도 없음) 팀장들 — 대부분 stop→resume 재기동 중이다. liveRows에도
+// offlineRows에도 안 들어가는 이 틈을 그냥 두면 rows에서 통째로 빠져서(위 lastKnownLiveLeadRow
+// 주석 참고) 대화창이 순간적으로 사라지므로, 마지막으로 살아있었을 때의 스냅숏을 그대로 재사용해
+// "아직 그대로 있는 것처럼" 보여준다. 캐시가 아직 없으면(한 번도 liveRows에 잡힌 적 없음) 보여줄
+// 게 없으므로 건너뛴다 — 다음 폴링에 자연히 다시 시도된다.
+function buildGraceRows(leads: LeadRecord[], agentIdSet: Set<string | undefined>, offlineLeads: LeadRecord[]): SessionRow[] {
+  const offlineLeadIds = new Set(offlineLeads.map(l => l.id));
+  const graceRows: SessionRow[] = [];
+  for (const l of leads) {
+    if (agentIdSet.has(l.id) || offlineLeadIds.has(l.id)) continue;
+    const cached = lastKnownLiveLeadRow.get(l.id);
+    if (cached) graceRows.push(cached);
+  }
+  return graceRows;
 }
 
 function buildOfflineRows(offlineLeads: LeadRecord[], leads: LeadRecord[]): SessionRow[] {
@@ -576,13 +624,16 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
   const memberMap = new Map(members.map(m => [m.memberId, m]));
 
   const liveRows = computeLiveRows(agents, leads, leadIds, memberMap);
+  liveRows.filter(r => r.isLead).forEach(r => lastKnownLiveLeadRow.set(r.id!, r));
   notifyLeadsOfFinishedMembers(liveRows, leads);
   deliverPendingNotices(agents, leads);
 
   const offlineLeads = computeOfflineLeads(leads, agentIdSet, now);
   const offlineRows = buildOfflineRows(offlineLeads, leads);
-  const rows = [...liveRows, ...offlineRows];
+  const graceRows = buildGraceRows(leads, agentIdSet, offlineLeads);
+  const rows = [...liveRows, ...graceRows, ...offlineRows];
 
+  pruneMissingKeys(lastKnownLiveLeadRow, new Set(leads.map(l => l.id)));
   cleanupStaleMembers(members, agentIdSet, now);
 
   const requests = loadPendingRequests();
@@ -1198,12 +1249,15 @@ ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string) => {
 // 대기열에 쌓아둔 메시지 중 아직 전달 안 된 것을 사용자가 취소할 수 있게 한다(채팅창의 "취소" 버튼).
 ipcMain.handle('cancel-queued-message', (_e, leadId: string, noticeId: string) => cancelQueuedNotice(leadId, noticeId));
 
-// 재시작/작업종료 확인 모달에서 "이 팀장에게 아직 전달 안 된 대기열 메시지가 몇 건 있는지" 미리
-// 보여주기 위한 조회 전용 핸들러 — 렌더러는 짧은 id만 알고 있으므로 여기서 internalId로 변환해서 센다.
-ipcMain.handle('get-pending-notice-count', (_e, leadId: string) => {
+// 이 팀장 앞으로 아직 서버에 남아있는(전달 안 된) 대기열 알림들의 id 목록을 돌려준다 — 렌더러는
+// 짧은 id만 알고 있으므로 여기서 internalId로 변환해서 찾는다. 두 곳에서 쓴다: (1) 재시작/작업종료
+// 확인 모달의 "몇 건 남았는지" 경고(개수만 필요), (2) deliverPendingNotices가 이제 같은 팀장 앞
+// 여러 건을 하나로 합쳐서 보낼 수 있어서, 대화창의 각 큐 항목이 실제로 전달됐는지를 더 이상
+// 원문 텍스트로 트랜스크립트와 대조할 수 없다 — 이 id 목록에 더 이상 없으면 전달된 것으로 본다.
+ipcMain.handle('get-pending-notice-ids', (_e, leadId: string) => {
   const lead = loadLeads().find(l => l.id === leadId);
-  if (!lead) return 0;
-  return loadPendingNotices().filter(n => n.leadInternalId === lead.internalId).length;
+  if (!lead) return [];
+  return loadPendingNotices().filter(n => n.leadInternalId === lead.internalId).map(n => n.id);
 });
 
 ipcMain.handle('update-lead-label', (_e, leadId: string, label: string) => {

@@ -475,15 +475,41 @@ leadMembersChipsEl.addEventListener('click', e => {
   if (btn) showFileList(btn.dataset.files);
 });
 
-// 대기 중(큐/즉시전송 둘 다)인 메시지 중 실제로 서버 트랜스크립트에 나타난 게 있는지 항목별로
-// 확인해서 로컬 상태를 갱신한다 — resumeLead는 메시지를 가공 없이 그대로 프롬프트로 쓰므로,
-// 트랜스크립트에 똑같은 prompt가 나타나면 그 항목만 전달된(=응답까지 끝난) 것으로 판단할 수
-// 있다. 아직 안 나타난 나머지 항목들은 kind와 무관하게 그대로 유지한다.
-function syncQueuedMessagesWithTranscript(leadId, transcript) {
+// 대기 중(큐/즉시전송 둘 다)인 메시지 중 실제로 전달된 게 있는지 항목별로 확인해서 로컬 상태를
+// 갱신한다. kind별로 판단 방법이 다르다:
+// - 'in-flight'(즉시 stop→resume으로 보낸 것)는 resumeLead가 메시지를 가공 없이 그대로
+//   프롬프트로 쓰므로, 트랜스크립트에 똑같은 prompt가 나타나면 전달된 것으로 본다.
+// - 'queued'(팀장이 busy라 main.ts pendingNotices에 쌓인 것)는 main.ts의 deliverPendingNotices가
+//   같은 팀장 앞으로 쌓인 여러 건을 번호를 매겨 하나로 합쳐서 보낼 수 있어서, 더 이상 원문
+//   메시지가 트랜스크립트 prompt와 정확히 일치하는지로 판단할 수 없다 — 대신 서버
+//   (pendingNotices.json)에 그 notice id가 아직 남아있는지로 판단한다.
+async function syncQueuedMessagesWithTranscript(leadId, transcript) {
   const listForLead = pendingChatTurns.get(leadId);
   if (!listForLead || !listForLead.length) return;
-  const stillPending = listForLead.filter(item => !transcript.some(t => t.prompt === item.message));
-  if (stillPending.length === listForLead.length) return;
+
+  let remainingQueuedIds = null;
+  if (listForLead.some(item => item.kind === 'queued')) {
+    try {
+      remainingQueuedIds = new Set(await window.api.getPendingNoticeIds(leadId));
+    } catch (err) {
+      console.error('대기열 상태 확인 실패:', err);
+      // 조회 실패 시 성급하게 지우지 않고 다음 폴링에 다시 시도한다(remainingQueuedIds는 null로
+      // 유지 — 아래에서 'queued' 항목을 그대로 보존하는 신호로 쓰인다).
+    }
+  }
+
+  // 위 IPC await 도중에 다른 renderChat() 호출(다음 폴링 틱, 취소 버튼 클릭 등)이 먼저
+  // pendingChatTurns를 갱신했을 수 있다 — await 전에 캡처해둔 listForLead로 필터링해서 그냥
+  // 덮어쓰면, 그 사이 다른 호출이 이미 지운 항목을 되살려버릴 수 있다(예: 취소한 항목이 잠깐
+  // 다시 나타났다 사라짐). await 이후 최신 상태를 다시 읽어서 그 위에 필터링한다.
+  const currentList = pendingChatTurns.get(leadId);
+  if (!currentList || !currentList.length) return;
+
+  const stillPending = currentList.filter(item => {
+    if (item.kind === 'queued') return remainingQueuedIds ? remainingQueuedIds.has(item.id) : true;
+    return !transcript.some(t => t.prompt === item.message);
+  });
+  if (stillPending.length === currentList.length) return;
   if (stillPending.length) pendingChatTurns.set(leadId, stillPending);
   else pendingChatTurns.delete(leadId);
 }
@@ -558,7 +584,7 @@ async function renderChat() {
     return;
   }
 
-  syncQueuedMessagesWithTranscript(selectedLeadId, transcript);
+  await syncQueuedMessagesWithTranscript(selectedLeadId, transcript);
 
   const row = lastRows.find(r => r.isLead && r.id === selectedLeadId);
   const busyBanner = computeBusyBannerHtml(row);
@@ -735,7 +761,7 @@ async function sendChatMessage() {
 async function updatePendingNoticeWarning(warningEl, leadId) {
   if (!leadId) { warningEl.hidden = true; return; }
   try {
-    const count = await window.api.getPendingNoticeCount(leadId);
+    const count = (await window.api.getPendingNoticeIds(leadId)).length;
     if (count > 0) {
       warningEl.textContent = `⚠ 아직 전달되지 않은 대기열 메시지가 ${count}건 있습니다.`;
       warningEl.hidden = false;
