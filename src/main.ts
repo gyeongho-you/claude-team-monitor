@@ -35,6 +35,26 @@ const POLL_INTERVAL_MS = 3000;
 // 직후의 타이밍 차이) — 그 유예 기간 안에는 "떠있지 않다"고 오판해 등록 파일을 지우지 않는다.
 const MEMBER_CLEANUP_GRACE_MS = 15000;
 
+// claude --bg가 이 시간 안에도 안 끝나면 행(hang)으로 간주하고 포기한다. restartLead/launchTeamLead처럼
+// /team-lead 스킬을 새로 로드하며 시작하는 무거운 콜드 스타트는 단순 --resume보다 느릴 수 있고,
+// 이 PC에서 여러 claude 세션이 동시에 떠있으면(실측 재현) 자원 경합으로 더 늘어질 수 있어서
+// 여유를 두었다("재시작이 자꾸 실패한다" 리포트 대응).
+const RUN_CLAUDE_TIMEOUT_MS = 45000;
+const STOP_SESSION_TIMEOUT_MS = 15000;
+
+// 팀장/팀원 오프라인 확정 유예(아래 LEAD_OFFLINE_GRACE_MS/MEMBER_MISS_GRACE_MS)는 반드시
+// "정상적인 stop→resume 재기동이 최악의 경우 걸릴 수 있는 시간"보다 커야 한다 — 그렇지 않으면
+// 재기동이 끝나기도 전에 유예가 먼저 끝나서, 아직 살아있는(그저 느리게 재기동 중인) 팀장/팀원을
+// 오프라인으로 확정 처리해버리는 회귀가 생긴다. 실제로 이 회귀가 두 번 재현됐다: RUN_CLAUDE_TIMEOUT_MS를
+// 30초→45초로 늘렸을 때("재시작 실패" 리포트 대응) 유예 값(당시 8초로 하드코딩)을 같이 안 늘려서,
+// "즉시 전송한 메시지가 화면에서 사라진다"는 문제가 재발했다(대화창 패널이 숨겨지는 것까지 이전
+// 회귀와 완전히 동일한 증상). 하드코딩된 두 값이 서로 독립적으로 존재하는 한 이런 불일치가 또
+// 생기기 쉬우므로, 유예를 하드코딩하지 않고 두 타임아웃의 합(stopSession이 최악으로 다 걸리고
+// 그 뒤 runClaudeBg도 최악으로 다 걸리는 순차 케이스) + 여유분으로 계산한다 — 앞으로 타임아웃만
+// 늘리고 유예를 깜빡하는 실수 자체가 구조적으로 나지 않게 하기 위함이다.
+const STOP_AND_RELAUNCH_WORST_CASE_MS = STOP_SESSION_TIMEOUT_MS + RUN_CLAUDE_TIMEOUT_MS;
+const OFFLINE_GRACE_BUFFER_MS = 15000; // 폴링 지연·시스템 부하 등을 감안한 추가 여유분(위 두 타임아웃의 합 위에 더 얹는다).
+
 // 유예 기간이 지난, 멀쩡히 동작 중이던 팀원도 claude stop→resume되는 그 짧은 순간(프로세스가 잠깐
 // 사라졌다가 새 pid로 재기동되는 구간)엔 agents 스냅샷에서 한 번 빠질 수 있다(실측 재현됨 — 살아있는
 // 팀원 4명의 등록 파일이 단 한 번의 폴링 미스로 전부 삭제됨). 그래서 한 번 빠진 것만으로 바로 지우지
@@ -49,21 +69,20 @@ const MEMBER_CLEANUP_GRACE_MS = 15000;
 // 얼마나 자주 불리는지에 따라 실제 경과 시간이 고무줄처럼 늘었다 줄었다 해서 유예 시간을 보장하지
 // 못한다. 그래서 횟수 대신 "처음 못 잡힌 시각"을 저장해두고 실제 경과 시간으로 판단한다 —
 // buildSessionRows가 짧은 간격으로 몇 번을 더 불리든(즉시호출+정기폴링 등) 결과가 달라지지 않는다.
-const MEMBER_MISS_GRACE_MS = 8000;
+//
+// 팀원의 stop→resume은 이 앱이 아니라 팀장(외부 claude 세션)이 SKILL.md 안내대로 직접 거는
+// 것이라 RUN_CLAUDE_TIMEOUT_MS/STOP_SESSION_TIMEOUT_MS로 정확한 상한을 잴 수는 없지만, 같은
+// claude CLI를 쓰는 이상 같은 시스템 부하·콜드스타트 영향을 받으므로 팀장과 같은 값을 쓴다.
+const MEMBER_MISS_GRACE_MS = STOP_AND_RELAUNCH_WORST_CASE_MS + OFFLINE_GRACE_BUFFER_MS;
 
 // 팀장도 팀원 정리와 완전히 같은 TOCTOU를 겪는다 — 멀쩡히 응답 중이던 팀장도 채팅을 보낼 때마다
 // stop→resume이 도는데, 그 짧은 재기동 구간엔 agents 스냅샷에서 한 번 빠질 수 있다. 그 순간 바로
 // "오프라인"으로 분류해버리면 온라인 목록(카드)에서 사라지고 히스토리 탭으로 밀려난다(채팅을 자주
 // 보낼수록 자주 재현됨). 팀원과 동일한 이유로, 그리고 팀원과 똑같이 카운터 기반이었다가 겪은 같은
-// 회귀 때문에(위 MEMBER_MISS_GRACE_MS 주석 참고) "처음 못 잡힌 시각" 기준으로 판단한다.
-const LEAD_OFFLINE_GRACE_MS = 8000;
-
-// claude --bg가 이 시간 안에도 안 끝나면 행(hang)으로 간주하고 포기한다. restartLead/launchTeamLead처럼
-// /team-lead 스킬을 새로 로드하며 시작하는 무거운 콜드 스타트는 단순 --resume보다 느릴 수 있고,
-// 이 PC에서 여러 claude 세션이 동시에 떠있으면(실측 재현) 자원 경합으로 더 늘어질 수 있어서
-// 여유를 두었다("재시작이 자꾸 실패한다" 리포트 대응 — 정확한 원인은 아직 미확인이라 방어적으로 늘림).
-const RUN_CLAUDE_TIMEOUT_MS = 45000;
-const STOP_SESSION_TIMEOUT_MS = 15000;
+// 회귀 때문에(위 MEMBER_MISS_GRACE_MS 주석 참고) "처음 못 잡힌 시각" 기준으로 판단한다. 팀장의
+// stop→resume은 이 앱이 직접 걸므로(resumeLead/restartLead) STOP_AND_RELAUNCH_WORST_CASE_MS로
+// 정확한 상한을 잴 수 있다 — 위 공용 주석 참고.
+const LEAD_OFFLINE_GRACE_MS = STOP_AND_RELAUNCH_WORST_CASE_MS + OFFLINE_GRACE_BUFFER_MS;
 
 type AgentEntry = {
   id?: string;
@@ -373,8 +392,57 @@ function saveLeads(leads: LeadRecord[]): void {
   }
 }
 
+// origin 분리 리팩터(deliverPendingNotices가 leadInternalId+origin으로 그룹핑하도록 바뀐 것) 이전에
+// 만들어진 구버전 pendingNotices.json 항목은 leadInternalId 대신 leadId(짧은 id)만 있고 origin
+// 필드가 아예 없다(실제로 로컬 파일에 남아있던 걸 확인함: {"id":"...","leadId":"e7e14a26",
+// "message":"[알림] ...","createdAt":...}). 코드만 고쳐서는 이미 파일에 쌓여있던 이 구버전
+// 항목이 저절로 안 바뀌어서, leadInternalId가 undefined인 채로 영원히 어떤 그룹에도 제대로
+// 안 묶이고 stillPending에만 남아 고아 데이터로 계속 적체된다 — 그래서 로드할 때마다 한 번씩
+// 이 마이그레이션을 거친다(loadLeads의 internalId 백필과 같은 패턴).
+function migratePendingNotices(raw: any[]): { notices: PendingNotice[]; dirty: boolean } {
+  const leads = loadLeads();
+  const notices: PendingNotice[] = [];
+  let dirty = false;
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') { dirty = true; continue; }
+    let leadInternalId: string | undefined = typeof item.leadInternalId === 'string' ? item.leadInternalId : undefined;
+    if (!leadInternalId && typeof item.leadId === 'string') {
+      // 구버전 필드(leadId, 짧은 id)를 지금 leads.json에서 찾아 internalId로 변환한다 — 이미
+      // 사라진(재시작 등으로 짧은 id가 바뀌었거나 완전히 없어진) 팀장이면 더 전달할 대상이
+      // 없으므로 이 항목은 버린다(계속 들고 있어봐야 영원히 배달 못 됨).
+      const lead = leads.find(l => l.id === item.leadId);
+      if (!lead) { dirty = true; continue; }
+      leadInternalId = lead.internalId;
+      dirty = true;
+    }
+    if (!leadInternalId) { dirty = true; continue; } // 둘 다 없으면(알 수 없는 포맷) 버린다
+    const message = typeof item.message === 'string' ? item.message : '';
+    let origin: 'user' | 'system';
+    if (item.origin === 'user' || item.origin === 'system') {
+      origin = item.origin;
+    } else {
+      // origin이 없던 구버전 항목은 문구로 추론한다 — isAutoInjectedPrompt(renderer.js)와 같은 판별.
+      origin = message.startsWith('[알림]') || message.includes('<task-notification>') ? 'system' : 'user';
+      dirty = true;
+    }
+    notices.push({
+      id: typeof item.id === 'string' ? item.id : `notice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      leadInternalId,
+      message,
+      createdAt: typeof item.createdAt === 'number' ? item.createdAt : Date.now(),
+      origin,
+    });
+  }
+  return { notices, dirty };
+}
+
 function loadPendingNotices(): PendingNotice[] {
-  return readJsonArraySafe<PendingNotice>(PENDING_NOTICES_PATH);
+  const raw = readJsonArraySafe<any>(PENDING_NOTICES_PATH);
+  const { notices, dirty } = migratePendingNotices(raw);
+  // 마이그레이션으로 뭔가 바뀌었으면(구버전 필드 변환·유실 항목 제거 등) 즉시 저장해서 다음부터는
+  // 매번 다시 마이그레이션할 필요가 없게 한다(1회성 정리 — loadLeads의 internalId 백필과 동일한 이유).
+  if (dirty) savePendingNotices(notices);
+  return notices;
 }
 
 function savePendingNotices(notices: PendingNotice[]): void {
