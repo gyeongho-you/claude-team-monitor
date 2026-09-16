@@ -128,6 +128,10 @@ type MemberRecord = {
   role?: string; // 예: "reviewer" — 일반 구현 팀원과 구분해 화면에 표시하기 위한 선택 필드
   label?: string; // 사용자가 "+ 팀원 직접 추가"에서 직접 붙인 이름 — LeadRecord.label과 같은 개념.
                   // 이 필드를 추가하기 전에 등록된 팀원에는 없을 수 있어 optional이다.
+  sessionId?: string; // reconcileMemberIds가 짧은 id 드리프트를 되찾는 데 쓰는 안정적인 식별자.
+                       // 이 필드를 추가하기 전에 등록된(또는 SKILL.md를 그대로 따라 팀장이 직접 쓴)
+                       // 레코드에는 없을 수 있어 optional이다 — 그런 레코드는 살아있는 동안 자동으로
+                       // 채워진다(reconcileMemberIds 참고).
 };
 
 // "팀장 디렉토리" — 팀장을 어디서 띄울지 고르는 용도의 단순 등록 목록. 팀원 관련 결정(역할·사전승인)은
@@ -886,6 +890,35 @@ function reconcileLeadIds(agents: AgentEntry[], leads: LeadRecord[]): boolean {
   return changed;
 }
 
+// 팀원도 팀장과 똑같은 문제를 겪는데, 훨씬 더 심각하다 — 팀장은 낡은 id로 잘못 표시만 되지만
+// 팀원은 cleanupStaleMembers가 결국 "죽은 것"으로 보고 등록 파일을 영구히 지워버린다(실사고 확인:
+// g1cl-mgt의 팀원). 팀원은 이 앱이 stop→resume을 관리하지 않고(팀장이 직접 관리) 등록 파일 자체가
+// sessionId를 안 담고 있었어서(디렉토리처럼 "떠있을 때 agents --json으로 알 수 있으니 굳이 저장 안
+// 함") 되찾을 방법조차 없었다. 이제 sessionId를 등록 시점부터(또는 살아있는 동안 한 번) 채워두고,
+// 짧은 id로 못 찾은 살아있는 세션을 sessionId로 다시 찾아 등록 파일을 새 id로 옮겨써서 살려낸다.
+// 등록 파일은 팀장별로 한 파일(memberId.json)이라 "옮긴다"는 게 곧 지우고 새로 쓰는 것이다.
+function reconcileMemberIds(agents: AgentEntry[], members: MemberRecord[]): MemberRecord[] {
+  const agentById = new Map(agents.filter(a => !!a.id).map(a => [a.id!, a]));
+  const agentBySessionId = new Map(agents.filter(a => !!a.sessionId).map(a => [a.sessionId!, a]));
+  return members.map(m => {
+    const liveAgent = agentById.get(m.memberId);
+    if (liveAgent) {
+      if (m.sessionId) return m;
+      const updated: MemberRecord = { ...m, sessionId: liveAgent.sessionId };
+      registerMember(updated);
+      return updated;
+    }
+    if (!m.sessionId) return m; // sessionId를 모르면(옛 레코드) 되찾을 방법이 없다 — 기존 정리 로직대로 처리
+    const matched = agentBySessionId.get(m.sessionId);
+    if (!matched || !matched.id || matched.id === m.memberId) return m;
+    console.log(`[reconcileMemberIds] 팀원 ${m.memberId}(팀장 ${m.leadId})의 짧은 id가 이 앱 밖에서 바뀐 것을 발견해 ${matched.id}로 등록 파일을 옮깁니다.`);
+    try { fs.unlinkSync(path.join(MEMBERS_DIR, `${m.memberId}.json`)); } catch { /* ignore */ }
+    const renamed: MemberRecord = { ...m, memberId: matched.id };
+    registerMember(renamed);
+    return renamed;
+  });
+}
+
 // 보드에는 "내가 띄운 팀장"과 "팀장이 등록한 팀원"만 보여준다 — 그 외(사용자가 따로 열어둔 무관한
 // 세션 등)는 team-lead 체계 밖이므로 제외한다. interactive 세션은 애초에 짧은 id가 없어서 자동으로 빠진다.
 //
@@ -900,7 +933,7 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
   const leads = loadLeads();
   if (reconcileLeadIds(agents, leads)) saveLeads(leads);
   const leadIds = new Set(leads.map(l => l.id));
-  const members = loadMembers();
+  const members = reconcileMemberIds(agents, loadMembers());
   const memberMap = new Map(members.map(m => [m.memberId, m]));
 
   const liveRows = computeLiveRows(agents, leads, leadIds, memberMap);
