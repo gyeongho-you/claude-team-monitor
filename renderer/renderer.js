@@ -199,6 +199,17 @@ const adoptBtn = document.getElementById('adopt-btn');
 const adoptStatusEl = document.getElementById('adopt-status');
 let adoptableEntriesByValue = new Map(); // 드롭다운 value -> {kind:'background', id} | {kind:'interactive', sessionId, cwd}
 
+// 목록(adoptable-select)은 지금 살아있는 세션만 보여준다 — 데몬 재시작 등으로 죽어서 agents 목록에서
+// 빠진 세션은 아예 선택지에 안 뜨니 이 방법으로는 복구할 수 없다. 세션 ID(전체 UUID)를 이미 알고
+// 있으면 직접 입력해서 이어할 수 있는 별도 입력칸을 둔다 — forkSessionAsLead(sessionId, cwd)는
+// 원래 목록에서 고른 항목용이었지만 sessionId/cwd만 받으면 그만이라 그대로 재사용한다.
+const manualSessionIdEl = document.getElementById('manual-session-id');
+const manualSessionDirSelect = document.getElementById('manual-session-dir-select');
+const pickManualSessionDirBtn = document.getElementById('pick-manual-session-dir-btn');
+const manualSessionResumeBtn = document.getElementById('manual-session-resume-btn');
+const manualSessionStatusEl = document.getElementById('manual-session-status');
+let manualSessionCustomPickedDir = null;
+
 const cleanupListEl = document.getElementById('cleanup-list');
 const refreshCleanupBtn = document.getElementById('refresh-cleanup-btn');
 
@@ -345,6 +356,13 @@ function syncLaunchBtnState() {
 function syncAdoptBtnState() {
   adoptBtn.disabled = !adoptableSelect.value;
   adoptBtn.title = adoptableSelect.value ? '' : '먼저 연결할 세션을 선택하세요';
+}
+
+function syncManualSessionResumeBtnState() {
+  const hasSessionId = !!manualSessionIdEl.value.trim();
+  const hasDir = !!manualSessionDirSelect.value;
+  manualSessionResumeBtn.disabled = !hasSessionId || !hasDir;
+  manualSessionResumeBtn.title = !hasSessionId ? '세션 ID를 입력하세요' : !hasDir ? '먼저 디렉토리를 선택하세요' : '';
 }
 
 function syncAddMemberSubmitBtnState() {
@@ -1013,6 +1031,54 @@ adoptBtn.addEventListener('click', async () => {
   }
 });
 
+manualSessionIdEl.addEventListener('input', () => {
+  syncManualSessionResumeBtnState();
+});
+
+manualSessionDirSelect.addEventListener('change', () => {
+  syncManualSessionResumeBtnState();
+});
+
+pickManualSessionDirBtn.addEventListener('click', async () => {
+  try {
+    const dir = await window.api.pickDirectory();
+    if (dir) {
+      manualSessionCustomPickedDir = dir;
+      await renderFavorites();
+    }
+  } catch (err) {
+    manualSessionStatusEl.textContent = `폴더 선택에 실패했습니다: ${errMsg(err)}`;
+  }
+});
+
+manualSessionResumeBtn.addEventListener('click', async () => {
+  const sessionId = manualSessionIdEl.value.trim();
+  const dir = manualSessionDirSelect.value;
+  if (!sessionId || !dir) return;
+  manualSessionResumeBtn.disabled = true;
+  manualSessionStatusEl.textContent = '이어하는 중...';
+  try {
+    const id = await window.api.forkSessionAsLead(sessionId, dir);
+    if (id) {
+      // 원본 세션이 이미 죽어있었으면 그 세션 자체가 그대로 복구되고(같은 짧은 id로 재등록됨),
+      // 아직 살아있었으면(예: 다른 터미널에서 대화 중) 복사본이 새로 생긴다 — CLI 자체의 동작이라
+      // 여기서 미리 구분할 수 없어서 문구도 두 경우를 다 포괄해서 안내한다.
+      manualSessionStatusEl.textContent = `이어졌습니다(${id}). 원래 세션이 죽어있었다면 그 세션이 그대로 복구된 것이고, 살아있었다면 복사본입니다.`;
+      manualSessionIdEl.value = '';
+      formMode = 'none';
+      selectedLeadId = id;
+      renderMemberRow(); // 폴링 안 기다리고 이 팀장 소속 팀원으로 바로 갱신
+      updateLeadSectionVisibility();
+    } else {
+      manualSessionStatusEl.textContent = '이어하기에 실패했습니다 — 세션 ID가 정확한지, claude --version/claude --bg가 정상 동작하는지 확인해보세요.';
+    }
+  } catch (err) {
+    manualSessionStatusEl.textContent = `이어하는 중 오류가 발생했습니다: ${errMsg(err)}`;
+  } finally {
+    manualSessionResumeBtn.disabled = false;
+  }
+});
+
 // ---------------- 세션 정리 탭 ----------------
 
 function tagLabel(tag) {
@@ -1512,6 +1578,9 @@ async function renderFavorites() {
 
   setSelectValuePreserving(memberDirSelect, buildDirOptionsHtml(favs, memberCustomPickedDir, '-- 등록된 디렉토리에서 선택 --'), memberCustomPickedDir);
   syncAddMemberSubmitBtnState();
+
+  setSelectValuePreserving(manualSessionDirSelect, buildDirOptionsHtml(favs, manualSessionCustomPickedDir, '-- 등록된 디렉토리에서 선택 --'), manualSessionCustomPickedDir);
+  syncManualSessionResumeBtnState();
 
   setSelectValuePreserving(newTplDirSelect, buildDirOptionsHtml(favs, tplCustomPickedDir, '-- 이 팀원이 일할 디렉토리 선택 (비워도 됨) --'), tplCustomPickedDir);
 

@@ -78,6 +78,18 @@
             <button id="refresh-adoptable-btn" title="목록 새로고침">⟳</button>
           </div>
           <button id="adopt-btn" disabled>연결하기</button>
+
+          <p class="form-hint">위 목록에 없으면(예: 죽어서 사라진 세션) 세션 ID를 알고 있을 때 직접 입력해서 이어할 수 있습니다.</p>
+          <div class="row">
+            <input id="manual-session-id" type="text" placeholder="세션 ID (전체 UUID)" />
+          </div>
+          <div class="row">
+            <select id="manual-session-dir-select"><option value="">-- 등록된 디렉토리에서 선택 --</option></select>
+            <button id="pick-manual-session-dir-btn" title="등록 안 된 폴더 선택">…</button>
+          </div>
+          <button id="manual-session-resume-btn" disabled>세션 ID로 이어하기</button>
+          <div id="manual-session-status"></div>
+
           <button id="cancel-adopt-btn">취소</button>
           <div id="adopt-status"></div>
         </div>
