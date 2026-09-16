@@ -1019,6 +1019,32 @@ function tagLabel(tag) {
   return tag === 'lead' ? '팀장' : tag === 'member' ? '팀원' : '미등록';
 }
 
+function cleanupItemHtml(s, indented) {
+  return `
+    <div class="cleanup-item ${statusClass(s)}${indented ? ' cleanup-item-indented' : ''}">
+      <div class="cleanup-info">
+        <div class="cleanup-top">${escapeHtml(dirLabel(s.cwd))}<span class="cleanup-tag">${tagLabel(s.tag)}</span></div>
+        <div class="cleanup-meta">${escapeHtml(s.cwd)} · ${relativeAge(s.startedAt)} · ${escapeHtml(s.status || s.state || '')}</div>
+      </div>
+      <button class="stop-btn" data-stop-bg="${escapeHtml(s.id)}">종료</button>
+    </div>
+  `;
+}
+
+// 팀장 카드 먼저, 그 아래 소속 팀원들을 들여쓴 카드로 묶어서 보여준다(cleanup-item-indented).
+// 묶는 로직 자체는 lib/cleanupGrouping.js의 groupSessionsByTeam(순수 함수, 테스트 대상)이 맡고,
+// 여기서는 그 결과를 HTML로만 옮긴다.
+function groupCleanupSessions(sessions) {
+  const { teams, orphans } = groupSessionsByTeam(sessions);
+  const teamsHtml = teams
+    .map(({ lead, members }) => cleanupItemHtml(lead, false) + members.map(m => cleanupItemHtml(m, true)).join(''))
+    .join('');
+  const orphansHtml = orphans.length
+    ? `<div class="cleanup-group-label">소속 팀장이 없는 세션</div>${orphans.map(s => cleanupItemHtml(s, false)).join('')}`
+    : '';
+  return teamsHtml + orphansHtml;
+}
+
 async function renderCleanupSessions() {
   let sessions;
   try {
@@ -1027,15 +1053,7 @@ async function renderCleanupSessions() {
     cleanupListEl.innerHTML = `<div class="empty-hint">세션 목록을 불러오지 못했습니다: ${escapeHtml(errMsg(err))}</div>`;
     return;
   }
-  cleanupListEl.innerHTML = sessions.length ? sessions.map(s => `
-    <div class="cleanup-item ${statusClass(s)}">
-      <div class="cleanup-info">
-        <div class="cleanup-top">${escapeHtml(dirLabel(s.cwd))}<span class="cleanup-tag">${tagLabel(s.tag)}</span></div>
-        <div class="cleanup-meta">${escapeHtml(s.cwd)} · ${relativeAge(s.startedAt)} · ${escapeHtml(s.status || s.state || '')}</div>
-      </div>
-      <button class="stop-btn" data-stop-bg="${escapeHtml(s.id)}">종료</button>
-    </div>
-  `).join('') : '<div class="empty-hint">떠있는 백그라운드 세션이 없습니다.</div>';
+  cleanupListEl.innerHTML = sessions.length ? groupCleanupSessions(sessions) : '<div class="empty-hint">떠있는 백그라운드 세션이 없습니다.</div>';
 
   cleanupListEl.querySelectorAll('[data-stop-bg]').forEach(btn => {
     btn.addEventListener('click', async () => {

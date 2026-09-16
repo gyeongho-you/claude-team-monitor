@@ -1263,15 +1263,17 @@ async function getAdoptableSessions(): Promise<AgentEntry[]> {
 
 // "세션 정리" 탭 전용 — 지금 떠있는 모든 백그라운드 세션(팀장/팀원으로 등록된 것 포함, 좀비도 포함)을
 // 보여준다. 작업 화면(연결 흐름)과 완전히 분리해서, 실수로 잘못 끄는 사고를 줄인다.
-async function getAllBackgroundSessions(): Promise<(AgentEntry & { tag: 'lead' | 'member' | 'untracked' })[]> {
+async function getAllBackgroundSessions(): Promise<(AgentEntry & { tag: 'lead' | 'member' | 'untracked'; leadId?: string })[]> {
   const agents = await fetchAgents();
   const leadIds = new Set(loadLeads().map(l => l.id));
-  const memberIds = new Set(loadMembers().map(m => m.memberId));
+  const memberLeadById = new Map(loadMembers().map(m => [m.memberId, m.leadId]));
   return agents
     .filter(a => a.kind === 'background' && !!a.id)
     .map(a => ({
       ...a,
-      tag: (leadIds.has(a.id!) ? 'lead' : memberIds.has(a.id!) ? 'member' : 'untracked') as 'lead' | 'member' | 'untracked',
+      tag: (leadIds.has(a.id!) ? 'lead' : memberLeadById.has(a.id!) ? 'member' : 'untracked') as 'lead' | 'member' | 'untracked',
+      // 세션 정리 탭에서 팀장 소속으로 팀원을 묶어서 보여주는 데 쓴다 — 팀장 자신·미등록 세션은 없다.
+      leadId: memberLeadById.get(a.id!),
     }))
     .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
 }
@@ -1334,14 +1336,19 @@ function registerMember(member: MemberRecord): void {
 
 // 팀장이 알아서 판단해서 띄우는 것과 별개로, 사용자가 직접 특정 역할(코드리뷰 등)을 주고
 // 팀원을 띄운다 — 어떤 팀장 소속으로 붙일지는 사용자가 고른다(대화창에서 선택 중인 팀장 등).
-// label은 사용자가 이 팀원을 구분하려고 직접 붙인 이름(렌더러에서 필수 입력으로 강제)이다.
+// label은 사용자가 이 팀원을 구분하려고 직접 붙인 이름이다. 렌더러(add-member-submit-btn)가
+// 비어있으면 막긴 하지만, 그건 UI 하나뿐인 방어선이라 여기서도 다시 확인한다 — 그래야 렌더러
+// 쪽 검증이 언젠가 우회되거나 깨지더라도 이름 없는 팀원이 실제로 만들어지는 일은 없다.
 async function launchMember(leadId: string, targetDir: string, instruction: string, role: string, label: string): Promise<string | null> {
+  // 빈 이름은 CLI 실행 실패(null 반환 → "터미널을 확인해보라"는 안내)와 다른 원인이라, 렌더러가
+  // 왜 실패했는지 구분해서 보여줄 수 있게 별도 에러로 던진다.
+  if (!label || !label.trim()) throw new Error('이 팀원을 구분할 이름을 입력해주세요.');
   // role은 화면 라벨용 메타데이터에 그치지 않고, Claude 세션 자신도 알 수 있게 프롬프트에 박아준다.
   const roleLine = role ? `역할: ${role}\n\n` : '';
   const prompt = `${TEAM_MEMBER_BRIEFING}\n\n${roleLine}${TEAM_MEMBER_STANDBY_NOTE}\n\n"""\n${instruction}\n"""`;
   const id = await runClaudeBg(['--bg', prompt], targetDir);
   if (!id) return null;
-  registerMember({ memberId: id, leadId, createdAt: Date.now(), role: role || undefined, label: label || undefined });
+  registerMember({ memberId: id, leadId, createdAt: Date.now(), role: role || undefined, label: label.trim() });
 
   // 팀장이 스스로 띄운 게 아니라서 알려주지 않으면 이 팀원의 존재도 결과도 영원히 모른다 — 다만
   // 팀장이 지금 다른 작업으로 busy일 수 있어서 즉시 stop→resume으로 끼어들지 않고 큐에 쌓아둔다.

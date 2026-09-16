@@ -66,7 +66,12 @@ header h1 { font-size: 15px; margin: 0; }
 #theme-toggle-btn { background: transparent; border: 1px solid var(--border-2); font-size: 14px; padding: 3px 8px; margin-left: auto; }
 #last-updated { color: var(--text-faint); font-size: 11px; }
 
-.tabs { display: flex; gap: 4px; }
+/* header의 아래쪽 padding(10px)만큼 탭이 header 경계선보다 위에 떠서, active 탭의
+   "아래쪽 테두리를 페이지 배경색으로 칠해 경계선과 이어붙이는" 트릭이 실제 경계선에
+   안 닿아 등등 뜬 상자처럼 보였다 — align-self로 탭을 header 바닥에 붙이고, 그만큼을
+   음수 margin으로 당겨서 탭의 아래쪽 테두리가 header의 border-bottom 선과 정확히
+   겹치게 한다. */
+.tabs { display: flex; gap: 4px; align-self: flex-end; margin-bottom: -10px; }
 .tab-btn {
   background: transparent;
   color: var(--text-muted);
@@ -568,6 +573,15 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 }
 .cleanup-item .cleanup-meta { color: var(--text-faint); font-size: 11px; word-break: break-all; }
 .cleanup-item .stop-btn { background: var(--danger-strong); flex-shrink: 0; }
+/* 팀장 소속 팀원임을 한눈에 보이게 탭 하나 정도 들여쓴다. */
+.cleanup-item-indented { margin-left: 28px; }
+.cleanup-group-label {
+  color: var(--text-faint);
+  font-size: 11px;
+  margin: 10px 0 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
 
 /* --- 히스토리 탭 --- */
 #history-panel { max-width: 640px; margin: 0 auto; }
