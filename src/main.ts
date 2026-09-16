@@ -934,6 +934,13 @@ function reconcileMemberIds(agents: AgentEntry[], members: MemberRecord[]): Memb
     if (!matched || !matched.id || matched.id === m.memberId) return m;
     console.log(`[reconcileMemberIds] 팀원 ${m.memberId}(팀장 ${m.leadId})의 짧은 id가 이 앱 밖에서 바뀐 것을 발견해 ${matched.id}로 등록 파일을 옮깁니다.`);
     try { fs.unlinkSync(path.join(MEMBERS_DIR, `${m.memberId}.json`)); } catch { /* ignore */ }
+    // memberFirstMissAt/lastMemberStatus는 memberId로 키잉되는데 옛 id 그대로 두면, 방금 바로잡은
+    // 이 폴링 사이클에서 "새 id의 busy→idle 전이"를 놓칠 수 있다(다음 폴링부턴 새 키로 정상
+    // 추적되니 스스로 회복은 되지만, 굳이 한 번이라도 완료 알림을 놓칠 이유가 없다).
+    const firstMissAt = memberFirstMissAt.get(m.memberId);
+    if (firstMissAt !== undefined) { memberFirstMissAt.delete(m.memberId); memberFirstMissAt.set(matched.id, firstMissAt); }
+    const lastStatus = lastMemberStatus.get(m.memberId);
+    if (lastStatus !== undefined) { lastMemberStatus.delete(m.memberId); lastMemberStatus.set(matched.id, lastStatus); }
     const renamed: MemberRecord = { ...m, memberId: matched.id };
     registerMember(renamed);
     return renamed;
