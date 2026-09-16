@@ -10,6 +10,7 @@ import { getStatus } from '../renderer/lib/status';
 import { writeJsonFileAtomic } from './lib/jsonFile';
 import { TEAM_MEMBER_BRIEFING, TEAM_MEMBER_STANDBY_NOTE } from './lib/teamMemberBriefing';
 import { looksLikeApprovalRequest, parseStallVerdict, shouldCheckStall, shouldSendNudge } from './lib/stallGuard';
+import { MEMBER_MODEL_OPTIONS, clampMinutes, normalizeMemberModel } from './lib/appSettings';
 
 const CLAUDE_HOME = path.join(os.homedir(), '.claude');
 const SESSION_EDITS_DIR = path.join(CLAUDE_HOME, 'session-edits');
@@ -22,6 +23,7 @@ const MEMBER_TEMPLATES_PATH = path.join(app.getPath('userData'), 'memberTemplate
 const LEADS_PATH = path.join(app.getPath('userData'), 'leads.json');
 const PENDING_NOTICES_PATH = path.join(app.getPath('userData'), 'pendingNotices.json');
 const STALL_ALERTS_PATH = path.join(app.getPath('userData'), 'stallAlerts.json');
+const SETTINGS_PATH = path.join(app.getPath('userData'), 'settings.json');
 // 팀장 세션(claude 프로세스, 이 앱과 별개)도 알아야 하는 고정 경로라서 앱 userData가 아니라 ~/.claude 밑에 둔다.
 const REQUESTS_DIR = path.join(CLAUDE_HOME, 'claude-team-monitor', 'requests');
 // 팀장이 실제로 띄운 팀원을 등록해두는 곳 — 이게 있어야 "무관하게 떠있는 다른 세션"과 "진짜 내 팀원"을 구분한다.
@@ -102,12 +104,15 @@ const LEAD_OFFLINE_GRACE_MS = STOP_AND_RELAUNCH_WORST_CASE_MS + OFFLINE_GRACE_BU
 // "정체 감시" — 팀장이 팀원 보고를 처리하고도 다음 지시를 깜빡해서 팀원이 idle/done 상태로
 // 방치되는 사고(실사용 재현: g1cl-test/c7aa91ed가 state: done으로 멈춰서 다음 지시를 못 받음)를
 // 잡기 위한 값. 팀원과 팀장이 둘 다 이 시간 이상 idle이어야 확인 대상이 된다 — 둘 중 하나라도
-// 바쁘면 자연히 흘러갈 상황이니 굳이 건드리지 않는다.
-const STALL_IDLE_THRESHOLD_MS = 10 * 60 * 1000;
+// 바쁘면 자연히 흘러갈 상황이니 굳이 건드리지 않는다. 위 LEAD_OFFLINE_GRACE_MS류와 달리 이
+// 두 값은 실측된 CLI 재기동 속도가 아니라 순전히 "얼마나 기다려야 방치로 볼지"에 대한 사용자
+// 취향 문제라, AppSettings로 사용자가 바꿀 수 있게 열어둔다(설정 파일에 없으면 이 기본값을 쓴다).
+const STALL_IDLE_THRESHOLD_MS_DEFAULT = 10 * 60 * 1000;
 // 한 번 확인(alert 생성 여부와 무관하게)했으면 이 시간 안에는 같은 팀원을 다시 확인하지 않는다 —
 // 매 폴링(3초)마다 Haiku를 계속 부르는 낭비를 막는다.
-const STALL_RECHECK_COOLDOWN_MS = 20 * 60 * 1000;
-// Haiku 서브 에이전트 한 번 호출에 걸리는 실측 시간(콜드 스타트 포함 최대 수십 초)을 감안한 타임아웃.
+const STALL_RECHECK_COOLDOWN_MS_DEFAULT = 20 * 60 * 1000;
+// Haiku 서브 에이전트 한 번 호출에 걸리는 실측 시간(콜드 스타트 포함 최대 수십 초)을 감안한
+// 타임아웃 — 이건 CLI 자체의 실측 성능 특성이라 사용자 설정 대상이 아니다.
 const STALL_CLASSIFIER_TIMEOUT_MS = 45000;
 
 type AgentEntry = {
@@ -136,6 +141,7 @@ type SessionRow = AgentEntry & {
   // "지금 선택된 팀장이 목록에서 사라졌다"고 오판해 아무 온라인 팀장으로나(첫 번째) 자동
   // 전환해버려 사용자 모르게 대화창이 엉뚱한 팀장으로 바뀔 수 있었다.
   internalId?: string;
+  autoStallNudge?: boolean; // 팀장 카드일 때만: 정체 감시가 확인 없이 곧바로 재촉 메시지를 보낼지
 };
 
 type TranscriptEntry = { time: string; prompt: string; answer: string };
@@ -157,12 +163,24 @@ type MemberRecord = {
 // 별도의 MemberTemplate이 담당한다 — 둘을 하나로 묶지 않는다(등록 ≠ 역할부여 ≠ 사전승인).
 type Favorite = { path: string; name: string };
 
+// 사용자가 바꿀 수 있는 값만 여기 둔다 — LEAD_OFFLINE_GRACE_MS류(실측 CLI 성능에 맞춰 계산된 값)는
+// 절대 포함하지 않는다. 분 단위로 저장·표시하고(사람이 이해하기 쉬움), 실제 로직에서만 ms로 바꿔 쓴다.
+type AppSettings = {
+  stallIdleThresholdMin: number;
+  stallCooldownMin: number;
+};
+
 // "팀원 등록(역할 템플릿)" — 재사용 가능한 팀원 정의. 서로 독립적인 두 축으로 정해진다:
 // - scope(소속): 'shared'면 모든 팀장이 쓸 수 있고, 특정 디렉토리 경로면 그 디렉토리에서 도는
 //   팀장만 이 템플릿을 브리핑받는다. 팀장은 stop/resume을 거치며 짧은 id가 계속 바뀌므로, 안정적인
 //   식별자로 팀장 자신의 디렉토리(targetDir)를 "소속" 값으로 쓴다.
 // - path(디렉토리): 이 팀원이 실제로 일할 디렉토리. 있으면 그 안에서만, 없으면 쓸 때마다 그때그때
 //   고른다. approved는 path가 있을 때만 의미 있다(사전승인이면 매번 체크박스 없이 자동 브리핑).
+// MEMBER_MODEL_OPTIONS/normalizeMemberModel은 lib/appSettings.js에 있다(순수 함수라 단위 테스트
+// 대상). 리뷰어처럼 가벼운 역할엔 싼 모델을, 구현처럼 무거운 역할엔 비싼 모델을 쓰는 식으로
+// 역할별 비용/품질 트레이드오프를 사용자가 직접 정할 수 있게 한다.
+type MemberModel = typeof MEMBER_MODEL_OPTIONS[number];
+
 type MemberTemplate = {
   id: string;
   scope: string; // 'shared' | <팀장 디렉토리 경로>
@@ -171,6 +189,7 @@ type MemberTemplate = {
   role: string;
   instruction: string;
   approved: boolean; // path가 있을 때만 의미 있음
+  model?: MemberModel; // 없으면(구버전 템플릿) 'default'와 동일하게 취급
 };
 
 type LeadRecord = {
@@ -187,6 +206,10 @@ type LeadRecord = {
   // 재시작 전에 캡처해둔 옛 sessionId/짧은id로 leads.json을 다시 찾다가 못 찾아서 조용히
   // 무동작으로 끝나는 일이 없다. 렌더러에는 노출하지 않는 백엔드 전용 값이다.
   internalId: string;
+  // true면 정체 감시(runStallWatchdog)가 StallAlert로 사용자 확인을 기다리지 않고 곧바로
+  // queueLeadNotice로 재촉 메시지를 보낸다. 기본값(없음/false)은 반자동 — 안전 게이트(blocked
+  // 하드 게이트·정규식 안전장치)는 이 값과 무관하게 항상 적용된다. 사용자가 팀장 카드에서 직접 켠다.
+  autoStallNudge?: boolean;
 };
 
 // 'dir-approval': 사전 승인 안 된 디렉토리에 팀원을 새로 띄우고 싶을 때(requestedDir 사용).
@@ -753,6 +776,7 @@ function computeLiveRows(
         label: isLead ? lead?.label : member?.label,
         offline: false,
         internalId: isLead ? lead?.internalId : undefined,
+        autoStallNudge: isLead ? lead?.autoStallNudge : undefined,
       };
     });
 }
@@ -867,6 +891,9 @@ function runStallClassifier(tailText: string, memberDesc: string): Promise<Retur
 async function runStallWatchdog(liveRows: SessionRow[], leads: LeadRecord[], members: MemberRecord[]): Promise<void> {
   if (stallWatchdogInFlight) return;
   const now = Date.now();
+  const settings = loadSettings();
+  const idleThresholdMs = settings.stallIdleThresholdMin * 60000;
+  const cooldownMs = settings.stallCooldownMin * 60000;
 
   const memberRowsById = new Map(liveRows.filter(r => !r.isLead && r.id).map(r => [r.id as string, r]));
   for (const [id, row] of memberRowsById) {
@@ -900,9 +927,9 @@ async function runStallWatchdog(liveRows: SessionRow[], leads: LeadRecord[], mem
       memberIdleSince: memberIdleSince.get(m.memberId),
       leadIdleSince: leadIdleSince.get(lead.id),
       now,
-      idleThresholdMs: STALL_IDLE_THRESHOLD_MS,
+      idleThresholdMs,
       lastCheckedAt: stallLastCheckedAt.get(m.memberId),
-      cooldownMs: STALL_RECHECK_COOLDOWN_MS,
+      cooldownMs,
       hasExistingAlert: existingAlerts.some(a => a.memberId === m.memberId),
     });
     if (check) candidates.push({ member: m, memberRow: row, lead });
@@ -939,6 +966,16 @@ async function runStallWatchdog(liveRows: SessionRow[], leads: LeadRecord[], mem
       const freshLead = freshAgents.find(a => a.id === lead.id);
       if (!freshLead || getStatus(freshLead) === 'blocked' || getStatus(freshLead) === 'busy') continue;
 
+      const suggestedMessage = `[정체 감지] 팀원 ${member.memberId}가 ${idleMinutes}분째 대기 중입니다. 남은 작업이 있으면 이어서 지시하고, 이미 다 끝났으면 그렇다고 확인해주세요.`;
+
+      // 팀장이 자동 진행을 켜뒀으면(사용자가 팀장 카드에서 직접 설정) 확인 알림 없이 곧바로
+      // 보낸다 — 단, 여기까지 오려면 이미 blocked 하드 게이트·정규식 안전장치·Haiku의
+      // waitingForUser 판단을 전부 통과한 뒤라는 점은 auto/반자동 어느 쪽이든 동일하다.
+      if (lead.autoStallNudge) {
+        queueLeadNotice(lead.internalId, suggestedMessage, 'system');
+        continue;
+      }
+
       const alerts = loadStallAlerts();
       if (alerts.some(a => a.memberId === member.memberId)) continue; // 그 사이 이미 생성됐으면 중복 방지
       alerts.push({
@@ -946,7 +983,7 @@ async function runStallWatchdog(liveRows: SessionRow[], leads: LeadRecord[], mem
         leadInternalId: lead.internalId,
         memberId: member.memberId,
         reason: verdict!.reason,
-        suggestedMessage: `[정체 감지] 팀원 ${member.memberId}가 ${idleMinutes}분째 대기 중입니다. 남은 작업이 있으면 이어서 지시하고, 이미 다 끝났으면 그렇다고 확인해주세요.`,
+        suggestedMessage,
         createdAt: Date.now(),
       });
       saveStallAlerts(alerts);
@@ -1065,6 +1102,7 @@ function buildOfflineRows(offlineLeads: LeadRecord[], leads: LeadRecord[]): Sess
       label: l.label,
       offline: true,
       internalId: l.internalId,
+      autoStallNudge: l.autoStallNudge,
     };
   });
   if (leadsDirty) saveLeads(leads);
@@ -1286,6 +1324,28 @@ function saveFavorites(favorites: Favorite[]): void {
   } catch (err) {
     console.error('[saveFavorites] favorites.json 저장 실패:', err);
   }
+}
+
+function loadSettings(): AppSettings {
+  const raw = readJsonFileSafe<Partial<AppSettings>>(SETTINGS_PATH);
+  return {
+    stallIdleThresholdMin: clampMinutes(raw?.stallIdleThresholdMin, STALL_IDLE_THRESHOLD_MS_DEFAULT / 60000, 1, 24 * 60),
+    stallCooldownMin: clampMinutes(raw?.stallCooldownMin, STALL_RECHECK_COOLDOWN_MS_DEFAULT / 60000, 1, 24 * 60),
+  };
+}
+
+function saveSettings(partial: Partial<AppSettings>): AppSettings {
+  const merged = { ...loadSettings(), ...partial };
+  const next: AppSettings = {
+    stallIdleThresholdMin: clampMinutes(merged.stallIdleThresholdMin, STALL_IDLE_THRESHOLD_MS_DEFAULT / 60000, 1, 24 * 60),
+    stallCooldownMin: clampMinutes(merged.stallCooldownMin, STALL_RECHECK_COOLDOWN_MS_DEFAULT / 60000, 1, 24 * 60),
+  };
+  try {
+    writeJsonFileAtomic(SETTINGS_PATH, next);
+  } catch (err) {
+    console.error('[saveSettings] settings.json 저장 실패:', err);
+  }
+  return next;
 }
 
 function loadMemberTemplates(): MemberTemplate[] {
@@ -1731,14 +1791,16 @@ function registerMember(member: MemberRecord): void {
 // label은 사용자가 이 팀원을 구분하려고 직접 붙인 이름이다. 렌더러(add-member-submit-btn)가
 // 비어있으면 막긴 하지만, 그건 UI 하나뿐인 방어선이라 여기서도 다시 확인한다 — 그래야 렌더러
 // 쪽 검증이 언젠가 우회되거나 깨지더라도 이름 없는 팀원이 실제로 만들어지는 일은 없다.
-async function launchMember(leadId: string, targetDir: string, instruction: string, role: string, label: string): Promise<string | null> {
+async function launchMember(leadId: string, targetDir: string, instruction: string, role: string, label: string, model?: string): Promise<string | null> {
   // 빈 이름은 CLI 실행 실패(null 반환 → "터미널을 확인해보라"는 안내)와 다른 원인이라, 렌더러가
   // 왜 실패했는지 구분해서 보여줄 수 있게 별도 에러로 던진다.
   if (!label || !label.trim()) throw new Error('이 팀원을 구분할 이름을 입력해주세요.');
   // role은 화면 라벨용 메타데이터에 그치지 않고, Claude 세션 자신도 알 수 있게 프롬프트에 박아준다.
   const roleLine = role ? `역할: ${role}\n\n` : '';
   const prompt = `${TEAM_MEMBER_BRIEFING}\n\n${roleLine}${TEAM_MEMBER_STANDBY_NOTE}\n\n"""\n${instruction}\n"""`;
-  const id = await runClaudeBg(['--bg', prompt], targetDir);
+  const normalizedModel = normalizeMemberModel(model);
+  const modelArgs = normalizedModel === 'default' ? [] : ['--model', normalizedModel];
+  const id = await runClaudeBg(['--bg', ...modelArgs, prompt], targetDir);
   if (!id) return null;
   registerMember({ memberId: id, leadId, createdAt: Date.now(), role: role || undefined, label: label.trim() });
 
@@ -1840,7 +1902,7 @@ ipcMain.handle('fork-session-as-lead', async (_e, sessionId: string, cwd: string
 
 ipcMain.handle('get-member-templates', () => loadMemberTemplates());
 
-ipcMain.handle('add-member-template', (_e, scope: string, dir: string, name: string, role: string, instruction: string) => {
+ipcMain.handle('add-member-template', (_e, scope: string, dir: string, name: string, role: string, instruction: string, model?: string) => {
   const templates = loadMemberTemplates();
   templates.push({
     id: `tpl-${Date.now()}`,
@@ -1850,15 +1912,21 @@ ipcMain.handle('add-member-template', (_e, scope: string, dir: string, name: str
     role: role || '',
     instruction: instruction || '',
     approved: false,
+    model: normalizeMemberModel(model),
   });
   saveMemberTemplates(templates);
   return templates;
 });
 
-ipcMain.handle('update-member-template', (_e, id: string, fields: Partial<Pick<MemberTemplate, 'name' | 'role' | 'instruction'>>) => {
+ipcMain.handle('update-member-template', (_e, id: string, fields: Partial<Pick<MemberTemplate, 'name' | 'role' | 'instruction' | 'model'>>) => {
   const templates = loadMemberTemplates();
   const t = templates.find(x => x.id === id);
-  if (t) { Object.assign(t, fields); saveMemberTemplates(templates); }
+  if (t) {
+    const next = { ...fields };
+    if ('model' in next) next.model = normalizeMemberModel(next.model);
+    Object.assign(t, next);
+    saveMemberTemplates(templates);
+  }
   return templates;
 });
 
@@ -1874,8 +1942,8 @@ ipcMain.handle('delete-member-template', (_e, id: string) => {
   return loadMemberTemplates();
 });
 
-ipcMain.handle('launch-member', async (_e, leadId: string, targetDir: string, instruction: string, role: string, label: string) =>
-  launchMember(leadId, targetDir, instruction, role, label));
+ipcMain.handle('launch-member', async (_e, leadId: string, targetDir: string, instruction: string, role: string, label: string, model?: string) =>
+  launchMember(leadId, targetDir, instruction, role, label, model));
 
 // 요청 파일의 teamLeadId는 팀장 자신이 요청을 쓴 시점의 짧은 id를 그대로 담고 있다(팀장은 자기
 // internalId를 알 방법이 없어 이게 유일한 참조 수단) — 사용자가 승인/거부 버튼을 누르기 전 그
@@ -2009,6 +2077,17 @@ ipcMain.handle('dismiss-stall-alert', (_e, alertId: string) => {
   if (filtered.length === alerts.length) return false;
   saveStallAlerts(filtered);
   return true;
+});
+
+ipcMain.handle('get-settings', () => loadSettings());
+
+ipcMain.handle('update-settings', (_e, partial: Partial<AppSettings>) => saveSettings(partial));
+
+ipcMain.handle('set-lead-auto-stall-nudge', (_e, leadId: string, value: boolean) => {
+  const leads = loadLeads();
+  const lead = leads.find(l => l.id === leadId);
+  if (lead) { lead.autoStallNudge = !!value; saveLeads(leads); }
+  return leads;
 });
 
 ipcMain.handle('update-lead-label', (_e, leadId: string, label: string) => {

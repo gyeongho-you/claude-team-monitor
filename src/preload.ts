@@ -19,11 +19,11 @@ contextBridge.exposeInMainWorld('api', {
   forkSessionAsLead: (sessionId: string, cwd: string) => ipcRenderer.invoke('fork-session-as-lead', sessionId, cwd),
   launchTeamLead: (targetDir: string, instruction: string) =>
     ipcRenderer.invoke('launch-team-lead', targetDir, instruction),
-  launchMember: (leadId: string, targetDir: string, instruction: string, role: string, label: string) =>
-    ipcRenderer.invoke('launch-member', leadId, targetDir, instruction, role, label),
+  launchMember: (leadId: string, targetDir: string, instruction: string, role: string, label: string, model?: string) =>
+    ipcRenderer.invoke('launch-member', leadId, targetDir, instruction, role, label, model),
   getMemberTemplates: () => ipcRenderer.invoke('get-member-templates'),
-  addMemberTemplate: (scope: string, dir: string, name: string, role: string, instruction: string) =>
-    ipcRenderer.invoke('add-member-template', scope, dir, name, role, instruction),
+  addMemberTemplate: (scope: string, dir: string, name: string, role: string, instruction: string, model?: string) =>
+    ipcRenderer.invoke('add-member-template', scope, dir, name, role, instruction, model),
   updateMemberTemplate: (id: string, fields: Record<string, string>) =>
     ipcRenderer.invoke('update-member-template', id, fields),
   toggleMemberTemplateApproved: (id: string) => ipcRenderer.invoke('toggle-member-template-approved', id),
@@ -40,6 +40,9 @@ contextBridge.exposeInMainWorld('api', {
   getStallAlerts: () => ipcRenderer.invoke('get-stall-alerts'),
   confirmStallAlert: (alertId: string) => ipcRenderer.invoke('confirm-stall-alert', alertId),
   dismissStallAlert: (alertId: string) => ipcRenderer.invoke('dismiss-stall-alert', alertId),
+  getSettings: () => ipcRenderer.invoke('get-settings'),
+  updateSettings: (partial: Record<string, number>) => ipcRenderer.invoke('update-settings', partial),
+  setLeadAutoStallNudge: (leadId: string, value: boolean) => ipcRenderer.invoke('set-lead-auto-stall-nudge', leadId, value),
   updateLeadLabel: (leadId: string, label: string) => ipcRenderer.invoke('update-lead-label', leadId, label),
   restartLead: (leadId: string, instruction: string) => ipcRenderer.invoke('restart-lead', leadId, instruction),
   endLeadWork: (leadId: string) => ipcRenderer.invoke('end-lead-work', leadId),
