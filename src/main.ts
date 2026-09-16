@@ -1318,21 +1318,50 @@ async function getAdoptableSessions(): Promise<AgentEntry[]> {
     .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
 }
 
+// 팀장(사람이든 팀장 세션 자신이든)이 SKILL.md의 "띄우자마자 등록해라"를 깜빡하면(실사용 확인 —
+// 오늘 이 앱을 고치던 팀장 자신도 팀원 d8bafe71/dc1db755를 등록 없이 띄웠다), 팀원이 실제로는
+// 멀쩡히 일하고 있는데도 "미등록"으로만 보이고 어느 팀장 소속인지 전혀 알 길이 없었다. 등록 파일이
+// 없어도 "이 팀장의 승인된 디렉토리에서, 이 팀장이 뜬 뒤에 새로 나타난 미등록 세션"이면 꽤 높은
+// 확률로 그 팀장이 띄운 팀원이라고 추정할 수 있다 — 확정은 아니라서 자동으로 등록하지는 않고,
+// "이 팀장 소속일 수 있음"이라고 표시만 해서 사람이 한 번 확인 후 등록 버튼을 누르게 한다.
+function guessProbableLeadId(agent: AgentEntry, leads: LeadRecord[]): string | undefined {
+  const lead = leads.find(l => l.approvedMembers.includes(agent.cwd) && (agent.startedAt ?? 0) >= l.launchedAt);
+  return lead?.id;
+}
+
 // "세션 정리" 탭 전용 — 지금 떠있는 모든 백그라운드 세션(팀장/팀원으로 등록된 것 포함, 좀비도 포함)을
 // 보여준다. 작업 화면(연결 흐름)과 완전히 분리해서, 실수로 잘못 끄는 사고를 줄인다.
-async function getAllBackgroundSessions(): Promise<(AgentEntry & { tag: 'lead' | 'member' | 'untracked'; leadId?: string })[]> {
+async function getAllBackgroundSessions(): Promise<(AgentEntry & { tag: 'lead' | 'member' | 'untracked'; leadId?: string; probableLeadId?: string })[]> {
   const agents = await fetchAgents();
-  const leadIds = new Set(loadLeads().map(l => l.id));
+  const leads = loadLeads();
+  const leadIds = new Set(leads.map(l => l.id));
   const memberLeadById = new Map(loadMembers().map(m => [m.memberId, m.leadId]));
   return agents
     .filter(a => a.kind === 'background' && !!a.id)
-    .map(a => ({
-      ...a,
-      tag: (leadIds.has(a.id!) ? 'lead' : memberLeadById.has(a.id!) ? 'member' : 'untracked') as 'lead' | 'member' | 'untracked',
-      // 세션 정리 탭에서 팀장 소속으로 팀원을 묶어서 보여주는 데 쓴다 — 팀장 자신·미등록 세션은 없다.
-      leadId: memberLeadById.get(a.id!),
-    }))
+    .map(a => {
+      const tag = (leadIds.has(a.id!) ? 'lead' : memberLeadById.has(a.id!) ? 'member' : 'untracked') as 'lead' | 'member' | 'untracked';
+      return {
+        ...a,
+        tag,
+        // 세션 정리 탭에서 팀장 소속으로 팀원을 묶어서 보여주는 데 쓴다 — 팀장 자신·미등록 세션은 없다.
+        leadId: memberLeadById.get(a.id!),
+        // 미등록 세션에만 의미가 있다 — 확정 등록된 것과 헷갈리지 않게 tag는 여전히 'untracked'로 둔다.
+        probableLeadId: tag === 'untracked' ? guessProbableLeadId(a, leads) : undefined,
+      };
+    })
     .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+}
+
+// 세션 정리 탭에서 "이 팀장 소속일 수 있음" 추정 세션을 사람이 확인하고 누르는 "팀원으로 등록" 버튼용.
+// agentId는 실제로 지금 떠있어야 하고(가짜 등록 방지), leadId도 실제 등록된 팀장이어야 한다 — 둘 다
+// 아니면 아무 일도 안 하고 false를 반환한다.
+async function registerProbableMember(agentId: string, leadId: string): Promise<boolean> {
+  const agents = await fetchAgents();
+  const agent = agents.find(a => a.id === agentId && a.kind === 'background');
+  if (!agent) return false;
+  if (!loadLeads().some(l => l.id === leadId)) return false;
+  registerMember({ memberId: agentId, leadId, createdAt: Date.now(), sessionId: agent.sessionId });
+  return true;
 }
 
 async function adoptLead(shortId: string): Promise<string | null> {
@@ -1496,6 +1525,8 @@ ipcMain.handle('launch-team-lead', async (_e, targetDir: string, instruction: st
 ipcMain.handle('get-adoptable-sessions', () => getAdoptableSessions());
 
 ipcMain.handle('get-all-background-sessions', () => getAllBackgroundSessions());
+
+ipcMain.handle('register-probable-member', (_e, agentId: string, leadId: string) => registerProbableMember(agentId, leadId));
 
 ipcMain.handle('stop-background-session', async (_e, shortId: string) => {
   await stopSession(shortId);

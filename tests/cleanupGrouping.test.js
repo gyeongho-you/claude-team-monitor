@@ -54,3 +54,26 @@ test('groupSessionsByTeam: 빈 입력/undefined는 빈 결과를 준다', () => 
   assert.deepEqual(groupSessionsByTeam([]), { teams: [], orphans: [] });
   assert.deepEqual(groupSessionsByTeam(undefined), { teams: [], orphans: [] });
 });
+
+test('groupSessionsByTeam: probableLeadId가 걸린 미등록 세션은 그 팀장의 members로 들어간다(orphans 아님)', () => {
+  const sessions = [
+    { id: 'lead1', tag: 'lead' },
+    { id: 'mem1', tag: 'member', leadId: 'lead1' },
+    { id: 'guess1', tag: 'untracked', probableLeadId: 'lead1' },
+  ];
+  const { teams, orphans } = groupSessionsByTeam(sessions);
+  assert.equal(teams.length, 1);
+  assert.deepEqual(teams[0].members.map(m => m.id), ['mem1', 'guess1']);
+  assert.equal(orphans.length, 0);
+});
+
+test('groupSessionsByTeam: probableLeadId가 아무 팀장과도 안 맞으면 orphans로 간다', () => {
+  const sessions = [
+    { id: 'lead1', tag: 'lead' },
+    { id: 'guess1', tag: 'untracked', probableLeadId: 'lead-not-running' },
+  ];
+  const { teams, orphans } = groupSessionsByTeam(sessions);
+  assert.equal(teams[0].members.length, 0);
+  assert.equal(orphans.length, 1);
+  assert.equal(orphans[0].id, 'guess1');
+});
