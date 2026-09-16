@@ -171,8 +171,12 @@ section h2, .section-header h2 { font-size: 12px; text-transform: uppercase; col
 .chat-header { display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 6px; }
 #lead-members-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .member-chip {
+  /* 배경은 두 테마 다 진한 남색으로 고정(테마 변수 아님)인데 글씨색만 --accent-3를 썼다 —
+     라이트 모드의 --accent-3(#2b6cb0, 중간 톤 파랑)가 이 진한 남색 배경과 명도차가 거의 없어
+     사실상 안 보이는 수준으로 실사용 확인됨. #restart-lead-btn/#end-work-btn처럼 배경 자체가
+     테마 무관 고정색인 칩은 글씨도 흰색으로 고정하는 게 맞다. */
   background: #2d3b4a;
-  color: var(--accent-3);
+  color: #fff;
   font-size: 11px;
   padding: 3px 8px;
   border-radius: 12px;
