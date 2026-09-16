@@ -172,6 +172,7 @@ const cancelAdoptBtn = document.getElementById('cancel-adopt-btn');
 
 const memberRowEl = document.getElementById('member-row');
 const requestsListEl = document.getElementById('requests-list');
+const stallAlertsListEl = document.getElementById('stall-alerts-list');
 const lastUpdatedEl = document.getElementById('last-updated');
 
 const historyListEl = document.getElementById('history-list');
@@ -1415,9 +1416,10 @@ workTabEl.addEventListener('click', async e => {
 // 3초 폴링을 기다리지 않고 지금 바로 보드를 다시 그린다 — 카드의 새로고침/삭제 버튼에서 쓴다.
 async function refreshBoardNow() {
   try {
-    const { rows, requests } = await window.api.refreshBoard();
+    const { rows, requests, stallAlerts } = await window.api.refreshBoard();
     renderBoard(rows || []);
     renderRequests(requests || []);
+    renderStallAlerts(stallAlerts || []);
     lastUpdatedEl.textContent = `마지막 갱신: ${new Date().toLocaleTimeString('ko-KR')}`;
   } catch (err) {
     console.error('보드 새로고침 실패:', err);
@@ -1591,9 +1593,51 @@ function renderRequests(requests) {
   updateBusyUI();
 }
 
-window.api.onAgentsUpdate(({ rows, requests }) => {
+// 정체 감시(백그라운드에서 Haiku가 판단)가 만들어낸 알림 — 사용자가 직접 "이어서 진행 지시"를
+// 눌러야만 실제로 팀장에게 전달된다(반자동). 팀장/팀원 목록과 별개로 화면 어디서든 눈에 띄게
+// 헤더 바로 아래에 띄운다.
+function renderStallAlerts(alerts) {
+  if (!alerts || alerts.length === 0) {
+    stallAlertsListEl.innerHTML = '';
+    return;
+  }
+  stallAlertsListEl.innerHTML = alerts.map(a => `
+    <div class="stall-alert-card">
+      <div class="stall-alert-title">⏸ 팀원 ${escapeHtml(a.memberId)}가 방치된 것 같습니다</div>
+      <div class="stall-alert-reason">${escapeHtml(a.reason || '')}</div>
+      <div class="stall-alert-meta">${new Date(a.createdAt).toLocaleTimeString('ko-KR')}</div>
+      <div class="stall-alert-actions">
+        <button class="stall-confirm-btn" data-confirm-stall="${escapeHtml(a.id)}">이어서 진행 지시</button>
+        <button class="stall-dismiss-btn" data-dismiss-stall="${escapeHtml(a.id)}">무시</button>
+      </div>
+    </div>
+  `).join('');
+
+  async function handleStallDecision(btn, apiCall) {
+    const card = btn.closest('.stall-alert-card');
+    card.querySelectorAll('button').forEach(b => { b.disabled = true; });
+    try {
+      await apiCall();
+    } catch (err) {
+      card.insertAdjacentHTML('beforeend', `<div style="color:#f14c4c">처리 중 오류가 발생했습니다: ${escapeHtml(errMsg(err))}</div>`);
+      card.querySelectorAll('button').forEach(b => { b.disabled = false; });
+      return;
+    }
+    await refreshBoardNow();
+  }
+
+  stallAlertsListEl.querySelectorAll('[data-confirm-stall]').forEach(btn => {
+    btn.addEventListener('click', () => handleStallDecision(btn, () => window.api.confirmStallAlert(btn.dataset.confirmStall)));
+  });
+  stallAlertsListEl.querySelectorAll('[data-dismiss-stall]').forEach(btn => {
+    btn.addEventListener('click', () => handleStallDecision(btn, () => window.api.dismissStallAlert(btn.dataset.dismissStall)));
+  });
+}
+
+window.api.onAgentsUpdate(({ rows, requests, stallAlerts }) => {
   renderBoard(rows || []);
   renderRequests(requests || []);
+  renderStallAlerts(stallAlerts || []);
   lastUpdatedEl.textContent = `마지막 갱신: ${new Date().toLocaleTimeString('ko-KR')}`;
 });
 

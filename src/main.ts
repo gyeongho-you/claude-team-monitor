@@ -9,6 +9,7 @@ import { resolveWithinCwd, isSafeId } from './lib/pathGuard';
 import { getStatus } from '../renderer/lib/status';
 import { writeJsonFileAtomic } from './lib/jsonFile';
 import { TEAM_MEMBER_BRIEFING, TEAM_MEMBER_STANDBY_NOTE } from './lib/teamMemberBriefing';
+import { looksLikeApprovalRequest, parseStallVerdict, shouldCheckStall, shouldSendNudge } from './lib/stallGuard';
 
 const CLAUDE_HOME = path.join(os.homedir(), '.claude');
 const SESSION_EDITS_DIR = path.join(CLAUDE_HOME, 'session-edits');
@@ -20,6 +21,7 @@ const FAVORITES_PATH = path.join(app.getPath('userData'), 'favorites.json');
 const MEMBER_TEMPLATES_PATH = path.join(app.getPath('userData'), 'memberTemplates.json');
 const LEADS_PATH = path.join(app.getPath('userData'), 'leads.json');
 const PENDING_NOTICES_PATH = path.join(app.getPath('userData'), 'pendingNotices.json');
+const STALL_ALERTS_PATH = path.join(app.getPath('userData'), 'stallAlerts.json');
 // 팀장 세션(claude 프로세스, 이 앱과 별개)도 알아야 하는 고정 경로라서 앱 userData가 아니라 ~/.claude 밑에 둔다.
 const REQUESTS_DIR = path.join(CLAUDE_HOME, 'claude-team-monitor', 'requests');
 // 팀장이 실제로 띄운 팀원을 등록해두는 곳 — 이게 있어야 "무관하게 떠있는 다른 세션"과 "진짜 내 팀원"을 구분한다.
@@ -96,6 +98,17 @@ const MEMBER_MISS_GRACE_MS = STOP_AND_RELAUNCH_WORST_CASE_MS + OFFLINE_GRACE_BUF
 // stop→resume은 이 앱이 직접 걸므로(resumeLead/restartLead) STOP_AND_RELAUNCH_WORST_CASE_MS로
 // 정확한 상한을 잴 수 있다 — 위 공용 주석 참고.
 const LEAD_OFFLINE_GRACE_MS = STOP_AND_RELAUNCH_WORST_CASE_MS + OFFLINE_GRACE_BUFFER_MS;
+
+// "정체 감시" — 팀장이 팀원 보고를 처리하고도 다음 지시를 깜빡해서 팀원이 idle/done 상태로
+// 방치되는 사고(실사용 재현: g1cl-test/c7aa91ed가 state: done으로 멈춰서 다음 지시를 못 받음)를
+// 잡기 위한 값. 팀원과 팀장이 둘 다 이 시간 이상 idle이어야 확인 대상이 된다 — 둘 중 하나라도
+// 바쁘면 자연히 흘러갈 상황이니 굳이 건드리지 않는다.
+const STALL_IDLE_THRESHOLD_MS = 10 * 60 * 1000;
+// 한 번 확인(alert 생성 여부와 무관하게)했으면 이 시간 안에는 같은 팀원을 다시 확인하지 않는다 —
+// 매 폴링(3초)마다 Haiku를 계속 부르는 낭비를 막는다.
+const STALL_RECHECK_COOLDOWN_MS = 20 * 60 * 1000;
+// Haiku 서브 에이전트 한 번 호출에 걸리는 실측 시간(콜드 스타트 포함 최대 수십 초)을 감안한 타임아웃.
+const STALL_CLASSIFIER_TIMEOUT_MS = 45000;
 
 type AgentEntry = {
   id?: string;
@@ -201,6 +214,19 @@ type MemberRequest = {
 // 같은 팀장 앞으로 쌓인 것이어도 이 둘을 절대 한 덩어리로 묶지 않기 위해 쓴다(섞어서 묶으면
 // isAutoInjectedPrompt가 '[알림]' 문구 때문에 사용자 메시지까지 자동알림으로 오판해 잘못 표시된다).
 type PendingNotice = { id: string; leadInternalId: string; message: string; createdAt: number; origin: 'user' | 'system' };
+
+// 정체 감시(runStallWatchdog)가 만들어내는, 사용자 확인을 기다리는 항목. 사용자가 화면에서
+// "이어서 진행 지시"를 눌러야 실제로 queueLeadNotice로 전달된다(반자동 — 앱이 판단은 하되
+// 사람 확인 없이 살아있는 세션에 자동으로 메시지를 찔러 넣지는 않는다). memberId는 이 알림이
+// 어느 팀원의 정체를 근거로 만들어졌는지(중복 생성 방지·화면 표시용).
+type StallAlert = {
+  id: string;
+  leadInternalId: string;
+  memberId: string;
+  reason: string; // Haiku가 판단 근거로 남긴 한 줄 요약
+  suggestedMessage: string; // 사용자가 확인을 누르면 그대로 팀장에게 전달될 메시지
+  createdAt: number;
+};
 
 function getResourcesRoot(): string {
   // app.getAppPath()는 개발 중엔 프로젝트 루트, electron-packager로 패키징한 뒤엔
@@ -621,6 +647,18 @@ function savePendingNotices(notices: PendingNotice[]): void {
   }
 }
 
+function loadStallAlerts(): StallAlert[] {
+  return readJsonArraySafe<StallAlert>(STALL_ALERTS_PATH);
+}
+
+function saveStallAlerts(alerts: StallAlert[]): void {
+  try {
+    writeJsonFileAtomic(STALL_ALERTS_PATH, alerts);
+  } catch (err) {
+    console.error('[saveStallAlerts] stallAlerts.json 저장 실패:', err);
+  }
+}
+
 // 생성한 알림의 id를 반환한다 — 채팅 큐잉처럼 호출부가 나중에 이 항목을 특정해서 취소해야 하는
 // 경우에 쓴다(다른 호출부는 반환값을 그냥 무시해도 된다). leadInternalId는 LeadRecord.internalId다.
 // origin은 위 PendingNotice 타입 주석 참고 — 호출부가 반드시 맞는 값을 넘겨야 한다.
@@ -739,6 +777,183 @@ function notifyLeadsOfFinishedMembers(liveRows: SessionRow[], leads: LeadRecord[
     }
     if (status) lastMemberStatus.set(r.id!, status);
   });
+}
+
+// ---------------- 정체 감시(stall watchdog) ----------------
+// notifyLeadsOfFinishedMembers는 busy→idle 전환 "순간"에 딱 한 번만 팀장에게 알린다 — 팀장이 그
+// 알림을 처리하고도(예: 보고서만 갱신하고) 팀원에게 다음 지시를 깜빡하면, 그 한 번의 알림 이후로는
+// 아무도 다시 재촉하지 않아 팀원이 idle/done 상태로 무기한 방치될 수 있다(실사용 재현: g1cl-test의
+// 팀원 c7aa91ed가 state: done인 채 계속 대기, 사용자가 직접 "하고있니?"라고 물어야 발견됨).
+// 이 아래 로직은 그 방치를 감지해서 "이어서 진행하라"는 표준 프롬프트를 보낼지 사용자에게 물어보는
+// 알림(StallAlert)을 만든다. 값싼 Haiku 서브 에이전트가 최근 대화 몇 턴만 보고 판단하되, 그 판단
+// 하나만으로는 절대 메시지를 보내지 않는다 — blocked(승인 대기) 상태는 앱 코드가 하드 게이트로
+// 걸러내고(shouldCheckStall), 팀장의 마지막 답변이 질문/승인 요청처럼 보이면 정규식으로도 한 번 더
+// 막으며(shouldSendNudge), 최종적으로도 사용자가 화면에서 직접 확인을 눌러야만 실제로 전달된다
+// (confirm-stall-alert IPC 참고) — Haiku의 판단·프롬프트 하나만 믿지 않는 다중 방어.
+const memberIdleSince = new Map<string, number>(); // memberId(짧은 id) -> idle/done으로 바뀐 시각
+const leadIdleSince = new Map<string, number>();   // leadId(짧은 id) -> idle/done으로 바뀐 시각
+const stallLastCheckedAt = new Map<string, number>(); // memberId -> 마지막으로 확인(Haiku 호출 또는 스킵 판정)한 시각
+let stallWatchdogInFlight = false; // Haiku 호출이 몇 초~몇십 초 걸리므로, 3초 폴링과 겹쳐 돌지 않게 막는다
+
+function buildStallClassifierPrompt(tailText: string, memberDesc: string): string {
+  return [
+    '당신은 팀장 세션이 방치되고 있는지 판단하는 보조 도구입니다. 아래는 어떤 "팀장" AI 세션의',
+    '최근 대화 일부와, 그 팀장에게 소속된 팀원 상태 설명입니다.',
+    '',
+    `[팀원 상태] ${memberDesc}`,
+    '',
+    '[팀장의 최근 대화]',
+    tailText || '(대화 기록 없음)',
+    '',
+    '이 정보만 보고 판단하세요:',
+    '- shouldNudge: 팀장이 실수로 다음 지시를 깜빡한 것으로 보이면 true, 이미 할 일이 다 끝났거나',
+    '  판단하기 애매하면 false.',
+    '- waitingForUser: 팀장이 사람의 확인/승인/선택을 기다리고 있는 것으로 조금이라도 보이면 true.',
+    '  이 경우 shouldNudge 값과 무관하게 절대 재촉하면 안 되는 상황이니, 조금이라도 의심되면',
+    '  반드시 true로 답하세요(애매하면 true 쪽으로 치우치세요).',
+    '- reason: 판단 근거를 한국어 한 문장으로.',
+    '',
+    '다른 설명 없이 이 형식의 JSON만 출력하세요:',
+    '{"shouldNudge": boolean, "waitingForUser": boolean, "reason": string}',
+  ].join('\n');
+}
+
+// Haiku로 단발성 판단만 받는다 — --bg(백그라운드 세션)이 아니라 -p(print, 1회성 응답 후 종료)를
+// 쓴다. 세션 컨텍스트가 필요 없는 순수 분류 작업이라 매번 새 프로세스로 충분하고, 그래야 비용도
+// 최소화된다. cwd를 프로젝트 디렉토리가 아니라 임시 디렉토리로 둬서 어떤 프로젝트의 CLAUDE.md도
+// 로드하지 않게 한다(판단에 불필요한 컨텍스트를 섞지 않기 위함 + 토큰 절약).
+function runStallClassifier(tailText: string, memberDesc: string): Promise<ReturnType<typeof parseStallVerdict>> {
+  const prompt = buildStallClassifierPrompt(tailText, memberDesc);
+  return new Promise(resolve => {
+    let out = '';
+    let settled = false;
+    const finish = (value: ReturnType<typeof parseStallVerdict>) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const child = spawn(
+      'claude',
+      ['-p', '--model', 'haiku', '--output-format', 'json', prompt],
+      { cwd: os.tmpdir() },
+    );
+    const timer = setTimeout(() => {
+      console.error('[runStallClassifier] Haiku 분류 호출이 응답 없이 대기 중이라 강제 종료합니다.');
+      child.kill();
+      finish(null);
+    }, STALL_CLASSIFIER_TIMEOUT_MS);
+    child.stdout?.on('data', d => { out += d.toString(); });
+    child.on('close', () => {
+      try {
+        const parsed = JSON.parse(out);
+        finish(parseStallVerdict(parsed.result));
+      } catch (err) {
+        console.error('[runStallClassifier] Haiku 응답 파싱 실패(fail-closed로 처리):', err);
+        finish(null);
+      }
+    });
+    child.on('error', err => {
+      console.error('[runStallClassifier] claude 프로세스를 실행하지 못했습니다:', err);
+      finish(null);
+    });
+  });
+}
+
+// 매 폴링마다 호출된다. 실제로 Haiku를 부르는 건 조건을 만족하는 후보가 있을 때뿐이라 평상시엔
+// 거의 비용이 없다. await하지 않고 fire-and-forget으로 호출된다(buildSessionRowsInternal이 3초
+// 폴링뿐 아니라 채팅 전송 직후 refresh-board로도 겹쳐 불리는데, Haiku 호출까지 그 경로를 막으면
+// 화면 갱신 자체가 몇십 초씩 느려진다) — stallWatchdogInFlight로 중복 실행만 막는다.
+async function runStallWatchdog(liveRows: SessionRow[], leads: LeadRecord[], members: MemberRecord[]): Promise<void> {
+  if (stallWatchdogInFlight) return;
+  const now = Date.now();
+
+  const memberRowsById = new Map(liveRows.filter(r => !r.isLead && r.id).map(r => [r.id as string, r]));
+  for (const [id, row] of memberRowsById) {
+    const status = getStatus(row);
+    if (status === 'busy') { memberIdleSince.delete(id); continue; }
+    if (!memberIdleSince.has(id)) memberIdleSince.set(id, now);
+  }
+  pruneMissingKeys(memberIdleSince, new Set(memberRowsById.keys()));
+
+  const leadRowsById = new Map(liveRows.filter(r => r.isLead && r.id).map(r => [r.id as string, r]));
+  for (const [id, row] of leadRowsById) {
+    const status = getStatus(row);
+    if (status === 'busy') { leadIdleSince.delete(id); continue; }
+    if (!leadIdleSince.has(id)) leadIdleSince.set(id, now);
+  }
+  pruneMissingKeys(leadIdleSince, new Set(leadRowsById.keys()));
+
+  const existingAlerts = loadStallAlerts();
+  const candidates: { member: MemberRecord; memberRow: SessionRow; lead: LeadRecord }[] = [];
+  for (const m of members) {
+    const row = memberRowsById.get(m.memberId);
+    if (!row) continue;
+    const lead = leads.find(l => l.id === m.leadId);
+    if (!lead) continue;
+    const leadRow = leadRowsById.get(lead.id);
+    if (!leadRow) continue;
+
+    const check = shouldCheckStall({
+      memberStatus: getStatus(row),
+      leadStatus: getStatus(leadRow),
+      memberIdleSince: memberIdleSince.get(m.memberId),
+      leadIdleSince: leadIdleSince.get(lead.id),
+      now,
+      idleThresholdMs: STALL_IDLE_THRESHOLD_MS,
+      lastCheckedAt: stallLastCheckedAt.get(m.memberId),
+      cooldownMs: STALL_RECHECK_COOLDOWN_MS,
+      hasExistingAlert: existingAlerts.some(a => a.memberId === m.memberId),
+    });
+    if (check) candidates.push({ member: m, memberRow: row, lead });
+  }
+  if (candidates.length === 0) return;
+
+  stallWatchdogInFlight = true;
+  try {
+    for (const { member, memberRow, lead } of candidates) {
+      // 호출 전에 먼저 쿨다운을 마크해둔다 — Haiku 호출이 실패하거나 시간이 걸려도 다음 폴링(3초
+      // 뒤)마다 곧바로 재시도하지 않게 하기 위함이다.
+      stallLastCheckedAt.set(member.memberId, Date.now());
+
+      const projectName = resolveProjectName(lead.sessionId, lead.targetDir);
+      const transcript = getTranscript(projectName, lead.sessionId, lead.targetDir);
+      const lastEntries = transcript.slice(-4);
+      if (lastEntries.length === 0) continue; // 대화 기록이 없으면 판단할 근거가 없다 — 스킵
+
+      const lastAnswer = lastEntries[lastEntries.length - 1]?.answer ?? '';
+      // Haiku를 부르기도 전에, 정적 안전장치로 먼저 걸러낼 수 있으면 호출 비용 자체를 아낀다.
+      if (looksLikeApprovalRequest(lastAnswer)) continue;
+
+      const tailText = lastEntries.map(e => `사용자: ${e.prompt}\n팀장: ${e.answer}`).join('\n\n').slice(-3000);
+      const idleSince = memberIdleSince.get(member.memberId) ?? Date.now();
+      const idleMinutes = Math.max(1, Math.round((Date.now() - idleSince) / 60000));
+      const memberDesc = `팀원 ${member.memberId}(역할: ${member.role || '미지정'})가 ${idleMinutes}분째 ${getStatus(memberRow)} 상태로 멈춰있습니다.`;
+
+      const verdict = await runStallClassifier(tailText, memberDesc);
+      if (!shouldSendNudge(verdict, lastAnswer)) continue;
+
+      // 발송 여부를 판단하는 사이 상태가 바뀌었을 수 있으니, 최종적으로 알림을 만들기 직전에
+      // 한 번 더 최신 상태를 확인한다(팀장이 blocked로 바뀌었으면 여기서도 다시 걸러진다).
+      const freshAgents = await fetchAgents();
+      const freshLead = freshAgents.find(a => a.id === lead.id);
+      if (!freshLead || getStatus(freshLead) === 'blocked' || getStatus(freshLead) === 'busy') continue;
+
+      const alerts = loadStallAlerts();
+      if (alerts.some(a => a.memberId === member.memberId)) continue; // 그 사이 이미 생성됐으면 중복 방지
+      alerts.push({
+        id: `stall-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        leadInternalId: lead.internalId,
+        memberId: member.memberId,
+        reason: verdict!.reason,
+        suggestedMessage: `[정체 감지] 팀원 ${member.memberId}가 ${idleMinutes}분째 대기 중입니다. 남은 작업이 있으면 이어서 지시하고, 이미 다 끝났으면 그렇다고 확인해주세요.`,
+        createdAt: Date.now(),
+      });
+      saveStallAlerts(alerts);
+    }
+  } finally {
+    stallWatchdogInFlight = false;
+  }
 }
 
 // 대기 중이던 알림이 한 팀장 앞으로 여러 건 쌓여있으면 번호를 매겨 하나로 합친다 — 개별로
@@ -975,6 +1190,11 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
   liveRows.filter(r => r.isLead).forEach(r => lastKnownLiveLeadRow.set(r.id!, r));
   notifyLeadsOfFinishedMembers(liveRows, leads);
   deliverPendingNotices(agents, leads);
+  // Haiku 호출까지 포함해 몇십 초 걸릴 수 있어 await하지 않는다(fire-and-forget) — 이 함수의
+  // 반환(화면 갱신)을 막으면 안 된다. 내부적으로 stallWatchdogInFlight가 중복 실행을 막는다.
+  runStallWatchdog(liveRows, leads, members).catch(err => {
+    console.error('[runStallWatchdog] 정체 감시 도중 오류:', err);
+  });
 
   const offlineLeads = computeOfflineLeads(leads, agentIdSet, now);
   const offlineRows = buildOfflineRows(offlineLeads, leads);
@@ -1553,7 +1773,7 @@ function createWindow(): void {
   const poll = async () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     const { rows, requests } = await buildSessionRows();
-    mainWindow.webContents.send('agents-update', { rows, requests });
+    mainWindow.webContents.send('agents-update', { rows, requests, stallAlerts: listStallAlertsForUi() });
   };
   poll();
   pollTimer = setInterval(poll, POLL_INTERVAL_MS);
@@ -1610,7 +1830,7 @@ ipcMain.handle('stop-background-session', async (_e, shortId: string) => {
 });
 
 // 작업 탭 카드에서 "새로고침"/"삭제"를 눌렀을 때 3초 폴링을 기다리지 않고 바로 최신 보드를 준다.
-ipcMain.handle('refresh-board', () => buildSessionRows());
+ipcMain.handle('refresh-board', async () => ({ ...(await buildSessionRows()), stallAlerts: listStallAlertsForUi() }));
 
 ipcMain.handle('adopt-lead', async (_e, shortId: string) => adoptLead(shortId));
 
@@ -1757,6 +1977,38 @@ ipcMain.handle('get-pending-notice-ids', (_e, leadId: string) => {
   const lead = loadLeads().find(l => l.id === leadId);
   if (!lead) return [];
   return loadPendingNotices().filter(n => n.leadInternalId === lead.internalId).map(n => n.id);
+});
+
+// 정체 감시가 만들어낸, 아직 사용자 확인을 안 거친 알림 목록. 화면에 팀장 이름 등을 붙여
+// 보여줄 수 있게 leadId(짧은 id)도 같이 계산해서 내려준다 — 렌더러는 internalId를 모른다.
+// poll()의 agents-update 푸시와 get-stall-alerts IPC 양쪽에서 같은 로직을 쓴다.
+function listStallAlertsForUi(): (StallAlert & { leadId?: string })[] {
+  const leads = loadLeads();
+  return loadStallAlerts().map(a => ({
+    ...a,
+    leadId: leads.find(l => l.internalId === a.leadInternalId)?.id,
+  }));
+}
+
+ipcMain.handle('get-stall-alerts', () => listStallAlertsForUi());
+
+// 사용자가 "이어서 진행 지시"를 눌렀을 때만 실제로 팀장에게 전달한다 — Haiku 판단+앱 게이트를
+// 다 통과해도 사람 확인 전에는 살아있는 세션에 자동으로 메시지를 찔러 넣지 않는다(반자동).
+ipcMain.handle('confirm-stall-alert', (_e, alertId: string) => {
+  const alerts = loadStallAlerts();
+  const alert = alerts.find(a => a.id === alertId);
+  if (!alert) return false;
+  saveStallAlerts(alerts.filter(a => a.id !== alertId));
+  queueLeadNotice(alert.leadInternalId, alert.suggestedMessage, 'system');
+  return true;
+});
+
+ipcMain.handle('dismiss-stall-alert', (_e, alertId: string) => {
+  const alerts = loadStallAlerts();
+  const filtered = alerts.filter(a => a.id !== alertId);
+  if (filtered.length === alerts.length) return false;
+  saveStallAlerts(filtered);
+  return true;
 });
 
 ipcMain.handle('update-lead-label', (_e, leadId: string, label: string) => {

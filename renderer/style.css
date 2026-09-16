@@ -404,6 +404,24 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 .request-card .approve-btn { background: var(--success-strong); }
 .request-card .deny-btn { background: var(--danger-strong); }
 
+/* --- 정체 감시 알림(헤더 바로 아래, 전체 탭 공통 표시) --- */
+#stall-alerts-list { padding: 0 16px; }
+#stall-alerts-list:empty { padding: 0; }
+.stall-alert-card {
+  background: var(--surface);
+  border: 1px solid var(--warning);
+  border-left: 3px solid var(--warning);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin: 8px 0;
+}
+.stall-alert-title { font-weight: 600; color: var(--text-bright); }
+.stall-alert-reason { color: var(--text); margin: 4px 0; }
+.stall-alert-meta { color: var(--text-muted); font-size: 11px; margin-bottom: 6px; }
+.stall-alert-actions button { margin-right: 6px; }
+.stall-confirm-btn { background: var(--warning); color: #1a1a1a; }
+.stall-dismiss-btn { background: var(--border-2); color: var(--text); }
+
 /* --- 팀장/팀원 셋팅 탭 --- */
 /* ID 선택자로 display를 주면 .tab-page{display:none}보다 우선순위가 높아져서 비활성 상태에서도
    계속 보이는 버그가 났었다 — .active와 묶어서 활성 상태일 때만 grid가 적용되게 한다. */
