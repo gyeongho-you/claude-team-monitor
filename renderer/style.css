@@ -63,8 +63,42 @@ header {
   border-bottom: 1px solid var(--border);
 }
 header h1 { font-size: 15px; margin: 0; }
-#theme-toggle-btn { background: transparent; border: 1px solid var(--border-2); font-size: 14px; padding: 3px 8px; margin-left: auto; }
+#theme-toggle-btn { background: transparent; border: 1px solid var(--border-2); font-size: 14px; padding: 3px 8px; }
 #last-updated { color: var(--text-faint); font-size: 11px; }
+
+#app-settings-wrap { position: relative; margin-left: auto; }
+#app-settings-btn { background: transparent; border: 1px solid var(--border-2); font-size: 14px; padding: 3px 8px; }
+#app-settings-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  background: var(--surface);
+  border: 1px solid var(--border-2);
+  border-radius: 6px;
+  padding: 10px 12px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.3);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 220px;
+}
+#app-settings-panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+#app-settings-panel input[type="number"] {
+  width: 100%;
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  color: var(--text);
+  padding: 4px 6px;
+  border-radius: 3px;
+}
+#app-settings-status { font-size: 11px; color: var(--text-faint); min-height: 14px; }
 
 /* header의 아래쪽 padding(10px)만큼 탭이 header 경계선보다 위에 떠서, active 탭의
    "아래쪽 테두리를 페이지 배경색으로 칠해 경계선과 이어붙이는" 트릭이 실제 경계선에
@@ -168,7 +202,16 @@ section h2, .section-header h2 { font-size: 12px; text-transform: uppercase; col
   max-width: 720px;
   margin: 0 auto;
 }
-.chat-header { display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 6px; }
+.chat-header { display: flex; align-items: center; justify-content: flex-end; gap: 6px; margin-bottom: 6px; }
+#auto-stall-nudge-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-right: auto;
+  cursor: pointer;
+}
 #lead-members-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .member-chip {
   /* 배경은 두 테마 다 진한 남색으로 고정(테마 변수 아님)인데 글씨색만 --accent-3를 썼다 —
@@ -547,6 +590,15 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
   color: var(--accent-2);
   padding: 2px 4px;
   flex-shrink: 0;
+}
+.template-card .tpl-model {
+  width: 92px;
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  color: var(--text);
+  padding: 2px 4px;
+  flex-shrink: 0;
+  border-radius: 3px;
 }
 .template-card [readonly] { cursor: default; opacity: 0.75; }
 .template-card [readonly]:focus { border-color: transparent; background: transparent; outline: none; }

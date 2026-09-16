@@ -22,6 +22,49 @@ document.getElementById('theme-toggle-btn').addEventListener('click', () => {
   try { localStorage.setItem(THEME_KEY, next); } catch { /* 저장 안 돼도 이번 세션 동안은 유지됨 */ }
 });
 
+// --- 정체 감시 설정(idle 임계값/쿨다운) ---
+(function initAppSettings() {
+  const btn = document.getElementById('app-settings-btn');
+  const panel = document.getElementById('app-settings-panel');
+  const idleInput = document.getElementById('stall-idle-threshold-input');
+  const cooldownInput = document.getElementById('stall-cooldown-input');
+  const statusEl = document.getElementById('app-settings-status');
+
+  async function loadIntoInputs() {
+    try {
+      const settings = await window.api.getSettings();
+      idleInput.value = settings.stallIdleThresholdMin;
+      cooldownInput.value = settings.stallCooldownMin;
+    } catch (err) {
+      statusEl.textContent = `설정을 불러오지 못했습니다: ${err.message || err}`;
+    }
+  }
+
+  btn.addEventListener('click', async () => {
+    const willOpen = panel.hidden;
+    panel.hidden = !willOpen;
+    if (willOpen) await loadIntoInputs();
+  });
+
+  document.addEventListener('click', e => {
+    if (!panel.hidden && !panel.contains(e.target) && e.target !== btn) panel.hidden = true;
+  });
+
+  async function saveField(key, input) {
+    const value = Number(input.value);
+    if (!Number.isFinite(value) || value < 1) { statusEl.textContent = '1분 이상의 숫자를 입력하세요.'; return; }
+    try {
+      await window.api.updateSettings({ [key]: value });
+      statusEl.textContent = '저장됨';
+      setTimeout(() => { statusEl.textContent = ''; }, 1500);
+    } catch (err) {
+      statusEl.textContent = `저장 실패: ${err.message || err}`;
+    }
+  }
+  idleInput.addEventListener('change', () => saveField('stallIdleThresholdMin', idleInput));
+  cooldownInput.addEventListener('change', () => saveField('stallCooldownMin', cooldownInput));
+})();
+
 // --- 탭 전환 ---
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
@@ -48,6 +91,7 @@ const restartCancelBtn = document.getElementById('restart-cancel-btn');
 const restartStatusEl = document.getElementById('restart-status');
 const restartPendingWarningEl = document.getElementById('restart-pending-warning');
 const endWorkBtn = document.getElementById('end-work-btn');
+const autoStallNudgeToggle = document.getElementById('auto-stall-nudge-toggle');
 const endWorkPanelEl = document.getElementById('end-work-panel');
 const endWorkConfirmBtn = document.getElementById('end-work-confirm-btn');
 const endWorkCancelBtn = document.getElementById('end-work-cancel-btn');
@@ -228,6 +272,7 @@ const newTplDirSelect = document.getElementById('new-tpl-dir-select');
 const pickTplDirBtn = document.getElementById('pick-tpl-dir-btn');
 const newTplName = document.getElementById('new-tpl-name');
 const newTplRoleSelect = document.getElementById('new-tpl-role-select');
+const newTplModelSelect = document.getElementById('new-tpl-model-select');
 const newTplRoleCustom = document.getElementById('new-tpl-role-custom');
 const newTplInstruction = document.getElementById('new-tpl-instruction');
 const tplAddBtn = document.getElementById('tpl-add-btn');
@@ -235,6 +280,7 @@ const memberTemplatesListEl = document.getElementById('member-templates-list');
 
 let customPickedDir = null;       // 등록 안 된, 방금 고른 1회성 디렉토리(팀장 대상)
 let memberCustomPickedDir = null; // 등록 안 된, 방금 고른 1회성 디렉토리(직접 추가 팀원 대상)
+let selectedMemberModel = 'default'; // 템플릿을 고르면 그 템플릿의 model을 따라간다 — 별도 입력 UI는 없음
 let tplCustomPickedDir = null;    // 등록 안 된, 방금 고른 1회성 디렉토리(팀원 등록 대상)
 let selectedLeadId = null;  // 지금 대화창에 띄운 팀장
 // selectedLeadId와 짝을 이루는 안정적인 식별자 — reconcileLeadIds가 폴링 중 짧은 id를 조용히
@@ -515,6 +561,7 @@ function renderPromptLineHtml(prompt) {
 // 굳이 팀원 카드까지 내려가서 찾지 않아도, 팀장 대화창 바로 위에서 소속 팀원별 변경 파일을 바로
 // 열어볼 수 있게 한다(터미널 열기처럼 원본을 다 보여주는 게 아니라, 훑어보기 용도로 가볍게).
 function renderLeadMemberChips() {
+  syncAutoStallNudgeToggle();
   if (!selectedLeadId) { leadMembersChipsEl.innerHTML = ''; return; }
   const members = lastRows.filter(r => !r.isLead && r.leadId === selectedLeadId);
   leadMembersChipsEl.innerHTML = members.length
@@ -524,6 +571,16 @@ function renderLeadMemberChips() {
         </button>
       `).join('')
     : '';
+}
+
+// 정체 감시 자동 진행 여부는 팀장별 속성(LeadRecord.autoStallNudge)이라, 선택된 팀장이 바뀌거나
+// 폴링으로 최신 rows가 들어올 때마다 체크박스 상태를 그 팀장 값에 맞춰 동기화한다. 사용자가 직접
+// 클릭한 값을 폴링이 덮어쓰지 않도록, 체크박스에 포커스가 있는 동안(막 클릭한 직후)은 건드리지 않는다.
+function syncAutoStallNudgeToggle() {
+  if (document.activeElement === autoStallNudgeToggle) return;
+  const lead = lastRows.find(r => r.isLead && r.id === selectedLeadId);
+  autoStallNudgeToggle.checked = !!lead?.autoStallNudge;
+  autoStallNudgeToggle.disabled = !lead;
 }
 
 // 위 chip은 renderChat()이 돌 때마다(폴링 포함) innerHTML이 통째로 새로 그려지므로, 개별
@@ -903,6 +960,20 @@ async function updatePendingNoticeWarning(warningEl, leadId) {
     warningEl.hidden = true;
   }
 }
+
+autoStallNudgeToggle.addEventListener('change', async () => {
+  if (!selectedLeadId) return;
+  const value = autoStallNudgeToggle.checked;
+  autoStallNudgeToggle.disabled = true;
+  try {
+    await window.api.setLeadAutoStallNudge(selectedLeadId, value);
+  } catch (err) {
+    console.error('자동 진행 설정 변경 실패:', err);
+    autoStallNudgeToggle.checked = !value; // 실패했으면 되돌린다
+  } finally {
+    autoStallNudgeToggle.disabled = false;
+  }
+});
 
 restartLeadBtn.addEventListener('click', () => {
   showModal(restartLeadPanelEl);
@@ -1447,6 +1518,7 @@ addMemberBtn.addEventListener('click', () => {
   memberTemplateSelect.value = '';
   setRoleValue(memberRoleSelect, memberRoleCustom, '');
   memberInstructionEl.value = '';
+  selectedMemberModel = 'default';
   syncAddMemberSubmitBtnState();
   updateMemberSectionVisibility();
 });
@@ -1469,6 +1541,7 @@ memberTemplateSelect.addEventListener('change', async () => {
     if (!tpl) return;
     setRoleValue(memberRoleSelect, memberRoleCustom, tpl.role);
     memberInstructionEl.value = tpl.instruction;
+    selectedMemberModel = tpl.model || 'default';
     if (tpl.path) {
       // 디렉토리가 고정된 템플릿은 그대로 채운다 — 그 경로가 즐겨찾기에 등록 안 돼있으면
       // memberDirSelect 옵션 목록에 아예 없어서 .value 대입이 조용히 실패하니, customDir로
@@ -1516,13 +1589,14 @@ addMemberSubmitBtn.addEventListener('click', async () => {
   addMemberSubmitBtn.disabled = true;
   addMemberStatusEl.textContent = '추가하는 중...';
   try {
-    const id = await window.api.launchMember(selectedLeadId, memberDirSelect.value, memberInstructionEl.value.trim(), getRoleValue(memberRoleSelect, memberRoleCustom), memberNameEl.value.trim());
+    const id = await window.api.launchMember(selectedLeadId, memberDirSelect.value, memberInstructionEl.value.trim(), getRoleValue(memberRoleSelect, memberRoleCustom), memberNameEl.value.trim(), selectedMemberModel);
     if (id) {
       addMemberStatusEl.textContent = `팀원을 추가했습니다(${id}).`;
       memberNameEl.value = '';
       memberInstructionEl.value = '';
       setRoleValue(memberRoleSelect, memberRoleCustom, '');
       memberTemplateSelect.value = '';
+      selectedMemberModel = 'default';
       showAddMember = false;
       updateMemberSectionVisibility();
     } else {
@@ -1765,15 +1839,24 @@ launchBtn.addEventListener('click', async () => {
 
 // ---------------- 설정 탭 ②: 팀원 등록(역할 템플릿) ----------------
 
+const MEMBER_MODEL_LABELS = { default: '기본 모델', haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' };
+
 function renderTemplateCard(t, favNameByPath) {
   const dirLine = t.path
     ? `<div class="tpl-path">${escapeHtml(favNameByPath.get(t.path) || t.path)}</div>`
     : '<div class="tpl-path">(쓸 때마다 대상 디렉토리를 고름)</div>';
+  const model = t.model || 'default';
+  const modelSelect = `
+    <select class="tpl-model" data-model="${escapeHtml(t.id)}" title="이 역할을 띄울 때 쓸 모델">
+      ${Object.entries(MEMBER_MODEL_LABELS).map(([value, label]) =>
+        `<option value="${value}" ${value === model ? 'selected' : ''}>${label}</option>`).join('')}
+    </select>`;
   return `
     <div class="template-card ${t.approved ? 'approved' : ''}">
       <div class="tpl-top">
         <input class="tpl-name" data-name="${escapeHtml(t.id)}" value="${escapeHtml(t.name)}" />
         <input class="tpl-role" value="${escapeHtml(t.role)}" placeholder="역할" readonly title="등록 후에는 역할을 바꿀 수 없습니다 — 새로 등록해주세요" />
+        ${modelSelect}
         <span class="remove" data-remove-tpl="${escapeHtml(t.id)}">×</span>
       </div>
       ${dirLine}
@@ -1872,6 +1955,17 @@ async function renderMemberTemplates() {
       }
     });
   });
+  memberTemplatesListEl.querySelectorAll('[data-model]').forEach(el => {
+    el.addEventListener('change', async () => {
+      try {
+        await window.api.updateMemberTemplate(el.dataset.model, { model: el.value });
+      } catch (err) {
+        console.error('템플릿 모델 변경 실패:', err);
+      } finally {
+        await renderMemberTemplates();
+      }
+    });
+  });
   memberTemplatesListEl.querySelectorAll('[data-approve-tpl]').forEach(el => {
     el.addEventListener('change', async () => {
       try {
@@ -1916,12 +2010,13 @@ pickTplDirBtn.addEventListener('click', async () => {
 tplAddBtn.addEventListener('click', async () => {
   const scope = newTplScopeSelect.value || 'shared';
   try {
-    await window.api.addMemberTemplate(scope, newTplDirSelect.value, newTplName.value.trim(), getRoleValue(newTplRoleSelect, newTplRoleCustom), newTplInstruction.value.trim());
+    await window.api.addMemberTemplate(scope, newTplDirSelect.value, newTplName.value.trim(), getRoleValue(newTplRoleSelect, newTplRoleCustom), newTplInstruction.value.trim(), newTplModelSelect.value);
     newTplName.value = '';
     setRoleValue(newTplRoleSelect, newTplRoleCustom, '');
     newTplInstruction.value = '';
     newTplDirSelect.value = '';
     newTplScopeSelect.value = 'shared';
+    newTplModelSelect.value = 'default';
     tplCustomPickedDir = null;
   } catch (err) {
     console.error('팀원 템플릿 등록 실패:', err);
