@@ -315,7 +315,7 @@ body.modal-open { overflow: hidden; }
   padding: 14px 16px;
 }
 #launch-form-panel .row, #adopt-form-panel .row, #add-member-panel .row { display: flex; gap: 6px; margin-bottom: 10px; }
-#target-dir-select, #adoptable-select, #member-dir-select, #member-template-select {
+#target-dir-select, #adoptable-select, #member-dir-select, #member-template-select, #manual-session-dir-select {
   flex: 1;
   min-width: 0;
   max-width: 100%;
