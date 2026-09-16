@@ -1081,17 +1081,26 @@ manualSessionResumeBtn.addEventListener('click', async () => {
 
 // ---------------- 세션 정리 탭 ----------------
 
-function tagLabel(tag) {
-  return tag === 'lead' ? '팀장' : tag === 'member' ? '팀원' : '미등록';
+function tagLabel(s) {
+  if (s.tag === 'lead') return '팀장';
+  if (s.tag === 'member') return '팀원';
+  // 등록은 안 됐지만(SKILL.md의 "띄우자마자 등록해라"를 놓친 경우 — 실사용에서 팀장 자신도
+  // 이걸 깜빡한 적이 있다) 그 팀장의 승인된 디렉토리에서 그 팀장이 뜬 뒤 나타났다는 정황만으로
+  // "이 팀장 소속일 수 있음"이라고 추정된 경우를 구분해서 보여준다(guessProbableLeadId, main.ts).
+  return s.probableLeadId ? '미등록(추정 팀원)' : '미등록';
 }
 
 function cleanupItemHtml(s, indented) {
+  const registerBtn = s.tag === 'untracked' && s.probableLeadId
+    ? `<button class="register-probable-btn" data-register-probable="${escapeHtml(s.id)}" data-lead-id="${escapeHtml(s.probableLeadId)}" title="이 세션을 ${escapeHtml(s.probableLeadId)} 팀장의 정식 팀원으로 등록합니다">팀원으로 등록</button>`
+    : '';
   return `
     <div class="cleanup-item ${statusClass(s)}${indented ? ' cleanup-item-indented' : ''}">
       <div class="cleanup-info">
-        <div class="cleanup-top">${escapeHtml(dirLabel(s.cwd))}<span class="cleanup-tag">${tagLabel(s.tag)}</span></div>
+        <div class="cleanup-top">${escapeHtml(dirLabel(s.cwd))}<span class="cleanup-tag">${tagLabel(s)}</span></div>
         <div class="cleanup-meta">${escapeHtml(s.cwd)} · ${relativeAge(s.startedAt)} · ${escapeHtml(s.status || s.state || '')}</div>
       </div>
+      ${registerBtn}
       <button class="stop-btn" data-stop-bg="${escapeHtml(s.id)}">종료</button>
     </div>
   `;
@@ -1128,6 +1137,20 @@ async function renderCleanupSessions() {
         await window.api.stopBackgroundSession(btn.dataset.stopBg);
       } catch (err) {
         console.error('세션 종료 실패:', err);
+      } finally {
+        await renderCleanupSessions();
+      }
+    });
+  });
+
+  cleanupListEl.querySelectorAll('[data-register-probable]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        const ok = await window.api.registerProbableMember(btn.dataset.registerProbable, btn.dataset.leadId);
+        if (!ok) console.error('팀원 등록 실패 — 세션 또는 팀장이 이미 사라졌을 수 있습니다.');
+      } catch (err) {
+        console.error('팀원 등록 중 오류:', err);
       } finally {
         await renderCleanupSessions();
       }

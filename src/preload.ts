@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('api', {
   getAdoptableSessions: () => ipcRenderer.invoke('get-adoptable-sessions'),
   getAllBackgroundSessions: () => ipcRenderer.invoke('get-all-background-sessions'),
   stopBackgroundSession: (shortId: string) => ipcRenderer.invoke('stop-background-session', shortId),
+  registerProbableMember: (agentId: string, leadId: string) => ipcRenderer.invoke('register-probable-member', agentId, leadId),
   refreshBoard: () => ipcRenderer.invoke('refresh-board'),
   adoptLead: (shortId: string) => ipcRenderer.invoke('adopt-lead', shortId),
   getInteractiveSessions: () => ipcRenderer.invoke('get-interactive-sessions'),

@@ -573,6 +573,7 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 }
 .cleanup-item .cleanup-meta { color: var(--text-faint); font-size: 11px; word-break: break-all; }
 .cleanup-item .stop-btn { background: var(--danger-strong); flex-shrink: 0; }
+.cleanup-item .register-probable-btn { background: var(--warning); color: #1a1a1a; flex-shrink: 0; margin-right: 6px; }
 /* 팀장 소속 팀원임을 한눈에 보이게 탭 하나 정도 들여쓴다. */
 .cleanup-item-indented { margin-left: 28px; }
 .cleanup-group-label {
