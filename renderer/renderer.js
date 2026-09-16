@@ -54,7 +54,13 @@ document.getElementById('theme-toggle-btn').addEventListener('click', () => {
     const value = Number(input.value);
     if (!Number.isFinite(value) || value < 1) { statusEl.textContent = '1분 이상의 숫자를 입력하세요.'; return; }
     try {
-      await window.api.updateSettings({ [key]: value });
+      // 백엔드가 소수점 반올림·범위 클램프를 할 수 있어서(clampMinutes), 저장 후 실제 반영된
+      // 값을 다시 받아와 입력창에 채운다 — 안 그러면 예를 들어 9999를 입력했을 때 "저장됨"은
+      // 뜨지만 입력창은 여전히 9999를 보여줘서, 패널을 닫았다 열기 전까지 실제 값(1440으로
+      // 클램프됨)과 화면이 다르게 보이는 문제가 있었다.
+      const saved = await window.api.updateSettings({ [key]: value });
+      idleInput.value = saved.stallIdleThresholdMin;
+      cooldownInput.value = saved.stallCooldownMin;
       statusEl.textContent = '저장됨';
       setTimeout(() => { statusEl.textContent = ''; }, 1500);
     } catch (err) {
@@ -575,9 +581,16 @@ function renderLeadMemberChips() {
 
 // 정체 감시 자동 진행 여부는 팀장별 속성(LeadRecord.autoStallNudge)이라, 선택된 팀장이 바뀌거나
 // 폴링으로 최신 rows가 들어올 때마다 체크박스 상태를 그 팀장 값에 맞춰 동기화한다. 사용자가 직접
-// 클릭한 값을 폴링이 덮어쓰지 않도록, 체크박스에 포커스가 있는 동안(막 클릭한 직후)은 건드리지 않는다.
+// 클릭한 값을 폴링이 덮어쓰지 않아야 하는데, activeElement로 "지금 클릭한 직후인지"를 판단하면
+// 안 된다 — change 핸들러가 요청 중에 disabled=true를 거는데, 폼 컨트롤을 disable하면 브라우저가
+// 강제로 blur시켜서 activeElement가 곧바로 빠져나가버린다(리뷰에서 지적됨). 그러면 요청이 아직
+// 안 끝났는데도 다음 폴링이 곧바로 체크박스를 원래 값으로 되돌리고 disabled까지 풀어버려서,
+// 응답이 늦게 와도 사용자가 다시 누를 수 있는 상태로 보인다 — 아래 pendingAutoStallNudgeLeadId가
+// 진짜 가드다(요청 중인 팀장 id를 직접 추적, 포커스 상태에 기대지 않는다).
+let pendingAutoStallNudgeLeadId = null;
+
 function syncAutoStallNudgeToggle() {
-  if (document.activeElement === autoStallNudgeToggle) return;
+  if (pendingAutoStallNudgeLeadId) return; // 요청이 끝날 때까지 폴링이 값을 건드리지 않는다
   const lead = lastRows.find(r => r.isLead && r.id === selectedLeadId);
   autoStallNudgeToggle.checked = !!lead?.autoStallNudge;
   autoStallNudgeToggle.disabled = !lead;
@@ -963,15 +976,22 @@ async function updatePendingNoticeWarning(warningEl, leadId) {
 
 autoStallNudgeToggle.addEventListener('change', async () => {
   if (!selectedLeadId) return;
+  const targetLeadId = selectedLeadId; // 요청 도중 사용자가 다른 팀장으로 바꿀 수 있어 스냅샷해둔다
   const value = autoStallNudgeToggle.checked;
+  pendingAutoStallNudgeLeadId = targetLeadId;
   autoStallNudgeToggle.disabled = true;
   try {
-    await window.api.setLeadAutoStallNudge(selectedLeadId, value);
+    await window.api.setLeadAutoStallNudge(targetLeadId, value);
   } catch (err) {
     console.error('자동 진행 설정 변경 실패:', err);
-    autoStallNudgeToggle.checked = !value; // 실패했으면 되돌린다
+    // 그 사이 사용자가 다른 팀장을 선택했으면, 지금 체크박스는 이미 다른 팀장을 나타내고 있다 —
+    // 되돌리면 엉뚱한 팀장의 값을 건드리는 꼴이라 여전히 같은 팀장을 보고 있을 때만 되돌린다.
+    if (selectedLeadId === targetLeadId) autoStallNudgeToggle.checked = !value;
   } finally {
-    autoStallNudgeToggle.disabled = false;
+    pendingAutoStallNudgeLeadId = null;
+    if (selectedLeadId === targetLeadId) autoStallNudgeToggle.disabled = false;
+    // 팀장이 바뀌었으면 여기서 손대지 않는다 — 다음 syncAutoStallNudgeToggle(폴링 등)이 지금
+    // 선택된 팀장 값으로 알아서 다시 맞춰준다.
   }
 });
 
@@ -1693,7 +1713,9 @@ function renderStallAlerts(alerts) {
     try {
       await apiCall();
     } catch (err) {
-      card.insertAdjacentHTML('beforeend', `<div style="color:#f14c4c">처리 중 오류가 발생했습니다: ${escapeHtml(errMsg(err))}</div>`);
+      // 다른 곳(renderRequests 등)의 하드코딩된 #f14c4c는 다크모드 기준값이라 라이트모드에서
+      // 대비가 떨어지는 기존 버그가 있다 — 새로 추가하는 이 카드는 처음부터 테마 토큰을 쓴다.
+      card.insertAdjacentHTML('beforeend', `<div style="color:var(--danger)">처리 중 오류가 발생했습니다: ${escapeHtml(errMsg(err))}</div>`);
       card.querySelectorAll('button').forEach(b => { b.disabled = false; });
       return;
     }

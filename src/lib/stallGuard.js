@@ -46,8 +46,24 @@ function parseStallVerdict(rawResult) {
 }
 
 /**
+ * "지금 이 상태값 조합이면 건드려도 되는 상황인가"만 따로 뽑은 게이트 — shouldCheckStall(최초
+ * 후보 선정)과 main.ts의 발송 직전 최종 재확인이 정확히 같은 규칙을 쓰게 하려고 공용 함수로
+ * 뽑았다(재확인 쪽에서 이 규칙의 일부만 손으로 다시 구현하면, 둘이 은근슬쩍 갈라져서 최초
+ * 선정에서는 걸렀을 상태가 재확인은 통과하는 사고가 날 수 있다). blocked는 팀원/팀장 어느
+ * 쪽이든 절대 통과 못 한다. memberStatus가 빈 문자열('' — status/state 필드 자체가 없다는 뜻,
+ * getStatus 참고)이면 "확실히 idle/done임을 모른다"는 뜻이라 안전하게 거부한다.
+ * @param {{memberStatus: string, leadStatus: string}} params
+ * @returns {boolean}
+ */
+function isStatusEligibleForStall({ memberStatus, leadStatus }) {
+  if (memberStatus === 'blocked' || leadStatus === 'blocked') return false;
+  if (leadStatus !== 'idle' && leadStatus !== 'done') return false; // 팀장이 바쁘거나 오프라인이면 스스로 처리할 여지를 준다
+  if (memberStatus === 'busy' || memberStatus === '') return false;
+  return true;
+}
+
+/**
  * 이 후보(팀원 하나)에 대해 (비용이 드는) Haiku 호출을 걸 가치가 있는 상황인지 판정한다.
- * blocked 상태는 여기서 하드 게이트로 걸러진다 — Haiku를 부르지도 않는다.
  * @param {{
  *   memberStatus: string,
  *   leadStatus: string,
@@ -67,10 +83,7 @@ function shouldCheckStall(params) {
     now, idleThresholdMs, lastCheckedAt, cooldownMs, hasExistingAlert,
   } = params;
   if (hasExistingAlert) return false;
-  // 승인 대기 중인 세션은 절대 건드리지 않는다 — 팀원/팀장 어느 쪽이 blocked여도 마찬가지.
-  if (memberStatus === 'blocked' || leadStatus === 'blocked') return false;
-  if (leadStatus !== 'idle' && leadStatus !== 'done') return false; // 팀장이 바쁘거나 오프라인이면 스스로 처리할 여지를 준다
-  if (memberStatus === 'busy') return false;
+  if (!isStatusEligibleForStall({ memberStatus, leadStatus })) return false;
   if (memberIdleSince == null || now - memberIdleSince < idleThresholdMs) return false;
   if (leadIdleSince == null || now - leadIdleSince < idleThresholdMs) return false;
   if (lastCheckedAt != null && now - lastCheckedAt < cooldownMs) return false;
@@ -91,4 +104,4 @@ function shouldSendNudge(verdict, lastAnswerText) {
   return !!verdict.shouldNudge;
 }
 
-module.exports = { looksLikeApprovalRequest, parseStallVerdict, shouldCheckStall, shouldSendNudge };
+module.exports = { looksLikeApprovalRequest, parseStallVerdict, isStatusEligibleForStall, shouldCheckStall, shouldSendNudge };

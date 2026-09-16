@@ -14,9 +14,11 @@ const MEMBER_MODEL_OPTIONS = ['default', 'haiku', 'sonnet', 'opus'];
  * @returns {number}
  */
 function clampMinutes(value, fallback, min, max) {
-  // Number(null) === 0이라 아래 변환에 그대로 넘기면 "값이 없다"는 뜻의 null이 조용히 0(→min으로
-  // 클램프)으로 취급된다 — null/undefined는 여기서 먼저 걸러 fallback으로 보낸다.
+  // Number(null) === 0, Number('') === 0, Number('   ') === 0이라 아래 변환에 그대로 넘기면
+  // "값이 없다"는 뜻인 null/빈 문자열이 조용히 0(→min으로 클램프)으로 취급된다 — 이런 값들은
+  // 여기서 먼저 걸러 fallback으로 보낸다.
   if (value === null || value === undefined) return fallback;
+  if (typeof value === 'string' && value.trim() === '') return fallback;
   const n = typeof value === 'number' ? value : Number(value);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, Math.round(n)));

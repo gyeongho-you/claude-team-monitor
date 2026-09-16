@@ -9,7 +9,7 @@ import { resolveWithinCwd, isSafeId } from './lib/pathGuard';
 import { getStatus } from '../renderer/lib/status';
 import { writeJsonFileAtomic } from './lib/jsonFile';
 import { TEAM_MEMBER_BRIEFING, TEAM_MEMBER_STANDBY_NOTE } from './lib/teamMemberBriefing';
-import { looksLikeApprovalRequest, parseStallVerdict, shouldCheckStall, shouldSendNudge } from './lib/stallGuard';
+import { looksLikeApprovalRequest, parseStallVerdict, isStatusEligibleForStall, shouldCheckStall, shouldSendNudge } from './lib/stallGuard';
 import { MEMBER_MODEL_OPTIONS, clampMinutes, normalizeMemberModel } from './lib/appSettings';
 
 const CLAUDE_HOME = path.join(os.homedir(), '.claude');
@@ -245,7 +245,8 @@ type PendingNotice = { id: string; leadInternalId: string; message: string; crea
 type StallAlert = {
   id: string;
   leadInternalId: string;
-  memberId: string;
+  memberId: string; // 화면 표시용 — 알림 생성 시점의 짧은 id라, 그 뒤 드리프트되면 낡은 값일 수 있다
+  memberSessionId: string; // 중복 알림 방지의 진짜 기준값 — 짧은 id가 바뀌어도 안 바뀐다
   reason: string; // Haiku가 판단 근거로 남긴 한 줄 요약
   suggestedMessage: string; // 사용자가 확인을 누르면 그대로 팀장에게 전달될 메시지
   createdAt: number;
@@ -814,9 +815,16 @@ function notifyLeadsOfFinishedMembers(liveRows: SessionRow[], leads: LeadRecord[
 // 걸러내고(shouldCheckStall), 팀장의 마지막 답변이 질문/승인 요청처럼 보이면 정규식으로도 한 번 더
 // 막으며(shouldSendNudge), 최종적으로도 사용자가 화면에서 직접 확인을 눌러야만 실제로 전달된다
 // (confirm-stall-alert IPC 참고) — Haiku의 판단·프롬프트 하나만 믿지 않는 다중 방어.
-const memberIdleSince = new Map<string, number>(); // memberId(짧은 id) -> idle/done으로 바뀐 시각
-const leadIdleSince = new Map<string, number>();   // leadId(짧은 id) -> idle/done으로 바뀐 시각
-const stallLastCheckedAt = new Map<string, number>(); // memberId -> 마지막으로 확인(Haiku 호출 또는 스킵 판정)한 시각
+// 세 Map 전부 짧은 id가 아니라 sessionId로 키를 잡는다 — 리뷰에서 실측 재현된 버그: 짧은 id로
+// 키를 잡으면, 세션이 stop→resume 등으로 외부에서 재기동돼 짧은 id만 바뀌어도(reconcileLeadIds/
+// reconcileMemberIds가 짧은 id는 바로잡아주지만 이 Map들은 몰랐다) 여기 쌓인 값이 새 id에서는
+// "처음 보는 키"가 돼서 조용히 리셋됐다 — 팀원/팀장이 짧은 id 드리프트를 반복하면 정체 감지가
+// 사실상 무기한 미뤄질 수 있었다. sessionId는 같은 세션이 살아있는 동안 절대 안 바뀌므로(짧은
+// id와 달리) 이 키로 쓰면 드리프트에 영향을 받지 않는다 — 세션이 통째로 교체될 때만(새 sessionId
+// 발급) 정당하게 타이머가 리셋된다.
+const memberIdleSince = new Map<string, number>(); // 팀원 sessionId -> idle/done으로 바뀐 시각
+const leadIdleSince = new Map<string, number>();   // 팀장 sessionId -> idle/done으로 바뀐 시각
+const stallLastCheckedAt = new Map<string, number>(); // 팀원 sessionId -> 마지막으로 실제 Haiku를 호출한 시각
 let stallWatchdogInFlight = false; // Haiku 호출이 몇 초~몇십 초 걸리므로, 3초 폴링과 겹쳐 돌지 않게 막는다
 
 function buildStallClassifierPrompt(tailText: string, memberDesc: string): string {
@@ -896,23 +904,28 @@ async function runStallWatchdog(liveRows: SessionRow[], leads: LeadRecord[], mem
   const cooldownMs = settings.stallCooldownMin * 60000;
 
   const memberRowsById = new Map(liveRows.filter(r => !r.isLead && r.id).map(r => [r.id as string, r]));
-  for (const [id, row] of memberRowsById) {
+  const liveMemberSessionIds = new Set<string>();
+  for (const row of memberRowsById.values()) {
+    liveMemberSessionIds.add(row.sessionId);
     const status = getStatus(row);
-    if (status === 'busy') { memberIdleSince.delete(id); continue; }
-    if (!memberIdleSince.has(id)) memberIdleSince.set(id, now);
+    if (status === 'busy') { memberIdleSince.delete(row.sessionId); continue; }
+    if (!memberIdleSince.has(row.sessionId)) memberIdleSince.set(row.sessionId, now);
   }
-  pruneMissingKeys(memberIdleSince, new Set(memberRowsById.keys()));
+  pruneMissingKeys(memberIdleSince, liveMemberSessionIds);
+  pruneMissingKeys(stallLastCheckedAt, liveMemberSessionIds);
 
   const leadRowsById = new Map(liveRows.filter(r => r.isLead && r.id).map(r => [r.id as string, r]));
-  for (const [id, row] of leadRowsById) {
+  const liveLeadSessionIds = new Set<string>();
+  for (const row of leadRowsById.values()) {
+    liveLeadSessionIds.add(row.sessionId);
     const status = getStatus(row);
-    if (status === 'busy') { leadIdleSince.delete(id); continue; }
-    if (!leadIdleSince.has(id)) leadIdleSince.set(id, now);
+    if (status === 'busy') { leadIdleSince.delete(row.sessionId); continue; }
+    if (!leadIdleSince.has(row.sessionId)) leadIdleSince.set(row.sessionId, now);
   }
-  pruneMissingKeys(leadIdleSince, new Set(leadRowsById.keys()));
+  pruneMissingKeys(leadIdleSince, liveLeadSessionIds);
 
   const existingAlerts = loadStallAlerts();
-  const candidates: { member: MemberRecord; memberRow: SessionRow; lead: LeadRecord }[] = [];
+  const candidates: { member: MemberRecord; memberRow: SessionRow; lead: LeadRecord; leadRow: SessionRow }[] = [];
   for (const m of members) {
     const row = memberRowsById.get(m.memberId);
     if (!row) continue;
@@ -924,47 +937,60 @@ async function runStallWatchdog(liveRows: SessionRow[], leads: LeadRecord[], mem
     const check = shouldCheckStall({
       memberStatus: getStatus(row),
       leadStatus: getStatus(leadRow),
-      memberIdleSince: memberIdleSince.get(m.memberId),
-      leadIdleSince: leadIdleSince.get(lead.id),
+      memberIdleSince: memberIdleSince.get(row.sessionId),
+      leadIdleSince: leadIdleSince.get(leadRow.sessionId),
       now,
       idleThresholdMs,
-      lastCheckedAt: stallLastCheckedAt.get(m.memberId),
+      lastCheckedAt: stallLastCheckedAt.get(row.sessionId),
       cooldownMs,
-      hasExistingAlert: existingAlerts.some(a => a.memberId === m.memberId),
+      hasExistingAlert: existingAlerts.some(a => a.memberSessionId === row.sessionId),
     });
-    if (check) candidates.push({ member: m, memberRow: row, lead });
+    if (check) candidates.push({ member: m, memberRow: row, lead, leadRow });
   }
   if (candidates.length === 0) return;
 
   stallWatchdogInFlight = true;
   try {
-    for (const { member, memberRow, lead } of candidates) {
-      // 호출 전에 먼저 쿨다운을 마크해둔다 — Haiku 호출이 실패하거나 시간이 걸려도 다음 폴링(3초
-      // 뒤)마다 곧바로 재시도하지 않게 하기 위함이다.
-      stallLastCheckedAt.set(member.memberId, Date.now());
-
+    for (const { member, memberRow, lead, leadRow } of candidates) {
       const projectName = resolveProjectName(lead.sessionId, lead.targetDir);
       const transcript = getTranscript(projectName, lead.sessionId, lead.targetDir);
       const lastEntries = transcript.slice(-4);
-      if (lastEntries.length === 0) continue; // 대화 기록이 없으면 판단할 근거가 없다 — 스킵
+      if (lastEntries.length === 0) continue; // 대화 기록이 없으면 판단할 근거가 없다 — 아직 실제 확인은 안 했으니 쿨다운도 걸지 않고 다음 폴링에 다시 시도한다
 
       const lastAnswer = lastEntries[lastEntries.length - 1]?.answer ?? '';
       // Haiku를 부르기도 전에, 정적 안전장치로 먼저 걸러낼 수 있으면 호출 비용 자체를 아낀다.
+      // 이것도 실제 확인이 아니라 스킵이므로 쿨다운을 걸지 않는다 — "승인 대기중" 신호는 다음
+      // 폴링에도 계속 재평가돼야 하고, 재평가 비용도 정규식 하나뿐이라 문제없다.
       if (looksLikeApprovalRequest(lastAnswer)) continue;
 
+      // 여기서부터는 실제로 Haiku를 호출한다 — 지금 마크해서, 호출이 느리거나 실패해도 다음
+      // 폴링(3초 뒤)마다 곧바로 재시도하지 않게 한다(단, 위 두 스킵 사유는 실제 확인이 아니므로
+      // 여기서 제외한다 — 그래야 일시적으로 트랜스크립트를 못 읽은 것뿐인데 쿨다운(수십 분)이
+      // 통째로 걸려 진짜 방치를 오래 놓치는 사고를 막는다).
+      stallLastCheckedAt.set(memberRow.sessionId, Date.now());
+
       const tailText = lastEntries.map(e => `사용자: ${e.prompt}\n팀장: ${e.answer}`).join('\n\n').slice(-3000);
-      const idleSince = memberIdleSince.get(member.memberId) ?? Date.now();
+      const idleSince = memberIdleSince.get(memberRow.sessionId) ?? Date.now();
       const idleMinutes = Math.max(1, Math.round((Date.now() - idleSince) / 60000));
       const memberDesc = `팀원 ${member.memberId}(역할: ${member.role || '미지정'})가 ${idleMinutes}분째 ${getStatus(memberRow)} 상태로 멈춰있습니다.`;
 
       const verdict = await runStallClassifier(tailText, memberDesc);
       if (!shouldSendNudge(verdict, lastAnswer)) continue;
 
-      // 발송 여부를 판단하는 사이 상태가 바뀌었을 수 있으니, 최종적으로 알림을 만들기 직전에
-      // 한 번 더 최신 상태를 확인한다(팀장이 blocked로 바뀌었으면 여기서도 다시 걸러진다).
+      // 발송 여부를 판단하는 사이(Haiku 호출 대기 중) 상태가 바뀌었을 수 있으니, 최종적으로
+      // 알림을 만들기 직전에 한 번 더 최신 상태를 확인한다 — shouldCheckStall이 최초 후보 선정에
+      // 쓴 것과 같은 게이트(isStatusEligibleForStall)를 그대로 재사용해서, 재확인이 최초 선정보다
+      // 허술해지는 일이 없게 한다. 짧은 id가 아니라 sessionId로 다시 찾는다 — 대기하는 동안 짧은
+      // id가 드리프트됐어도(외부 재시작 등) 여전히 같은 세션을 정확히 찾아낸다.
       const freshAgents = await fetchAgents();
-      const freshLead = freshAgents.find(a => a.id === lead.id);
-      if (!freshLead || getStatus(freshLead) === 'blocked' || getStatus(freshLead) === 'busy') continue;
+      const freshLeadAgent = freshAgents.find(a => a.sessionId === leadRow.sessionId);
+      const freshMemberAgent = freshAgents.find(a => a.sessionId === memberRow.sessionId);
+      if (!freshLeadAgent) continue; // 팀장이 그 사이 완전히 내려갔으면 재촉할 대상이 없다
+      const stillEligible = isStatusEligibleForStall({
+        memberStatus: freshMemberAgent ? getStatus(freshMemberAgent) : '',
+        leadStatus: getStatus(freshLeadAgent),
+      });
+      if (!stillEligible) continue;
 
       const suggestedMessage = `[정체 감지] 팀원 ${member.memberId}가 ${idleMinutes}분째 대기 중입니다. 남은 작업이 있으면 이어서 지시하고, 이미 다 끝났으면 그렇다고 확인해주세요.`;
 
@@ -977,11 +1003,12 @@ async function runStallWatchdog(liveRows: SessionRow[], leads: LeadRecord[], mem
       }
 
       const alerts = loadStallAlerts();
-      if (alerts.some(a => a.memberId === member.memberId)) continue; // 그 사이 이미 생성됐으면 중복 방지
+      if (alerts.some(a => a.memberSessionId === memberRow.sessionId)) continue; // 그 사이 이미 생성됐으면 중복 방지(짧은 id 드리프트에도 안전)
       alerts.push({
         id: `stall-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         leadInternalId: lead.internalId,
         memberId: member.memberId,
+        memberSessionId: memberRow.sessionId,
         reason: verdict!.reason,
         suggestedMessage,
         createdAt: Date.now(),

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { looksLikeApprovalRequest, parseStallVerdict, shouldCheckStall, shouldSendNudge } = require('../src/lib/stallGuard');
+const { looksLikeApprovalRequest, parseStallVerdict, isStatusEligibleForStall, shouldCheckStall, shouldSendNudge } = require('../src/lib/stallGuard');
 
 test('looksLikeApprovalRequest: 물음표로 끝나면 승인 요청으로 본다', () => {
   assert.equal(looksLikeApprovalRequest('이 방식으로 진행할까요?'), true);
@@ -48,6 +48,11 @@ test('parseStallVerdict: 문자열이 아닌 입력은 null', () => {
   assert.equal(parseStallVerdict(undefined), null);
   assert.equal(parseStallVerdict(null), null);
   assert.equal(parseStallVerdict(123), null);
+});
+
+test('parseStallVerdict: reason이 문자열이 아니면(숫자 등) 강제로 포함하지 않고 빈 문자열로 대체한다', () => {
+  const v = parseStallVerdict('{"shouldNudge": true, "waitingForUser": false, "reason": 123}');
+  assert.deepEqual(v, { shouldNudge: true, waitingForUser: false, reason: '' });
 });
 
 const baseParams = {
@@ -100,6 +105,38 @@ test('shouldCheckStall: 이미 대기 중인 알림이 있으면 false', () => {
 
 test('shouldCheckStall: 팀장이 done 상태여도(=idle과 동급) 체크한다', () => {
   assert.equal(shouldCheckStall({ ...baseParams, leadStatus: 'done' }), true);
+});
+
+test('shouldCheckStall: 팀원 상태가 빈 문자열(status/state 필드 자체가 없음)이면 false — 확실히 idle임을 모르니 안전하게 거부', () => {
+  assert.equal(shouldCheckStall({ ...baseParams, memberStatus: '' }), false);
+});
+
+test('shouldCheckStall: 팀원 idle 지속시간이 임계값과 정확히 같으면 true(경계, now - idleSince < threshold만 거부)', () => {
+  assert.equal(shouldCheckStall({ ...baseParams, memberIdleSince: baseParams.now - baseParams.idleThresholdMs }), true);
+});
+
+test('shouldCheckStall: 쿨다운 시간과 정확히 같으면 통과(경계)', () => {
+  assert.equal(shouldCheckStall({ ...baseParams, lastCheckedAt: baseParams.now - baseParams.cooldownMs }), true);
+});
+
+test('isStatusEligibleForStall: 정상 조합은 true', () => {
+  assert.equal(isStatusEligibleForStall({ memberStatus: 'idle', leadStatus: 'idle' }), true);
+  assert.equal(isStatusEligibleForStall({ memberStatus: 'done', leadStatus: 'done' }), true);
+});
+
+test('isStatusEligibleForStall: 팀원/팀장 어느 쪽이 blocked여도 false', () => {
+  assert.equal(isStatusEligibleForStall({ memberStatus: 'blocked', leadStatus: 'idle' }), false);
+  assert.equal(isStatusEligibleForStall({ memberStatus: 'idle', leadStatus: 'blocked' }), false);
+});
+
+test('isStatusEligibleForStall: 팀장이 busy/오프라인(그 외 상태)이면 false', () => {
+  assert.equal(isStatusEligibleForStall({ memberStatus: 'idle', leadStatus: 'busy' }), false);
+  assert.equal(isStatusEligibleForStall({ memberStatus: 'idle', leadStatus: 'waiting' }), false);
+});
+
+test('isStatusEligibleForStall: 팀원이 busy거나 빈 문자열이면 false', () => {
+  assert.equal(isStatusEligibleForStall({ memberStatus: 'busy', leadStatus: 'idle' }), false);
+  assert.equal(isStatusEligibleForStall({ memberStatus: '', leadStatus: 'idle' }), false);
 });
 
 const okVerdict = { shouldNudge: true, waitingForUser: false, reason: 'ok' };
