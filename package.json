@@ -5,7 +5,7 @@
   "main": "dist/main.js",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "node --test",
+    "test": "node --test tests/*.test.js",
     "build": "npm run typecheck && esbuild src/main.ts src/preload.ts --bundle --platform=node --external:electron --outdir=dist",
     "start": "npm run build && electron .",
     "dist:win": "npm run build && electron-builder --win portable",
