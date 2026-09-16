@@ -863,6 +863,29 @@ function cleanupStaleMembers(members: MemberRecord[], agentIdSet: Set<string | u
   pruneMissingKeys(memberFirstMissAt, currentMemberIds);
 }
 
+// 이 앱이 직접 stop→resume시킨 팀장은 resumeLead가 짧은 id 변경을 바로 leads.json에 반영해주지만,
+// 팀장이 이 앱 밖에서(예: 팀장 자신이 스스로를 재기동하거나, 다른 오케스트레이터가 관리) 재시작되면
+// 짧은 id가 이 앱 모르게 바뀌어버린다 — leads.json엔 옛 id가 그대로 남아서, 실제로는 살아있는데도
+// leadIds.has(a.id)가 항상 실패해 "세션 정리" 탭에 "미등록"으로, 작업 탭에선 오프라인으로 잘못
+// 보인다(실사고 확인: g1cl-mgt의 팀장이 이런 식으로 낡은 id를 갖고 있었다). sessionId는 이 앱이
+// 관여하지 않아도 절대 안 바뀌므로, 짧은 id로 못 찾은 살아있는 세션을 sessionId로 다시 찾아서
+// leads.json의 id를 그 자리에서 바로잡는다.
+function reconcileLeadIds(agents: AgentEntry[], leads: LeadRecord[]): boolean {
+  let changed = false;
+  const leadIdSet = new Set(leads.map(l => l.id));
+  for (const agent of agents) {
+    if (!agent.id || !agent.sessionId || leadIdSet.has(agent.id)) continue;
+    const rec = leads.find(l => l.sessionId === agent.sessionId);
+    if (rec && rec.id !== agent.id) {
+      console.log(`[reconcileLeadIds] 팀장 ${rec.internalId}의 짧은 id가 이 앱 밖에서 바뀐 것을 발견해 ${rec.id} -> ${agent.id}로 갱신합니다.`);
+      rec.id = agent.id;
+      leadIdSet.add(agent.id);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 // 보드에는 "내가 띄운 팀장"과 "팀장이 등록한 팀원"만 보여준다 — 그 외(사용자가 따로 열어둔 무관한
 // 세션 등)는 team-lead 체계 밖이므로 제외한다. interactive 세션은 애초에 짧은 id가 없어서 자동으로 빠진다.
 //
@@ -875,6 +898,7 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
   const agents = await fetchAgents();
   const agentIdSet = new Set(agents.filter(a => !!a.id).map(a => a.id));
   const leads = loadLeads();
+  if (reconcileLeadIds(agents, leads)) saveLeads(leads);
   const leadIds = new Set(leads.map(l => l.id));
   const members = loadMembers();
   const memberMap = new Map(members.map(m => [m.memberId, m]));
