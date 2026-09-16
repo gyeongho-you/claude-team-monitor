@@ -334,8 +334,15 @@ function dirLabel(dir) {
 }
 
 // window.api.* 호출이 실패했을 때(메인 프로세스 예외 등) 화면에 보여줄 메시지를 뽑아낸다.
+// Electron의 ipcRenderer.invoke는 main 프로세스 핸들러가 던진 에러를
+// "Error invoking remote method 'xxx': Error: <원본 메시지>"로 감싸서 reject한다 — 지금은 main.ts
+// 쪽에서 IPC 핸들러가 직접 throw하는 경로가 없어 당장 눈에 보이진 않지만, 나중에 그런 경로가
+// 생기면 이 접두사가 그대로 사용자에게 노출돼 영어/한국어가 섞인 어색한 이중 문구가 된다 —
+// 미리 벗겨내서 어떤 IPC 에러든 원본 메시지만 보이게 한다.
 function errMsg(err) {
-  return (err && err.message) ? err.message : String(err);
+  const raw = (err && err.message) ? err.message : String(err);
+  const m = raw.match(/^Error invoking remote method '[^']*':\s*(?:Error:\s*)?(.*)$/s);
+  return m ? m[1] : raw;
 }
 
 // 지금 선택된 팀장 카드 관련 버튼(전송/재시작)과, 요청 목록에서 같은 팀장에 걸린 승인/거부 버튼을
