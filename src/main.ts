@@ -1309,6 +1309,17 @@ async function getInteractiveSessions(): Promise<AgentEntry[]> {
 
 async function forkSessionAsLead(sessionId: string, cwd: string): Promise<string | null> {
   installTeamLeadSkill();
+  const leads = loadLeads();
+  // 이 sessionId가 이미 이 앱이 추적 중인(히스토리 탭에 있는, 오프라인이든 아니든) 레코드라면 새
+  // 레코드를 또 만들지 말고 히스토리에서 이어할 때와 똑같은 경로(resumeLead)로 그 레코드를 그대로
+  // 이어서 깨운다. 안 그러면 같은 세션을 가리키는 레코드가 leads.json에 두 개 생겨서, internalId
+  // 기반의 queueLeadOperation/PendingNotice가 서로 다른 레코드로 갈라져 메시지가 엉킨다("세션 ID로
+  // 이어하기"로 히스토리에 이미 있는 세션을 다시 입력했을 때 실제로 이 경로를 탄다).
+  const existing = leads.find(l => l.sessionId === sessionId);
+  if (existing) {
+    return queueLeadOperation(existing.internalId, () =>
+      resumeLead(existing.internalId, '지금 이 대화를 Claude Team Monitor로 다시 불러왔습니다. 계속 진행하세요.'));
+  }
   const id = await runClaudeBg(
     ['--bg', '--resume', sessionId, '지금 이 대화를 Claude Team Monitor로 가져왔습니다(별도 복사본, 원본 세션과는 별개). 계속 진행하세요.'],
     cwd,
@@ -1316,7 +1327,6 @@ async function forkSessionAsLead(sessionId: string, cwd: string): Promise<string
   if (!id) return null;
   const newSessionId = (await findSessionIdByShortId(id)) ?? id;
   const { paths: approvedMembers } = approvedMemberBriefing(cwd);
-  const leads = loadLeads();
   leads.push({ id, sessionId: newSessionId, targetDir: cwd, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID() });
   saveLeads(leads);
   return id;
