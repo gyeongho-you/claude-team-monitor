@@ -124,6 +124,11 @@ section h2, .section-header h2 { font-size: 12px; text-transform: uppercase; col
 .session-card .member-of { color: var(--accent-2); font-size: 10px; }
 
 .session-card .top-line { display: flex; justify-content: space-between; align-items: center; font-weight: 600; gap: 6px; }
+/* 팀원 이름이 길면(가운데 span.top-line은 flex-shrink가 기본 1이라 둘 다 줄어들 수 있음) 상태
+   라벨("완료" 등)까지 같이 눌려 줄바꿈되면서 한 글자씩 세로로 쌓여 보이는 문제가 실사용에서
+   확인됐다 — 상태 라벨은 절대 줄바꿈/축소되지 않게 고정하고, 이름 쪽만 줄어들게 한다. */
+.member-card .top-line > span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-card .top-line > span:last-child { flex-shrink: 0; white-space: nowrap; }
 .lead-label-input {
   flex: 1;
   min-width: 0;

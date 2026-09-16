@@ -5,7 +5,11 @@ const THEME_KEY = 'claude-team-monitor-theme';
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   const btn = document.getElementById('theme-toggle-btn');
-  if (btn) btn.textContent = theme === 'light' ? '☀️' : '🌙';
+  // '☀️'(U+2600 BLACK SUN WITH RAYS + VS16)는 실제 배포된 앱(Electron/Windows)에서 빈 네모로
+  // 깨져 보임이 실측 확인됨(Playwright 크로미움에선 멀쩡히 렌더링돼서 그걸로는 못 잡았다 —
+  // 실제 패키징된 앱 창을 직접 스크린샷해서 확인함) — 이미 멀쩡히 뜨는 '🌙'와 같은 세대(둘 다
+  // supplementary plane emoji)인 '🌞'로 바꿔서 같은 폰트 경로를 타게 한다.
+  if (btn) btn.textContent = theme === 'light' ? '🌞' : '🌙';
 }
 (function initTheme() {
   let saved = 'dark';
