@@ -14,4 +14,14 @@ function resolveWithinCwd(cwd, file) {
   return resolvedFile;
 }
 
-module.exports = { resolveWithinCwd };
+// 팀원/요청 등록 파일(~/.claude/claude-team-monitor/members|requests/<id>.json)은 이 앱이 아니라
+// 외부(팀장) Claude 세션이 SKILL.md 안내를 따라 직접 파일로 써서 남긴다 — 파일 내용의 id 필드값을
+// 검증 없이 그대로 delete/write 경로에 이어붙이면(예: cleanupStaleMembers의 unlinkSync), 그 값이
+// "../../../어딘가"처럼 조작된 경우 이 디렉토리 밖의 임의 .json 파일을 사람 확인 없이 지울 수 있다
+// (실측 리뷰로 발견됨). 짧은 세션 id·타임스탬프 기반 요청id 둘 다 원래 영문/숫자/하이픈/언더스코어
+// 뿐이라, 그 범위를 벗어나면 무조건 거부한다.
+function isSafeId(id) {
+  return typeof id === 'string' && id.length > 0 && /^[A-Za-z0-9_-]+$/.test(id);
+}
+
+module.exports = { resolveWithinCwd, isSafeId };

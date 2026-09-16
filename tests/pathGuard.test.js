@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { resolveWithinCwd } = require('../src/lib/pathGuard');
+const { resolveWithinCwd, isSafeId } = require('../src/lib/pathGuard');
 
 const CWD = process.platform === 'win32' ? 'C:\\repo' : '/repo';
 
@@ -31,4 +31,24 @@ test('resolveWithinCwd: cwd와 접두어만 같고 실제로는 다른 형제 �
   const sibling = CWD + '-evil';
   const result = resolveWithinCwd(CWD, path.relative(CWD, sibling));
   assert.equal(result, null);
+});
+
+test('isSafeId: 짧은 세션 id/요청 id 형태(영문·숫자·하이픈·언더스코어)는 통과한다', () => {
+  assert.equal(isSafeId('d1aa3cd0'), true);
+  assert.equal(isSafeId('req-1234567890'), true);
+  assert.equal(isSafeId('a_b-C9'), true);
+});
+
+test('isSafeId: 경로 탈출 문자가 섞이면 거부한다', () => {
+  assert.equal(isSafeId('../../../etc/passwd'), false);
+  assert.equal(isSafeId('a/b'), false);
+  assert.equal(isSafeId('a\\b'), false);
+  assert.equal(isSafeId('..'), false);
+});
+
+test('isSafeId: 빈 문자열/문자열이 아닌 값은 거부한다', () => {
+  assert.equal(isSafeId(''), false);
+  assert.equal(isSafeId(undefined), false);
+  assert.equal(isSafeId(null), false);
+  assert.equal(isSafeId(123), false);
 });

@@ -5,7 +5,7 @@ import * as os from 'os';
 import * as crypto from 'crypto';
 import { exec, execFile, spawn } from 'child_process';
 import { trackFirstMiss, pruneMissingKeys } from './lib/firstMissTracker';
-import { resolveWithinCwd } from './lib/pathGuard';
+import { resolveWithinCwd, isSafeId } from './lib/pathGuard';
 import { getStatus } from '../renderer/lib/status';
 import { writeJsonFileAtomic } from './lib/jsonFile';
 import { TEAM_MEMBER_BRIEFING, TEAM_MEMBER_STANDBY_NOTE } from './lib/teamMemberBriefing';
@@ -657,7 +657,16 @@ function loadMembers(): MemberRecord[] {
     return fs.readdirSync(MEMBERS_DIR)
       .filter(f => f.endsWith('.json'))
       .map(f => readJsonFileSafe<MemberRecord>(path.join(MEMBERS_DIR, f)))
-      .filter((m): m is MemberRecord => !!m);
+      .filter((m): m is MemberRecord => !!m)
+      // memberId는 나중에 cleanupStaleMembers/reconcileMemberIds/endLeadWork 등에서 그대로
+      // 삭제·쓰기 경로에 이어붙는다 — 이 파일은 외부 세션이 직접 쓰는 것이라(SKILL.md 참고)
+      // 내용 자체가 조작된 경로 문자열일 수 있으니, 여기서(가장 먼저 들어오는 지점에서) 걸러야
+      // 이후 어떤 소비처도 그 값을 다시 검증할 필요가 없다.
+      .filter(m => {
+        if (isSafeId(m.memberId)) return true;
+        console.error(`[loadMembers] memberId 형식이 안전하지 않아 무시합니다: ${JSON.stringify(m.memberId)}`);
+        return false;
+      });
   } catch {
     return [];
   }
@@ -874,20 +883,24 @@ function cleanupStaleMembers(members: MemberRecord[], agentIdSet: Set<string | u
 // 보인다(실사고 확인: g1cl-mgt의 팀장이 이런 식으로 낡은 id를 갖고 있었다). sessionId는 이 앱이
 // 관여하지 않아도 절대 안 바뀌므로, 짧은 id로 못 찾은 살아있는 세션을 sessionId로 다시 찾아서
 // leads.json의 id를 그 자리에서 바로잡는다.
-function reconcileLeadIds(agents: AgentEntry[], leads: LeadRecord[]): boolean {
-  let changed = false;
+// 반환값은 "oldId -> newId" 변경 목록이다 — 호출부가 이걸로 MemberRecord.leadId(팀원이 저장해둔
+// 소속 팀장의 옛 짧은 id)도 같이 옮겨써야 한다(restartLead가 겪었던 것과 똑같은 문제라 같은 방식
+// 으로 고친다 — 아래 buildSessionRowsInternal 참고). 그렇게 안 하면 여기서 팀장 id는 바로잡히지만
+// 그 팀장 소속 팀원들은 여전히 "소속 팀장 없음"으로 잘못 보이게 된다.
+function reconcileLeadIds(agents: AgentEntry[], leads: LeadRecord[]): { oldId: string; newId: string }[] {
+  const renames: { oldId: string; newId: string }[] = [];
   const leadIdSet = new Set(leads.map(l => l.id));
   for (const agent of agents) {
     if (!agent.id || !agent.sessionId || leadIdSet.has(agent.id)) continue;
     const rec = leads.find(l => l.sessionId === agent.sessionId);
     if (rec && rec.id !== agent.id) {
       console.log(`[reconcileLeadIds] 팀장 ${rec.internalId}의 짧은 id가 이 앱 밖에서 바뀐 것을 발견해 ${rec.id} -> ${agent.id}로 갱신합니다.`);
+      renames.push({ oldId: rec.id, newId: agent.id });
       rec.id = agent.id;
       leadIdSet.add(agent.id);
-      changed = true;
     }
   }
-  return changed;
+  return renames;
 }
 
 // 팀원도 팀장과 똑같은 문제를 겪는데, 훨씬 더 심각하다 — 팀장은 낡은 id로 잘못 표시만 되지만
@@ -931,7 +944,14 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
   const agents = await fetchAgents();
   const agentIdSet = new Set(agents.filter(a => !!a.id).map(a => a.id));
   const leads = loadLeads();
-  if (reconcileLeadIds(agents, leads)) saveLeads(leads);
+  const leadRenames = reconcileLeadIds(agents, leads);
+  if (leadRenames.length) {
+    saveLeads(leads);
+    const renameMap = new Map(leadRenames.map(r => [r.oldId, r.newId]));
+    loadMembers()
+      .filter(m => renameMap.has(m.leadId))
+      .forEach(m => registerMember({ ...m, leadId: renameMap.get(m.leadId)! }));
+  }
   const leadIds = new Set(leads.map(l => l.id));
   const members = reconcileMemberIds(agents, loadMembers());
   const memberMap = new Map(members.map(m => [m.memberId, m]));
@@ -975,6 +995,13 @@ function loadPendingRequests(): MemberRequest[] {
       .filter(f => f.endsWith('.json'))
       .map(f => readJsonFileSafe<MemberRequest>(path.join(REQUESTS_DIR, f)))
       .filter((r): r is MemberRequest => !!r && r.status === 'pending')
+      // memberId와 같은 이유(외부 세션이 직접 쓰는 파일) — id가 안전한 형식이 아니면 걸러서
+      // writeRequestDecision이 이 값을 파일 경로에 그대로 쓰는 경로로 절대 넘어가지 않게 한다.
+      .filter(r => {
+        if (isSafeId(r.id)) return true;
+        console.error(`[loadPendingRequests] 요청 id 형식이 안전하지 않아 무시합니다: ${JSON.stringify(r.id)}`);
+        return false;
+      })
       .sort((a, b) => a.createdAt - b.createdAt);
   } catch {
     return [];
@@ -982,8 +1009,11 @@ function loadPendingRequests(): MemberRequest[] {
 }
 
 // 이미 처리된(pending이 아닌) 요청을 다시 승인/거부하면 팀장에게 모순된 메시지가 두 번 전달될 수
-// 있으므로, 현재 상태가 여전히 pending일 때만 갱신한다(CAS).
+// 있으므로, 현재 상태가 여전히 pending일 때만 갱신한다(CAS). requestId는 렌더러 IPC에서 그대로
+// 오므로(정상 흐름이면 loadPendingRequests가 이미 걸러준 안전한 값이지만), 여기서도 다시 한번
+// 확인해서 이 함수가 다른 경로로 호출돼도 항상 안전하게 만든다.
 function writeRequestDecision(requestId: string, status: 'approved' | 'denied'): MemberRequest | null {
+  if (!isSafeId(requestId)) return null;
   const file = path.join(REQUESTS_DIR, `${requestId}.json`);
   const req = readJsonFileSafe<MemberRequest>(file);
   if (!req || req.status !== 'pending') return null;
@@ -1245,11 +1275,23 @@ async function restartLead(internalId: string, instruction: string): Promise<{ i
   const leads = loadLeads();
   const rec = leads.find(l => l.internalId === internalId);
   if (rec) {
+    const oldId = rec.id;
     rec.id = newId;
     rec.sessionId = newSessionId;
     rec.launchedAt = Date.now();
     rec.approvedMembers = approvedMembers;
+    // 재시작은 완전히 새 세션(새 sessionId)이라 예전 대화 주제가 더 이상 안 맞는다 — 안 지우면
+    // 이 팀장이 나중에 오프라인이 됐을 때 히스토리 탭에 재시작 이전 대화의 주제가 그대로 남아
+    // 보인다. 다음에 필요할 때(buildOfflineRows) 새로 조회해서 다시 채워진다.
+    delete rec.aiTitle;
     saveLeads(leads);
+    // MemberRecord.leadId는 등록 당시의 짧은 id를 그대로 저장해두는데, restartLead는 짧은 id를
+    // 항상 새로 발급하면서도 이 값을 안 건드려서(실측 확인) 그 팀장 소속 팀원들이 재시작 직후부터
+    // 전부 leadId 불일치를 겪었다 — endLeadWork가 그 팀원들을 아예 못 찾아 종료가 안 되고,
+    // notifyLeadsOfFinishedMembers의 완료 알림도 전달 안 되고, 화면에도 "소속 팀장 없음"으로
+    // 잘못 보였다. 짧은 id가 바뀌는 시점(여기)에 소속 팀원 전부를 새 id로 같이 옮겨써서 막는다.
+    const members = loadMembers();
+    members.filter(m => m.leadId === oldId).forEach(m => registerMember({ ...m, leadId: newId }));
   }
   return { id: newId };
 }
@@ -1267,13 +1309,20 @@ async function endLeadWork(internalId: string): Promise<{ success: boolean; memb
   const members = loadMembers().filter(m => m.leadId === lead.id);
   const memberFailures: string[] = [];
   for (const m of members) {
-    const stopped = await stopSession(m.memberId);
-    if (!stopped) memberFailures.push(m.memberId);
-    try { fs.unlinkSync(path.join(MEMBERS_DIR, `${m.memberId}.json`)); } catch { /* ignore */ }
+    // 팀원 하나씩 정지하는 이 루프는(각각 최대 STOP_SESSION_TIMEOUT_MS) 꽤 오래 걸릴 수 있고, 그
+    // 사이 폴링의 reconcileMemberIds가 이 팀원의 짧은 id를 앱 밖 재시작으로 바꿔놨을 수 있다 —
+    // sessionId로 지금 최신 등록 파일을 다시 찾아서(찾으면 그 파일이 곧 "지금 진짜 id") 정지한다.
+    const current = (m.sessionId && loadMembers().find(x => x.sessionId === m.sessionId)) || m;
+    const stopped = await stopSession(current.memberId);
+    if (!stopped) memberFailures.push(current.memberId);
+    try { fs.unlinkSync(path.join(MEMBERS_DIR, `${current.memberId}.json`)); } catch { /* ignore */ }
   }
-  let leadStopped = await stopSession(lead.id);
+  // 팀원 정리 루프가 도는 동안 팀장 자신의 짧은 id도 바뀌었을 수 있다 — internalId로 최신 레코드를
+  // 다시 찾아서 정지한다(resumeLead/restartLead와 같은 이유).
+  const currentLead = loadLeads().find(l => l.internalId === internalId) ?? lead;
+  let leadStopped = await stopSession(currentLead.id);
   if (!leadStopped) {
-    leadStopped = await stopSession(lead.id);
+    leadStopped = await stopSession(currentLead.id);
   }
   return { success: leadStopped, memberFailures };
 }
@@ -1413,12 +1462,24 @@ async function forkSessionAsLead(sessionId: string, cwd: string): Promise<string
   if (!id) return null;
   const newSessionId = (await findSessionIdByShortId(id)) ?? id;
   const { paths: approvedMembers } = approvedMemberBriefing(cwd);
-  leads.push({ id, sessionId: newSessionId, targetDir: cwd, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID() });
-  saveLeads(leads);
+  // 위 두 await(runClaudeBg/findSessionIdByShortId) 동안 최대 수십 초가 지날 수 있고, 그 사이
+  // 3초 폴링의 reconcileLeadIds 등이 leads.json에 다른 팀장의 변경을 저장했을 수 있다 — 맨 위에서
+  // 캡처해둔 leads 배열을 그대로 쓰면 그 변경을 통째로 덮어써버린다(실측: Node 시뮬레이션으로
+  // 재현 확인됨). launchTeamLead/adoptLead/resumeLead/restartLead와 같은 패턴대로, 쓰기 직전에
+  // 다시 읽어서 최신 상태 위에 얹는다.
+  const latestLeads = loadLeads();
+  latestLeads.push({ id, sessionId: newSessionId, targetDir: cwd, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID() });
+  saveLeads(latestLeads);
   return id;
 }
 
 function registerMember(member: MemberRecord): void {
+  // 지금 있는 호출부(launchMember/registerProbableMember/reconcileMemberIds)는 전부 이미 안전한
+  // memberId만 넘기지만, 파일 경로에 직접 쓰이는 값이라 여기서도 한 번 더 막아 방어선을 이중화한다.
+  if (!isSafeId(member.memberId)) {
+    console.error(`[registerMember] memberId 형식이 안전하지 않아 등록을 거부합니다: ${JSON.stringify(member.memberId)}`);
+    return;
+  }
   try {
     writeJsonFileAtomic(path.join(MEMBERS_DIR, `${member.memberId}.json`), member);
   } catch (err) {
@@ -1581,11 +1642,26 @@ ipcMain.handle('delete-member-template', (_e, id: string) => {
 ipcMain.handle('launch-member', async (_e, leadId: string, targetDir: string, instruction: string, role: string, label: string) =>
   launchMember(leadId, targetDir, instruction, role, label));
 
+// 요청 파일의 teamLeadId는 팀장 자신이 요청을 쓴 시점의 짧은 id를 그대로 담고 있다(팀장은 자기
+// internalId를 알 방법이 없어 이게 유일한 참조 수단) — 사용자가 승인/거부 버튼을 누르기 전 그
+// 사이 팀장의 짧은 id가 앱 밖에서 바뀌면(reconcileLeadIds가 다음 폴링에야 바로잡음) 못 찾아서
+// writeRequestDecision으로 이미 처리 확정된 요청이 팀장에게 영원히 전달 안 될 수 있다. 못 찾으면
+// 마지막으로 한 번 더(지금 이 순간 기준으로) 최신화를 시도해본다.
+async function findLeadByShortIdWithReconcile(shortId: string): Promise<{ leads: LeadRecord[]; lead: LeadRecord | undefined }> {
+  const leads = loadLeads();
+  let lead = leads.find(l => l.id === shortId);
+  if (!lead) {
+    const agents = await fetchAgents();
+    if (reconcileLeadIds(agents, leads).length) saveLeads(leads);
+    lead = leads.find(l => l.id === shortId);
+  }
+  return { leads, lead };
+}
+
 ipcMain.handle('approve-request', async (_e, requestId: string) => {
   const req = writeRequestDecision(requestId, 'approved');
   if (!req) return false;
-  const leads = loadLeads();
-  const lead = leads.find(l => l.id === req.teamLeadId);
+  const { leads, lead } = await findLeadByShortIdWithReconcile(req.teamLeadId);
   if (!lead) return false;
 
   if (req.type === 'stop-member') {
@@ -1607,8 +1683,7 @@ ipcMain.handle('approve-request', async (_e, requestId: string) => {
 ipcMain.handle('deny-request', async (_e, requestId: string) => {
   const req = writeRequestDecision(requestId, 'denied');
   if (!req) return false;
-  const leads = loadLeads();
-  const lead = leads.find(l => l.id === req.teamLeadId);
+  const { lead } = await findLeadByShortIdWithReconcile(req.teamLeadId);
   if (!lead) return false;
 
   if (req.type === 'stop-member') {
