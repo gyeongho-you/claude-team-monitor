@@ -236,6 +236,11 @@ let customPickedDir = null;       // 등록 안 된, 방금 고른 1회성 디�
 let memberCustomPickedDir = null; // 등록 안 된, 방금 고른 1회성 디렉토리(직접 추가 팀원 대상)
 let tplCustomPickedDir = null;    // 등록 안 된, 방금 고른 1회성 디렉토리(팀원 등록 대상)
 let selectedLeadId = null;  // 지금 대화창에 띄운 팀장
+// selectedLeadId와 짝을 이루는 안정적인 식별자 — reconcileLeadIds가 폴링 중 짧은 id를 조용히
+// 바꿔도(이 앱이 관여 안 한 재시작) 같은 팀장을 계속 따라가는 데 쓴다(renderBoard 참고). 7군데나
+// 흩어진 "selectedLeadId = ..." 호출부를 전부 손대는 대신, renderBoard 한 곳에서만 매 폴링마다
+// 선택된 팀장의 최신 internalId로 맞춰준다.
+let selectedLeadInternalId = null;
 let formMode = 'none';      // 'none' | 'launch' | 'adopt'
 let showAddMember = false;
 let lastLeadIds = new Set();
@@ -320,7 +325,11 @@ function escapeHtml(str) {
   }[c]));
 }
 
+// cwd는 claude agents --json(외부 CLI 출력, 스키마 검증 없이 그대로 씀)에서 온다 — 타입상으로는
+// 항상 string이라지만 실제로 비어있는 값이 들어오면 이 함수 하나가 던지는 예외가 여러 렌더
+// 함수의 .map() 안에서 안 잡혀 그 탭 전체 렌더링이 멈춘다(예: 세션 정리 탭) — 방어적으로 처리한다.
 function dirLabel(dir) {
+  if (!dir) return '(경로 없음)';
   return dir.split(/[\\/]/).pop();
 }
 
@@ -770,14 +779,28 @@ cancelFormBtn.addEventListener('click', () => {
   updateLeadSectionVisibility();
 });
 
+// add-member-panel(addMemberBtn/cancelAddMemberBtn)은 열 때/취소할 때 입력값을 전부 비우는데,
+// 이 폼은 그게 빠져있어서 세션 ID/디렉토리를 입력했다가 취소하고 나중에 다시 열어도 옛 값이
+// 그대로 남아있었다 — 사용자가 새로 입력한다고 착각하고 옛 값 그대로 제출할 위험이 있어서
+// 같은 패턴으로 맞춘다.
+function resetManualSessionForm() {
+  manualSessionIdEl.value = '';
+  manualSessionCustomPickedDir = null;
+  manualSessionDirSelect.value = '';
+  manualSessionStatusEl.textContent = '';
+  syncManualSessionResumeBtnState();
+}
+
 adoptLeadBtn.addEventListener('click', () => {
   formMode = 'adopt';
+  resetManualSessionForm();
   updateLeadSectionVisibility();
   renderAdoptableSessions();
 });
 
 cancelAdoptBtn.addEventListener('click', () => {
   formMode = 'none';
+  resetManualSessionForm();
   updateLeadSectionVisibility();
 });
 
@@ -1289,9 +1312,20 @@ function renderBoard(rows) {
     });
   }
 
-  // 선택된 팀장이 없어졌으면(종료됨) 남아있는 첫 팀장으로, 없으면 선택 해제
-  if (selectedLeadId && !lastLeadIds.has(selectedLeadId)) selectedLeadId = null;
+  // 선택된 팀장이 없어졌으면(종료됨) 남아있는 첫 팀장으로, 없으면 선택 해제 — 단, reconcileLeadIds가
+  // 폴링 중 짧은 id만 조용히 바꾼 경우(이 앱이 관여 안 한 재시작)라면 진짜로 없어진 게 아니라
+  // 같은 팀장이 새 id로 살아있는 것이므로, internalId로 찾아서 그 새 id로 조용히 따라간다.
+  // 이게 없으면 팀장을 여러 개 띄워둔 상황에서 드리프트가 날 때마다 사용자 모르게 대화창이
+  // 엉뚱한(그냥 첫 번째) 팀장으로 튀어버렸다.
+  if (selectedLeadId && !lastLeadIds.has(selectedLeadId)) {
+    const followed = selectedLeadInternalId && leads.find(l => l.internalId === selectedLeadInternalId);
+    selectedLeadId = followed ? followed.id : null;
+  }
   if (!selectedLeadId && onlineLeads.length > 0 && formMode === 'none') selectedLeadId = onlineLeads[0].id;
+  // 다음 폴링에서도 계속 같은 팀장을 따라갈 수 있게, 지금 선택된 팀장의 internalId로 맞춰둔다 —
+  // selectedLeadId를 직접 바꾸는 다른 7군데(selectLead/sendChatMessage/재시작 성공 처리 등)를
+  // 전부 따로 고칠 필요 없이 여기 한 곳에서만 동기화하면 된다.
+  selectedLeadInternalId = (leads.find(l => l.id === selectedLeadId) || {}).internalId || null;
 
   // 여기서도 selectedLeadId가 바뀔 수 있어서(자동 선택 등, selectLead()를 안 거침) 매 폴링마다
   // 다시 맞춰준다 — IPC 호출 없이 캐시만 쓰는 가벼운 함수라 3초마다 불러도 부담 없다.
