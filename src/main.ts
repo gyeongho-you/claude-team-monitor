@@ -117,6 +117,12 @@ type SessionRow = AgentEntry & {
   role?: string;   // 팀원 카드일 때, 등록된 역할(예: reviewer)
   label?: string;  // 팀장 카드일 때, 사용자가 붙인 이름표(같은 디렉토리에서 여러 팀장을 구분하기 위함)
   offline?: boolean; // 팀장 카드일 때, 지금 프로세스가 떠있지 않음(재부팅 등) — 채팅으로 메시지를 보내면 다시 깨어남
+  // 팀장 카드일 때만: reconcileLeadIds가 폴링 중 짧은 id를 조용히 바꿔도(이 앱이 관여 안 한
+  // 재시작), 렌더러가 "선택 중이던 그 팀장"을 짧은 id 대신 이 안정적인 값으로 계속 따라갈 수
+  // 있게 내려준다. 여러 팀장을 동시에 띄워둔 상황에서 id 드리프트가 나면, 렌더러가 이걸 몰라서
+  // "지금 선택된 팀장이 목록에서 사라졌다"고 오판해 아무 온라인 팀장으로나(첫 번째) 자동
+  // 전환해버려 사용자 모르게 대화창이 엉뚱한 팀장으로 바뀔 수 있었다.
+  internalId?: string;
 };
 
 type TranscriptEntry = { time: string; prompt: string; answer: string };
@@ -708,6 +714,7 @@ function computeLiveRows(
         role: member?.role,
         label: isLead ? lead?.label : member?.label,
         offline: false,
+        internalId: isLead ? lead?.internalId : undefined,
       };
     });
 }
@@ -842,6 +849,7 @@ function buildOfflineRows(offlineLeads: LeadRecord[], leads: LeadRecord[]): Sess
       isLead: true,
       label: l.label,
       offline: true,
+      internalId: l.internalId,
     };
   });
   if (leadsDirty) saveLeads(leads);
