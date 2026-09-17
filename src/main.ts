@@ -15,6 +15,7 @@ import { extractBackgroundedId } from './lib/claudeBgOutput';
 import { CLAUDE_HOME, MEMBERS_DIR } from './lib/teamMemberPaths';
 import { hasLiveMember } from './lib/leadPresence';
 import { execAgentsJson } from './lib/agentsJson';
+import { checkDirectoryClaudeReady, claudeNotReadyMessage } from './lib/claudeReadiness';
 
 const SESSION_EDITS_DIR = path.join(CLAUDE_HOME, 'session-edits');
 const JOURNAL_DATA_DIR = path.join(CLAUDE_HOME, 'daily-journal', 'data');
@@ -1343,7 +1344,26 @@ function reconcileMemberIds(agents: AgentEntry[], members: MemberRecord[]): Memb
 //
 // 책임이 여럿(실시간 스냅샷 구성, 팀원 완료 알림, 대기열 배달, 팀장 오프라인 판정, 팀원 정리)이라
 // 각각을 위 헬퍼로 뽑고, 여기서는 순서대로 호출해 조합만 한다.
-async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; requests: MemberRequest[] }> {
+// 지금 이 앱이 아는 모든 디렉토리(팀장 자신 + 사전승인된 팀원 디렉토리 + 실제로 떠있거나 떠있던
+// 세션의 cwd) 중, claude 최초 실행 승인(checkDirectoryClaudeReady)이 안 된 곳을 모아서 화면에
+// 알림으로 띄우는 데 쓴다 — "터미널 열기"와 같은 방식으로 사용자가 그 자리에서 바로 승인할 수
+// 있게(open-terminal-for-approval IPC) 하기 위함.
+function computeUnapprovedDirs(rows: SessionRow[], leads: LeadRecord[]): { dir: string; reason: string }[] {
+  const dirs = new Set<string>();
+  for (const row of rows) if (row.cwd) dirs.add(row.cwd);
+  for (const lead of leads) {
+    dirs.add(lead.targetDir);
+    lead.approvedMembers.forEach(dir => dirs.add(dir));
+  }
+  const result: { dir: string; reason: string }[] = [];
+  for (const dir of dirs) {
+    const readiness = checkDirectoryClaudeReady(dir);
+    if (!readiness.ready) result.push({ dir, reason: readiness.reason! });
+  }
+  return result;
+}
+
+async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; requests: MemberRequest[]; unapprovedDirs: { dir: string; reason: string }[] }> {
   // 아래 leadFirstMissAt/memberFirstMissAt 유예 판정에 쓸 기준 시각 — 이 함수 실행 도중 한 번만
   // 고정해서 재는다(같은 호출 안에서 Date.now()를 여러 번 부르며 값이 갈리는 걸 방지).
   const now = Date.now();
@@ -1383,7 +1403,8 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
   cleanupStaleMembers(members, agentIdSet, now);
 
   const requests = loadPendingRequests();
-  return { rows, requests };
+  const unapprovedDirs = computeUnapprovedDirs(rows, leads);
+  return { rows, requests, unapprovedDirs };
 }
 
 // buildSessionRowsInternal은 이제 3초 정기 폴링뿐 아니라 refresh-board IPC(채팅 전송 직후 등)로도
@@ -1395,7 +1416,7 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
 // 원인이 될 수 있다. 완료 순서가 항상 시작 순서와 같도록(=먼저 시작한 호출의 결과가 항상 먼저
 // 반영되도록) 아래처럼 직렬화한다 — 겹쳐 호출되면 앞선 호출이 끝난 뒤에야 다음 호출이 실제로 시작된다.
 let buildSessionRowsChain: Promise<unknown> = Promise.resolve();
-function buildSessionRows(): Promise<{ rows: SessionRow[]; requests: MemberRequest[] }> {
+function buildSessionRows(): Promise<{ rows: SessionRow[]; requests: MemberRequest[]; unapprovedDirs: { dir: string; reason: string }[] }> {
   const run = buildSessionRowsChain.then(buildSessionRowsInternal, buildSessionRowsInternal);
   buildSessionRowsChain = run.catch(() => undefined);
   return run;
@@ -1705,6 +1726,11 @@ function queueLeadOperation<T>(internalId: string, fn: () => Promise<T>): Promis
 async function resumeLead(internalId: string, message: string): Promise<string | null> {
   const current = loadLeads().find(l => l.internalId === internalId);
   if (!current) return null;
+  const readiness = checkDirectoryClaudeReady(current.targetDir);
+  if (!readiness.ready) {
+    logCritical(claudeNotReadyMessage(current.targetDir, readiness.reason!));
+    return null;
+  }
   // 히스토리 탭에서 이미 오프라인인(agents 스냅샷에 안 잡히는) 팀장에게 메시지를 보내도 여기까지
   // 그대로 들어온다 — restartLead와 같은 이유로, 실제로 떠있을 때만 stop을 호출한다(없는 프로세스에
   // claude stop을 걸어 시간을 낭비하고 이어지는 runClaudeBg 타임아웃과 겹치는 걸 막기 위함).
@@ -1734,6 +1760,15 @@ async function resumeLead(internalId: string, message: string): Promise<string |
       logCritical(`[resumeLead] 팀장 ${internalId}(${current.id}) 정지에 실패해 세션 포크 위험이 있어 resume을 중단합니다.`);
       return null;
     }
+    // stopSession이 성공(claude agents --json에서 사라짐)을 확인해도, daemon이 그 세션을 실제로
+    // "resume 가능한 상태"로 완전히 정리하기까지는 추가 시간이 더 걸릴 수 있다(실사용 재현:
+    // 2026-09-17, stop 성공 직후 자연스러운 간격(약 3초)만으로 --resume을 걸었다가 "source session
+    // ... not found"로 크래시 — 크래시한 세션은 대화 내용이 전혀 없는 빈 세션이라 그대로 leads.json에
+    // 기록되면 팀장이 대화 기록을 통째로 잃은 것처럼 보인다, 실제로 두 팀장 모두 겪음). 관측된
+    // 자연 간격(3초)으로도 실패했으므로 여유를 넉넉히 둔다 — 표본이 2건뿐이라 이 값이 충분하다는
+    // 보장은 없고, 다시 재현되면 ~/.claude/jobs/<id>/state.json의 state/detail 필드로 원인을
+    // 확인할 수 있다.
+    await new Promise(resolve => setTimeout(resolve, 3000));
   }
   const mcpToken = issueMcpToken(internalId);
   const newId = await runClaudeBg(['--bg', ...buildMemberSpawnCliArgs(mcpToken), '--resume', current.sessionId, message], current.targetDir);
@@ -1777,6 +1812,11 @@ async function resumeLead(internalId: string, message: string): Promise<string |
 async function restartLead(internalId: string, instruction: string): Promise<{ id: string } | { error: string }> {
   const current = loadLeads().find(l => l.internalId === internalId);
   if (!current) return { error: '팀장 레코드를 찾을 수 없습니다(이미 삭제됐거나 internalId가 어긋났을 수 있음).' };
+  const readiness = checkDirectoryClaudeReady(current.targetDir);
+  if (!readiness.ready) {
+    logCritical(claudeNotReadyMessage(current.targetDir, readiness.reason!));
+    return { error: `"${current.targetDir}"에서 claude 최초 실행 승인이 안 돼 있습니다(${readiness.reason}) — 그 디렉토리에서 터미널로 claude를 한 번 실행해 승인창을 눌러준 뒤 다시 시도하세요.` };
+  }
   // 히스토리 탭에서 이미 오프라인인(agents 스냅샷에 안 잡히는) 팀장을 골라 재시작해도 여기까지
   // 그대로 들어온다 — 이 경우 claude stop을 걸 실제 프로세스가 없으니 불필요하게 시간만 쓰고
   // (실사용 재현: 그 뒤 이어지는 runClaudeBg의 45초 타임아웃과 겹쳐 재시작 실패로 이어짐),
@@ -1877,6 +1917,11 @@ async function findSessionIdByShortIdRetrying(shortId: string): Promise<string |
 }
 
 async function launchTeamLead(targetDir: string, instruction: string): Promise<string | null> {
+  const readiness = checkDirectoryClaudeReady(targetDir);
+  if (!readiness.ready) {
+    logCritical(claudeNotReadyMessage(targetDir, readiness.reason!));
+    return null;
+  }
   installTeamLeadSkill();
   const { paths: approvedMembers, text: approvedText } = approvedMemberBriefing(targetDir);
   const prompt = `/team-lead ${instruction}\n\n${approvedText}`;
@@ -2093,8 +2138,8 @@ function createWindow(): void {
 
   const poll = async () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
-    const { rows, requests } = await buildSessionRows();
-    mainWindow.webContents.send('agents-update', { rows, requests, stallAlerts: listStallAlertsForUi() });
+    const { rows, requests, unapprovedDirs } = await buildSessionRows();
+    mainWindow.webContents.send('agents-update', { rows, requests, stallAlerts: listStallAlertsForUi(), unapprovedDirs });
   };
   poll();
   pollTimer = setInterval(poll, POLL_INTERVAL_MS);
@@ -2408,6 +2453,29 @@ ipcMain.handle('open-in-terminal', (_e, sessionShortId: string) => {
     shell: true,
   });
   child.on('error', err => console.error('[open-in-terminal] 터미널을 여는 데 실패했습니다:', err));
+  child.unref();
+});
+
+// 사용자가 "승인하기" 버튼을 눌렀을 때, 그 디렉토리에서 새 터미널 창으로 claude를 인터랙티브로
+// 한 번 띄워준다 — claude CLI 최초 실행 시 뜨는 워크스페이스 신뢰/CLAUDE.md include 승인 다이얼로그를
+// 사용자가 그 자리에서 바로 클릭해서 넘길 수 있게 하기 위함(open-in-terminal과 같은 패턴). 렌더러가
+// 임의의 경로를 넘겨서 아무 데서나 터미널을 열게 하면 안 되므로, 지금 이 앱이 실제로 알고 있고
+// 아직 승인이 안 된 디렉토리인지 서버 쪽에서 다시 확인한다.
+ipcMain.handle('open-terminal-for-approval', async (_e, targetDir: string) => {
+  if (typeof targetDir !== 'string') return;
+  const { rows } = await buildSessionRows();
+  const isKnownUnapproved = computeUnapprovedDirs(rows, loadLeads()).some(u => u.dir === targetDir);
+  if (!isKnownUnapproved) {
+    console.error('[open-terminal-for-approval] 알 수 없거나 이미 승인된 디렉토리라 거부합니다:', targetDir);
+    return;
+  }
+  const child = spawn('cmd.exe', ['/c', 'start', 'cmd.exe', '/k', 'claude'], {
+    cwd: targetDir,
+    detached: true,
+    stdio: 'ignore',
+    shell: true,
+  });
+  child.on('error', err => console.error('[open-terminal-for-approval] 터미널을 여는 데 실패했습니다:', err));
   child.unref();
 });
 

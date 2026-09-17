@@ -25,6 +25,7 @@ import { extractBackgroundedId } from '../lib/claudeBgOutput';
 import { normalizeMemberModel } from '../lib/appSettings';
 import { MEMBERS_DIR } from '../lib/teamMemberPaths';
 import { execAgentsJson } from '../lib/agentsJson';
+import { checkDirectoryClaudeReady, claudeNotReadyMessage } from '../lib/claudeReadiness';
 // TEAM_MEMBER_BRIEFING은 launchMember(main.ts)가 쓰는 것과 정확히 같은 상수를 그대로 재사용한다
 // — 둘이 어긋나면 앱이 직접 등록하는 팀원과 팀장이 이 툴로 만드는 팀원이 서로 다른 브리핑을
 // 받게 된다. TEAM_MEMBER_STANDBY_NOTE는 여기서 안 쓴다(아래 prompt 조립부 주석 참고).
@@ -144,6 +145,11 @@ server.registerTool(
     const prompt = `${TEAM_MEMBER_BRIEFING}\n\n${roleLine}"""\n${instruction}\n"""`;
     const normalizedModel = normalizeMemberModel(model);
     const modelArgs = normalizedModel === 'default' ? [] : ['--model', normalizedModel];
+
+    const readiness = checkDirectoryClaudeReady(resolvedTarget);
+    if (!readiness.ready) {
+      return errorResult(claudeNotReadyMessage(resolvedTarget, readiness.reason!));
+    }
 
     const memberId = await runClaudeBg(['--bg', ...modelArgs, prompt], resolvedTarget);
     if (!memberId) {

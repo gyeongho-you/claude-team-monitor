@@ -223,6 +223,7 @@ const cancelAdoptBtn = document.getElementById('cancel-adopt-btn');
 const memberRowEl = document.getElementById('member-row');
 const requestsListEl = document.getElementById('requests-list');
 const stallAlertsListEl = document.getElementById('stall-alerts-list');
+const unapprovedDirListEl = document.getElementById('unapproved-dir-list');
 const lastUpdatedEl = document.getElementById('last-updated');
 
 const historyListEl = document.getElementById('history-list');
@@ -1516,10 +1517,11 @@ workTabEl.addEventListener('click', async e => {
 // 3초 폴링을 기다리지 않고 지금 바로 보드를 다시 그린다 — 카드의 새로고침/삭제 버튼에서 쓴다.
 async function refreshBoardNow() {
   try {
-    const { rows, requests, stallAlerts } = await window.api.refreshBoard();
+    const { rows, requests, stallAlerts, unapprovedDirs } = await window.api.refreshBoard();
     renderBoard(rows || []);
     renderRequests(requests || []);
     renderStallAlerts(stallAlerts || []);
+    renderUnapprovedDirs(unapprovedDirs || []);
     renderHistory();
     lastUpdatedEl.textContent = `마지막 갱신: ${new Date().toLocaleTimeString('ko-KR')}`;
   } catch (err) {
@@ -1748,10 +1750,48 @@ function renderStallAlerts(alerts) {
   });
 }
 
-window.api.onAgentsUpdate(({ rows, requests, stallAlerts }) => {
+// claude CLI가 새 디렉토리에서 처음 뜰 때 요구하는 워크스페이스 신뢰/CLAUDE.md include 승인은
+// headless(--bg) 세션이 절대 대신 클릭해줄 수 없다(아무도 답 못 해서 "시작 단계 다이얼로그에
+// 멈춘 채" 영구 대기하게 된다, main.ts의 checkDirectoryClaudeReady 주석 참고) — 그래서 팀장/팀원
+// 디렉토리 중 이 승인이 안 된 곳을 여기서 눈에 띄게 보여주고, "터미널에서 승인하기"를 누르면
+// open-in-terminal과 같은 방식으로 그 디렉토리에서 claude를 인터랙티브로 새 창에 띄워서 사용자가
+// 그 자리에서 바로 다이얼로그를 눌러 넘길 수 있게 한다.
+function renderUnapprovedDirs(items) {
+  if (!items || items.length === 0) {
+    unapprovedDirListEl.innerHTML = '';
+    return;
+  }
+  unapprovedDirListEl.innerHTML = items.map(u => `
+    <div class="stall-alert-card">
+      <div class="stall-alert-title">⚠ 최초 실행 승인이 안 된 디렉토리</div>
+      <div class="stall-alert-reason">${escapeHtml(u.dir)} — ${escapeHtml(u.reason)}</div>
+      <div class="stall-alert-actions">
+        <button class="stall-confirm-btn" data-approve-dir="${escapeHtml(u.dir)}">터미널에서 승인하기</button>
+      </div>
+    </div>
+  `).join('');
+
+  unapprovedDirListEl.querySelectorAll('[data-approve-dir]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        await window.api.openTerminalForApproval(btn.dataset.approveDir);
+      } catch (err) {
+        console.error('승인용 터미널 열기 실패:', err);
+      } finally {
+        // 승인 여부는 다음 폴링이 자동으로 다시 확인해서 목록에서 빼주므로, 여기서 직접 지우지
+        // 않는다 — 사용자가 터미널에서 실제로 승인을 눌러야만 없어져야 한다.
+        btn.disabled = false;
+      }
+    });
+  });
+}
+
+window.api.onAgentsUpdate(({ rows, requests, stallAlerts, unapprovedDirs }) => {
   renderBoard(rows || []);
   renderRequests(requests || []);
   renderStallAlerts(stallAlerts || []);
+  renderUnapprovedDirs(unapprovedDirs || []);
   // 히스토리 탭은 원래 탭을 클릭하거나 새로고침 버튼을 눌러야만 다시 그려졌다 — 앱을 껐다 켠
   // 직후 이미 죽어있던 팀장이 "아직 오프라인 확정 전" 상태로 잠깐 안 보이다가(콜드 스타트 유예,
   // computeOfflineLeads 참고) 뒤늦게 오프라인으로 확정돼도, 탭을 벗어났다 다시 들어오지 않는 한
