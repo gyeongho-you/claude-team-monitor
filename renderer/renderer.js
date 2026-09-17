@@ -107,7 +107,11 @@ const modalBackdropEl = document.getElementById('modal-backdrop');
 const fileListPanelEl = document.getElementById('file-list-panel');
 const fileListCloseBtn = document.getElementById('file-list-close-btn');
 const fileListContentEl = document.getElementById('file-list-content');
-const ALL_MODAL_PANELS = () => [restartLeadPanelEl, endWorkPanelEl, fileListPanelEl];
+const cleanupStopPanelEl = document.getElementById('cleanup-stop-panel');
+const cleanupStopInfoEl = document.getElementById('cleanup-stop-info');
+const cleanupStopConfirmBtn = document.getElementById('cleanup-stop-confirm-btn');
+const cleanupStopCancelBtn = document.getElementById('cleanup-stop-cancel-btn');
+const ALL_MODAL_PANELS = () => [restartLeadPanelEl, endWorkPanelEl, fileListPanelEl, cleanupStopPanelEl];
 
 // "새 작업 시작"/"작업 종료"/"변경 파일" 같은 확인창·상세창은 대화창 아래쪽에 인라인으로 뜨면
 // 스크롤 밖이라 눈에 안 띄어서(사용자 피드백), 화면 가운데 팝업(모달)으로 띄운다 — 배경을
@@ -1263,6 +1267,16 @@ function groupCleanupSessions(sessions) {
   return teamsHtml + orphansHtml;
 }
 
+// 이 탭이 보는 세션 목록은 "지금 이 프로세스가 아는 leads.json"에 등록됐는지로만 팀장/팀원/미등록을
+// 가른다 — 그래서 같은 앱을 다른 --user-data-dir(예: 격리된 테스트 인스턴스)로 하나 더 띄우면, 그
+// 인스턴스 입장에선 실제로는 다른 프로세스(원래 인스턴스)가 멀쩡히 쓰고 있는 세션도 전부 "소속 팀장이
+// 없는 세션"으로 보여서 실수로 종료 버튼을 누르기 쉽다(실측 확인, 2026-09-17 UI 점검 중) — 이 탭 자체가
+// "실수로 끄는 걸 막기 위해 작업 탭과 분리했다"는 목적을 갖고 있었는데, 정작 탭 안에서는 클릭 한 번으로
+// 되돌릴 수 없이 즉시 종료돼버려서 그 목적을 절반만 채우고 있었다. 어느 세션인지 이름을 보여주고 한 번
+// 더 확인받는 모달을 거치도록 한다.
+let lastCleanupSessions = [];
+let cleanupStopTargetId = null;
+
 async function renderCleanupSessions() {
   let sessions;
   try {
@@ -1271,18 +1285,18 @@ async function renderCleanupSessions() {
     cleanupListEl.innerHTML = `<div class="empty-hint">세션 목록을 불러오지 못했습니다: ${escapeHtml(errMsg(err))}</div>`;
     return;
   }
+  lastCleanupSessions = sessions;
   cleanupListEl.innerHTML = sessions.length ? groupCleanupSessions(sessions) : '<div class="empty-hint">떠있는 백그라운드 세션이 없습니다.</div>';
 
   cleanupListEl.querySelectorAll('[data-stop-bg]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      btn.disabled = true;
-      try {
-        await window.api.stopBackgroundSession(btn.dataset.stopBg);
-      } catch (err) {
-        console.error('세션 종료 실패:', err);
-      } finally {
-        await renderCleanupSessions();
-      }
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.stopBg;
+      const s = lastCleanupSessions.find(x => x.id === id);
+      cleanupStopTargetId = id;
+      cleanupStopInfoEl.textContent = s
+        ? `${tagLabel(s)} · ${dirLabel(s.cwd)} (${s.cwd}) · ${s.status || s.state || ''}`
+        : id;
+      showModal(cleanupStopPanelEl);
     });
   });
 
@@ -1304,6 +1318,27 @@ async function renderCleanupSessions() {
 refreshCleanupBtn.addEventListener('click', renderCleanupSessions);
 
 document.querySelector('.tab-btn[data-tab="cleanup"]').addEventListener('click', renderCleanupSessions);
+
+cleanupStopCancelBtn.addEventListener('click', () => {
+  cleanupStopTargetId = null;
+  hideModal(cleanupStopPanelEl);
+});
+
+cleanupStopConfirmBtn.addEventListener('click', async () => {
+  if (!cleanupStopTargetId) return hideModal(cleanupStopPanelEl);
+  const id = cleanupStopTargetId;
+  cleanupStopConfirmBtn.disabled = true;
+  try {
+    await window.api.stopBackgroundSession(id);
+  } catch (err) {
+    console.error('세션 종료 실패:', err);
+  } finally {
+    cleanupStopConfirmBtn.disabled = false;
+    cleanupStopTargetId = null;
+    hideModal(cleanupStopPanelEl);
+    await renderCleanupSessions();
+  }
+});
 
 // ---------------- 히스토리 탭 (오프라인 팀장 모음 + 이어하기) ----------------
 

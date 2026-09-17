@@ -233,6 +233,13 @@
 
   <div id="modal-backdrop" hidden></div>
 
+  <div id="cleanup-stop-panel" class="modal-panel" hidden>
+    <p class="form-hint">이 세션을 지금 종료합니다 — 대화 내용은 복구할 수 없고, 진행 중이던 작업이 있었다면 그대로 끊깁니다.</p>
+    <div id="cleanup-stop-info" class="pending-warning"></div>
+    <button id="cleanup-stop-confirm-btn">종료</button>
+    <button id="cleanup-stop-cancel-btn">취소</button>
+  </div>
+
   <div id="file-list-panel" class="modal-panel" hidden>
     <div class="section-header">
       <h2>커밋 대상 변경사항</h2>
