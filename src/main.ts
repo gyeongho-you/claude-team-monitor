@@ -13,6 +13,7 @@ import { looksLikeApprovalRequest, parseStallVerdict, isStatusEligibleForStall, 
 import { MEMBER_MODEL_OPTIONS, clampMinutes, normalizeMemberModel } from './lib/appSettings';
 import { extractBackgroundedId } from './lib/claudeBgOutput';
 import { CLAUDE_HOME, MEMBERS_DIR } from './lib/teamMemberPaths';
+import { hasLiveMember } from './lib/leadPresence';
 
 const SESSION_EDITS_DIR = path.join(CLAUDE_HOME, 'session-edits');
 const JOURNAL_DATA_DIR = path.join(CLAUDE_HOME, 'daily-journal', 'data');
@@ -1099,10 +1100,44 @@ function deliverPendingNotices(agents: AgentEntry[], leads: LeadRecord[]): void 
 // false인 첫 폴링)에는 "재기동 중일 수도 있다"고 봐줄 이유가 아예 없으므로, 그 폴링 한 번만
 // graceMs=0을 줘서 다음 폴링(3초 뒤)에 곧바로 만료 판정이 나게 한다 — 평소 동작(진짜 stop→resume
 // 재기동 유예)은 그대로 유지된다.
-function computeOfflineLeads(leads: LeadRecord[], agentIdSet: Set<string | undefined>, now: number, graceMs: number): LeadRecord[] {
+// hasLiveMember는 lib/leadPresence.js에 있다(순수 함수, 단위 테스트 대상). MemberRecord.leadId는
+// 등록 당시의 짧은 id라 그 뒤 팀장이 재시작됐으면 낡은 값일 수 있지만, 여기 넘기는 leads/members/
+// agentIdSet은 reconcileLeadIds/reconcileMemberIds가 이미 최신화한 뒤의 것이라 낡은 참조가
+// 계속 남아있지는 않는다.
+
+// buildOfflineRows/buildGraceRows(캐시 없는 경우)가 공유하는 팀장 카드 생성 로직 — 하나는
+// offline:true(히스토리), 하나는 offline:false(작업 탭 온라인 목록)로만 갈린다.
+function buildLeadRecordRow(l: LeadRecord, offline: boolean): { row: SessionRow; aiTitleUpdated: boolean } {
+  const projectName = resolveProjectName(l.sessionId, l.targetDir);
+  let aiTitleUpdated = false;
+  // 주제(ai-title)는 한 번 찾으면 세션 트랜스크립트를 매번 다시 읽지 않도록 leads.json에 캐싱한다.
+  if (!l.aiTitle) {
+    const found = getSessionAiTitle(l.sessionId, l.targetDir);
+    if (found) { l.aiTitle = found; aiTitleUpdated = true; }
+  }
+  const row: SessionRow = {
+    id: l.id,
+    sessionId: l.sessionId,
+    cwd: l.targetDir,
+    kind: 'background',
+    startedAt: l.launchedAt,
+    name: l.aiTitle,
+    projectName,
+    preview: getLatestPreview(projectName, l.sessionId),
+    isLead: true,
+    label: l.label,
+    offline,
+    internalId: l.internalId,
+    autoStallNudge: l.autoStallNudge,
+  };
+  return { row, aiTitleUpdated };
+}
+
+function computeOfflineLeads(leads: LeadRecord[], agentIdSet: Set<string | undefined>, now: number, graceMs: number, members: MemberRecord[]): LeadRecord[] {
   const offlineLeads: LeadRecord[] = [];
   leads.forEach(l => {
-    const result = trackFirstMiss(leadFirstMissAt, agentIdSet.has(l.id), l.id, now, graceMs);
+    const isPresent = agentIdSet.has(l.id) || hasLiveMember(l.id, members, agentIdSet);
+    const result = trackFirstMiss(leadFirstMissAt, isPresent, l.id, now, graceMs);
     if (result === 'expired') offlineLeads.push(l);
   });
   // 다른 경로로 이미 사라진(현재는 없지만 혹시 모를) leadId의 기록을 정리해 Map이 무한정 자라지
@@ -1112,46 +1147,36 @@ function computeOfflineLeads(leads: LeadRecord[], agentIdSet: Set<string | undef
 }
 
 // agents 스냅샷에 이번엔 안 잡혔지만(agentIdSet에 없음) 아직 오프라인으로 확정되지도 않은(유예
-// 구간, offlineLeads에도 없음) 팀장들 — 대부분 stop→resume 재기동 중이다. liveRows에도
-// offlineRows에도 안 들어가는 이 틈을 그냥 두면 rows에서 통째로 빠져서(위 lastKnownLiveLeadRow
-// 주석 참고) 대화창이 순간적으로 사라지므로, 마지막으로 살아있었을 때의 스냅숏을 그대로 재사용해
-// "아직 그대로 있는 것처럼" 보여준다. 캐시가 아직 없으면(한 번도 liveRows에 잡힌 적 없음) 보여줄
-// 게 없으므로 건너뛴다 — 다음 폴링에 자연히 다시 시도된다.
-function buildGraceRows(leads: LeadRecord[], agentIdSet: Set<string | undefined>, offlineLeads: LeadRecord[]): SessionRow[] {
+// 구간, offlineLeads에도 없음) 팀장들 — 대부분 stop→resume 재기동 중이거나, 팀장은 내려갔지만
+// 팀원이 아직 살아있는 경우다. liveRows에도 offlineRows에도 안 들어가는 이 틈을 그냥 두면
+// rows에서 통째로 빠져서(위 lastKnownLiveLeadRow 주석 참고) 대화창이 순간적으로 사라지므로,
+// 마지막으로 살아있었을 때의 스냅숏을 그대로 재사용해 "아직 그대로 있는 것처럼" 보여준다.
+// 캐시가 없으면(한 번도 liveRows에 잡힌 적 없음 — 앱을 막 켰을 때 등) 팀원이라도 살아있는지
+// 확인해서, 살아있으면 leads.json 데이터로 새로 카드를 만들어 보여준다(실사용 재현: 앱을 새로
+// 켰는데 팀장은 이미 내려가 있고 팀원만 일하고 있어서, 캐시가 비어 화면 어디에도 안 보였음).
+// 팀원도 없으면(진짜 오프라인 유예 구간) 다음 폴링까지 조용히 건너뛴다.
+function buildGraceRows(leads: LeadRecord[], agentIdSet: Set<string | undefined>, offlineLeads: LeadRecord[], members: MemberRecord[]): { rows: SessionRow[]; leadsDirty: boolean } {
   const offlineLeadIds = new Set(offlineLeads.map(l => l.id));
   const graceRows: SessionRow[] = [];
+  let leadsDirty = false;
   for (const l of leads) {
     if (agentIdSet.has(l.id) || offlineLeadIds.has(l.id)) continue;
     const cached = lastKnownLiveLeadRow.get(l.id);
-    if (cached) graceRows.push(cached);
+    if (cached) { graceRows.push(cached); continue; }
+    if (!hasLiveMember(l.id, members, agentIdSet)) continue;
+    const { row, aiTitleUpdated } = buildLeadRecordRow(l, false);
+    if (aiTitleUpdated) leadsDirty = true;
+    graceRows.push(row);
   }
-  return graceRows;
+  return { rows: graceRows, leadsDirty };
 }
 
 function buildOfflineRows(offlineLeads: LeadRecord[], leads: LeadRecord[]): SessionRow[] {
   let leadsDirty = false;
   const offlineRows: SessionRow[] = offlineLeads.map(l => {
-    const projectName = resolveProjectName(l.sessionId, l.targetDir);
-    // 주제(ai-title)는 한 번 찾으면 세션 트랜스크립트를 매번 다시 읽지 않도록 leads.json에 캐싱한다.
-    if (!l.aiTitle) {
-      const found = getSessionAiTitle(l.sessionId, l.targetDir);
-      if (found) { l.aiTitle = found; leadsDirty = true; }
-    }
-    return {
-      id: l.id,
-      sessionId: l.sessionId,
-      cwd: l.targetDir,
-      kind: 'background',
-      startedAt: l.launchedAt,
-      name: l.aiTitle,
-      projectName,
-      preview: getLatestPreview(projectName, l.sessionId),
-      isLead: true,
-      label: l.label,
-      offline: true,
-      internalId: l.internalId,
-      autoStallNudge: l.autoStallNudge,
-    };
+    const { row, aiTitleUpdated } = buildLeadRecordRow(l, true);
+    if (aiTitleUpdated) leadsDirty = true;
+    return row;
   });
   if (leadsDirty) saveLeads(leads);
   return offlineRows;
@@ -1282,10 +1307,11 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
     console.error('[runStallWatchdog] 정체 감시 도중 오류:', err);
   });
 
-  const offlineLeads = computeOfflineLeads(leads, agentIdSet, now, hasCompletedFirstPoll ? LEAD_OFFLINE_GRACE_MS : 0);
+  const offlineLeads = computeOfflineLeads(leads, agentIdSet, now, hasCompletedFirstPoll ? LEAD_OFFLINE_GRACE_MS : 0, members);
   hasCompletedFirstPoll = true;
   const offlineRows = buildOfflineRows(offlineLeads, leads);
-  const graceRows = buildGraceRows(leads, agentIdSet, offlineLeads);
+  const { rows: graceRows, leadsDirty: graceLeadsDirty } = buildGraceRows(leads, agentIdSet, offlineLeads, members);
+  if (graceLeadsDirty) saveLeads(leads);
   const rows = [...liveRows, ...graceRows, ...offlineRows];
 
   pruneMissingKeys(lastKnownLiveLeadRow, new Set(leads.map(l => l.id)));
