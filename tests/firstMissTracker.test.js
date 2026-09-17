@@ -48,6 +48,17 @@ test('trackFirstMiss: 다시 잡히면(present) 처음부터 다시 유예가 �
   assert.equal(map.get('a'), 22000);
 });
 
+test('trackFirstMiss: graceMs=0이면 바로 다음 호출부터 expired — 콜드 스타트 유예 우회(computeOfflineLeads)가 기대는 동작', () => {
+  // 앱을 새로 켜면 leadFirstMissAt/lastKnownLiveLeadRow가 메모리라 전부 비어서, 이미 죽어있던
+  // 팀장도 정상 유예시간(약 75초)만큼 화면 어디에도 안 보이는 공백이 생겼다(실사용 재현). 앱이
+  // 막 시작한 첫 폴링에서만 graceMs를 0으로 줘서, 두 번째 폴링(각 폴링 사이 실제 간격이 있는 한)
+  // 부터 곧바로 expired가 나오게 한 게 그 수정이다 — 이 테스트는 그 전제(graceMs=0이면 정말
+  // "찰나만 지나도" expired가 되는지)를 검증한다.
+  const map = new Map();
+  assert.equal(trackFirstMiss(map, false, 'a', 1000, 0), 'first-miss');
+  assert.equal(trackFirstMiss(map, false, 'a', 1001, 0), 'expired');
+});
+
 test('pruneMissingKeys: currentIds에 없는 키만 지운다', () => {
   const map = new Map([['a', 1], ['b', 2], ['c', 3]]);
   pruneMissingKeys(map, new Set(['a', 'c']));
