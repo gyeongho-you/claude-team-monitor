@@ -54,25 +54,21 @@ const STOP_SESSION_TIMEOUT_MS = 15000;
 // 낭비하지 않기 위한 회로차단기(팀원 코드리뷰에서 지적).
 const MAX_NOTICE_DELIVERY_ATTEMPTS = 5;
 
-// resumeLead가 stop 직후 --resume을 걸면 "source session ... not found"로 크래시하는 사고가
-// 실사용 중 여러 번 재현됐다(2026-09-17). 처음엔 "stop 후 daemon이 세션을 정리하는 데 시간이
-// 걸린다"고 보고 3초 유예 → 실패 사례가 또 나와서 "크래시가 spawn 후 약 12초 뒤에 일어난다"고
-// 보고 이 값들을 정했었다 — 그런데 daemon.log 전체(하루치 kill→respawn 433건)를 다시 분석해보니
-// 이 "간격 이론" 자체가 틀렸다: 정상 성공한 수백 건의 간격이 0.4~5초였고, 반대로 크래시난 사례
-// 중엔 간격이 255초(4분 넘게)였는데도 크래시한 것도 있었다 — 간격 길이와 크래시 여부는 상관관계가
-// 없다. 실제로 크래시가 몰린 사례들을 보면 서로 다른 두 팀장의 stop→resume이 몇 초 간격으로 겹쳐
-// 일어난 타이밍이 많았다 — queueLeadOperation은 팀장 하나 안에서만 순차 처리를 보장할 뿐, 서로 다른
-// 팀장의 resume이 동시에 daemon에 걸리는 건 막지 않는다. 그래서 지금은 "팀장 간 동시 stop/resume이
-// daemon을 헷갈리게 하는 것 아닌가"가 더 유력한 가설이지만 확정은 아니다. 근본 원인이 뭐든, 크래시
-// 여부를 spawn 직후 바로 알 수는 없고(그 세션이 "backgrounded" 마커까지는 정상적으로 찍은 뒤 한참
-// 있다가서야 죽는다) 아래 값만큼 기다렸다가 그때도 살아있으면 성공으로 본다. 원인을 확정 못 했어도
-// "실패하면 간격을 두고 다시 해본다"는 원인에 무관하게 유효한 완화책이라 재시도 자체는 유지한다 —
-// 사용자 피드백: "쭉은 아니고 텀을 두고 세 번 정도".
+// resumeLead가 stop 직후 --resume을 걸면 "source session ... not found"로 크래시하거나(daemon 레이스로
+// 추정), CLI가 원본을 잇는 대신 복사본을 새로 만들어버리는(mcp-config를 --resume에 다시 실어 보내던 게
+// 직접 원인으로 확정됨 — 이제는 안 보냄, resumeSpawnWithRetry 주석 참고) 사고가 실사용 중 여러 번
+// 재현됐다(2026-09-17). 그래서 재시도 인프라(아래 세 상수) 자체는 남겨뒀지만, 근본 원인이 고쳐지고 나서
+// "혹시 몰라 매번 13초씩 기다렸다가 확정한다"는 예전 방식은 정상 경로에 상시 세금이 되어버렸다 —
+// resumeSpawnWithRetry는 첫 시도는 기다리지 않고 바로 응답하고, 이 값들은 (1) 첫 시도가 그 자리에서
+// 바로 실패했을 때의 동기 재시도, (2) 첫 시도가 성공한 것처럼 보였다가 나중에 조용히 죽었을 때의
+// 백그라운드 복구, 이 두 경우에만 쓰인다 — "나중에 다른 원인의 버그가 있을 수 있다"는 가능성에 대비한
+// 안전망이지, 정상 경로의 일부가 아니다. 사용자 피드백: "쭉은 아니고 텀을 두고 세 번 정도".
 const RESUME_SETTLE_CHECK_MS = 13000;
 const RESUME_RETRY_GAP_MS = 5000;
 const MAX_RESUME_ATTEMPTS = 3;
 // internalId -> 지금 몇 번째/최대 몇 번 재시도 중인지 — 렌더러가 채팅창에 "재시도 중 (n/m)"으로
-// 보여줄 수 있게 buildSessionRowsInternal이 SessionRow에 실어서 내려준다.
+// 보여줄 수 있게 buildSessionRowsInternal이 SessionRow에 실어서 내려준다. 정상 경로(첫 시도가 바로
+// 성공)에서는 채워지지 않는다 — 실제로 재시도(동기든 백그라운드든)에 들어갔을 때만 채워진다.
 const resumeRetryStatus = new Map<string, { attempt: number; max: number }>();
 
 // 팀장/팀원 오프라인 확정 유예(아래 LEAD_OFFLINE_GRACE_MS/MEMBER_MISS_GRACE_MS)는 반드시
@@ -88,7 +84,10 @@ const resumeRetryStatus = new Map<string, { attempt: number; max: number }>();
 // resumeSpawnWithRetry가 추가된 뒤로는 "resume 한 번"의 최악 시간이 RUN_CLAUDE_TIMEOUT_MS
 // 하나가 아니라 (RUN_CLAUDE_TIMEOUT_MS + 크래시 확인 대기) x 최대 재시도 횟수 + 재시도 사이 간격
 // 전부를 더한 값이다 — 바로 위 주석이 경고하는 실수(타임아웃만 늘리고 유예는 안 늘리는 것)를
-// 그대로 반복하지 않기 위해 이것도 계산식에 포함한다.
+// 그대로 반복하지 않기 위해 이것도 계산식에 포함한다. 첫 시도가 바로 성공하는 정상 경로는 이제 이
+// 시간의 극히 일부만 쓰지만(크래시 확인 대기 없이 바로 반환), 실패해서 동기 재시도로 넘어가는
+// 최악의 경우엔 여전히 이 계산이 그대로 적용되므로 값 자체는 안전 쪽으로 그대로 둔다(과대추정이라도
+// 유예가 모자란 것보다 낫다).
 const RESUME_SPAWN_WORST_CASE_MS =
   MAX_RESUME_ATTEMPTS * (RUN_CLAUDE_TIMEOUT_MS + RESUME_SETTLE_CHECK_MS) + (MAX_RESUME_ATTEMPTS - 1) * RESUME_RETRY_GAP_MS;
 const STOP_AND_RELAUNCH_WORST_CASE_MS = STOP_SESSION_TIMEOUT_MS + RESUME_SPAWN_WORST_CASE_MS;
@@ -1792,20 +1791,41 @@ function queueLeadOperation<T>(internalId: string, fn: () => Promise<T>): Promis
 // 일이었다(대조 실험: 플래그 없이 --resume만 쓴 그룹은 5/5 전부 같은 session-id로 정상 재개, 크래시도
 // 포크도 0건). 그래서 여기서는 --resume에 mcp-config류를 아예 실어 보내지 않는다 — 최초 실행 때 이미
 // 저장된 mcp-config/allowedTools/model을 CLI가 그대로 물려받으므로 다시 넘길 필요가 없다(이 팀장이
-// 처음 뜰 때 설정한 spawn_team_member 허용은 계속 유효하다). 그럼에도 남을 수 있는 다른 원인의 크래시를
-// 대비해 간격을 두고 재시도하는 안전장치는 유지한다. 호출부(resumeLead)는 internalId를 넘겨서,
-// 재시도 중인 동안 resumeRetryStatus에 진행 상황(몇 번째/최대 몇 번)을 남겨 렌더러가 "재시도 중"
-// 표시를 할 수 있게 한다.
-async function resumeSpawnWithRetry(internalId: string, current: LeadRecord, message: string): Promise<string | null> {
+// 처음 뜰 때 설정한 spawn_team_member 허용은 계속 유효하다).
+//
+// runClaudeBg는 CLI가 stdout에 "started a copy as <id>"라고 직접 알려주는 케이스를 문자열 매칭으로
+// 이미 걸러낸다(extractStartedCopyId) — 다만 이건 CLI의 정확한 영어 문구에 의존하는 약한 신호라,
+// 문구가 조금만 바뀌거나 예상 못 한 포맷으로 나오면 조용히 못 잡아낼 수 있다(extractBackgroundedId가
+// 예전에 ANSI 코드 때문에 바로 이런 식으로 조용히 실패한 전례가 있다). 그래서 문구 매칭과는 독립적인
+// 두 번째 방어선을 둔다: 정상 resume은 항상 같은 짧은 id로 깨어난다는 사실 자체(위 stopSession 주석
+// 참고, "woke session ... with its saved options"로 확인됨)를 이용해, 돌아온 짧은 id가 resume 전
+// id(current.id)와 다르면 문구를 못 알아봤어도 복사본으로 단정하고 정리한다(resumeOnce).
+function resumeOnce(internalId: string, current: LeadRecord, message: string, attempt: number): Promise<string | null> {
+  return runClaudeBg(['--bg', '--resume', current.sessionId, message], current.targetDir).then(candidateId => {
+    if (!candidateId) return null;
+    if (candidateId !== current.id) {
+      logCritical(
+        `[resumeLead] 팀장 ${internalId}의 resume 시도 ${attempt}/${MAX_RESUME_ATTEMPTS}가 다른 짧은 id로 떴습니다` +
+        `(${current.id} → ${candidateId}) — "started a copy" 문구를 놓쳤더라도 id 불일치로 복사본임을 감지해 정리합니다.`
+      );
+      spawn('claude', ['stop', candidateId], { stdio: 'ignore' }).on('error', () => { /* best-effort 정리 */ });
+      return null;
+    }
+    return candidateId;
+  });
+}
+
+// 실제로 실패가 확인된 뒤(동기 재시도든, 아래 scheduleBackgroundResumeHealing의 뒤늦은 발견이든)에만
+// 호출된다 — 간격을 두고 startAttempt부터 MAX_RESUME_ATTEMPTS까지 재시도하고, 이번엔(이미 한 번
+// 실패한 뒤라) 매 시도마다 RESUME_SETTLE_CHECK_MS만큼 기다렸다가 여전히 살아있는지 확인하고서야
+// 성공으로 확정한다 — 재시도 국면에서는 이 정도 신중함이 정상 경로의 지연보다 훨씬 싸다.
+async function resumeRetryFrom(internalId: string, current: LeadRecord, message: string, startAttempt: number): Promise<string | null> {
   try {
-    for (let attempt = 1; attempt <= MAX_RESUME_ATTEMPTS; attempt++) {
+    for (let attempt = startAttempt; attempt <= MAX_RESUME_ATTEMPTS; attempt++) {
       resumeRetryStatus.set(internalId, { attempt, max: MAX_RESUME_ATTEMPTS });
-      const candidateId = await runClaudeBg(['--bg', '--resume', current.sessionId, message], current.targetDir);
+      await new Promise(resolve => setTimeout(resolve, RESUME_RETRY_GAP_MS));
+      const candidateId = await resumeOnce(internalId, current, message, attempt);
       if (candidateId) {
-        // "backgrounded" 마커는 찍었지만 소스 세션을 못 찾아 몇 초 뒤 조용히 죽는 사고가 있다 —
-        // 원인 불문하고 관측된 크래시들이 spawn 후 십수 초 안에 일어났으므로 그 시점까지 기다렸다가
-        // 여전히 agents 목록에 있는지 확인해야, 죽어버릴 세션을 성공으로 착각해 leads.json에 기록하는
-        // 사고(대화 기록을 통째로 잃은 것처럼 보이는 원인)를 막을 수 있다.
         await new Promise(resolve => setTimeout(resolve, RESUME_SETTLE_CHECK_MS));
         let survived: boolean;
         try {
@@ -1817,14 +1837,66 @@ async function resumeSpawnWithRetry(internalId: string, current: LeadRecord, mes
         if (survived) return candidateId;
         logCritical(`[resumeLead] 팀장 ${internalId}의 resume 시도 ${attempt}/${MAX_RESUME_ATTEMPTS}가 크래시한 것으로 보입니다(${candidateId}, 원인 미확정).`);
       } else {
-        logCritical(`[resumeLead] 팀장 ${internalId}의 resume 시도 ${attempt}/${MAX_RESUME_ATTEMPTS}가 "backgrounded" 마커조차 못 찍고 실패했습니다.`);
+        logCritical(`[resumeLead] 팀장 ${internalId}의 resume 시도 ${attempt}/${MAX_RESUME_ATTEMPTS}가 실패했습니다("backgrounded" 마커 없음/타임아웃 또는 복사본으로 감지되어 정리됨).`);
       }
-      if (attempt < MAX_RESUME_ATTEMPTS) await new Promise(resolve => setTimeout(resolve, RESUME_RETRY_GAP_MS));
     }
     return null;
   } finally {
     resumeRetryStatus.delete(internalId);
   }
+}
+
+// 첫 시도가 성공한 것처럼 보인(같은 짧은 id로 backgrounded 마커까지 찍은) 뒤에도, 남을 수 있는 다른
+// 원인으로 몇 초 뒤 조용히 죽을 가능성 자체는 배제 못 한다 — 그렇다고 매번 정상 경로에서 13초씩 막고
+// 기다리는 건 손해가 더 크므로(resumeSpawnWithRetry 위 상수 주석 참고), 확인은 백그라운드로 미루고
+// 응답은 즉시 돌려준다. RESUME_SETTLE_CHECK_MS 뒤에 그 짧은 id가 여전히 agents 목록에 있는지만
+// 조용히 확인하고, 죽어있으면 그때 가서 resumeRetryFrom으로 복구를 시도한다 — 같은 internalId의
+// queueLeadOperation을 통해서(그사이 사용자가 새 메시지를 보내거나 재시작했을 수 있으니, 우리가
+// 감시하던 세션이 여전히 leads.json의 "현재" 세션일 때만 개입한다).
+function scheduleBackgroundResumeHealing(internalId: string, current: LeadRecord, message: string, expectedId: string): void {
+  setTimeout(() => {
+    queueLeadOperation(internalId, async () => {
+      const leads = loadLeads();
+      const rec = leads.find(l => l.internalId === internalId);
+      if (!rec || rec.id !== expectedId) return; // 이미 다른 작업으로 대체됨 — 간섭하지 않는다.
+      let survived: boolean;
+      try {
+        const agents = await fetchAgentsStrict();
+        survived = agents.some(a => a.id === expectedId);
+      } catch {
+        return; // 생존 확인 자체가 실패하면, 정말 죽었는지도 모르는 채로 또 stop/resume을 거는 게
+                // 더 위험하다 — 다음 폴링이나 사용자 조작 때 다시 기회가 있으니 여기서는 그냥 넘어간다.
+      }
+      if (survived) return;
+      logCritical(`[resumeLead] 팀장 ${internalId}(${expectedId})가 백그라운드 확인(spawn 후 ${RESUME_SETTLE_CHECK_MS}ms) 중 사라진 것을 발견했습니다 — 재시도로 복구를 시도합니다.`);
+      const healedId = await resumeRetryFrom(internalId, current, message, 2);
+      if (!healedId) {
+        logCritical(`[resumeLead] 팀장 ${internalId} 백그라운드 복구가 남은 재시도를 모두 실패했습니다 — 이 팀장이 실제로 오프라인 상태일 수 있어 수동 확인이 필요합니다.`);
+        return;
+      }
+      const newSessionId = await findSessionIdByShortIdRetrying(healedId);
+      const latestLeads = loadLeads();
+      const latestRec = latestLeads.find(l => l.internalId === internalId);
+      if (latestRec && latestRec.id === expectedId) {
+        latestRec.id = healedId;
+        if (newSessionId) latestRec.sessionId = newSessionId;
+        saveLeads(latestLeads);
+      }
+    }).catch(err => logCritical(`[resumeLead] 팀장 ${internalId} 백그라운드 복구 큐 처리 중 오류가 났습니다: ${err}`));
+  }, RESUME_SETTLE_CHECK_MS);
+}
+
+// 호출부(resumeLead)는 internalId를 넘겨서, 재시도 중인 동안 resumeRetryStatus에 진행 상황(몇 번째/
+// 최대 몇 번)을 남겨 렌더러가 "재시도 중" 표시를 할 수 있게 한다. 정상 경로(첫 시도가 바로 성공)에서는
+// 이 함수가 즉시 반환하고 resumeRetryStatus를 건드리지 않는다 — 재시도 인프라(resumeRetryFrom)는 첫
+// 시도가 그 자리에서 바로 실패했을 때만 동기적으로 쓰인다.
+async function resumeSpawnWithRetry(internalId: string, current: LeadRecord, message: string): Promise<string | null> {
+  const candidateId = await resumeOnce(internalId, current, message, 1);
+  if (!candidateId) {
+    return resumeRetryFrom(internalId, current, message, 2);
+  }
+  scheduleBackgroundResumeHealing(internalId, current, message, candidateId);
+  return candidateId;
 }
 
 // 큐에서 대기하는 동안 앞선 작업(예: 재시작)이 이미 이 팀장의 짧은 id/sessionId를 바꿔놨을 수
