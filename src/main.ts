@@ -11,8 +11,9 @@ import { writeJsonFileAtomic } from './lib/jsonFile';
 import { TEAM_MEMBER_BRIEFING, TEAM_MEMBER_STANDBY_NOTE } from './lib/teamMemberBriefing';
 import { looksLikeApprovalRequest, parseStallVerdict, isStatusEligibleForStall, shouldCheckStall, shouldSendNudge } from './lib/stallGuard';
 import { MEMBER_MODEL_OPTIONS, clampMinutes, normalizeMemberModel } from './lib/appSettings';
+import { extractBackgroundedId } from './lib/claudeBgOutput';
+import { CLAUDE_HOME, MEMBERS_DIR } from './lib/teamMemberPaths';
 
-const CLAUDE_HOME = path.join(os.homedir(), '.claude');
 const SESSION_EDITS_DIR = path.join(CLAUDE_HOME, 'session-edits');
 const JOURNAL_DATA_DIR = path.join(CLAUDE_HOME, 'daily-journal', 'data');
 const PROJECTS_DIR = path.join(CLAUDE_HOME, 'projects');
@@ -26,8 +27,7 @@ const STALL_ALERTS_PATH = path.join(app.getPath('userData'), 'stallAlerts.json')
 const SETTINGS_PATH = path.join(app.getPath('userData'), 'settings.json');
 // 팀장 세션(claude 프로세스, 이 앱과 별개)도 알아야 하는 고정 경로라서 앱 userData가 아니라 ~/.claude 밑에 둔다.
 const REQUESTS_DIR = path.join(CLAUDE_HOME, 'claude-team-monitor', 'requests');
-// 팀장이 실제로 띄운 팀원을 등록해두는 곳 — 이게 있어야 "무관하게 떠있는 다른 세션"과 "진짜 내 팀원"을 구분한다.
-const MEMBERS_DIR = path.join(CLAUDE_HOME, 'claude-team-monitor', 'members');
+// MEMBERS_DIR은 lib/teamMemberPaths에서 가져온다 — 팀원 생성 MCP 서버도 똑같은 경로를 써야 한다.
 
 // ---------------- 타이밍 상수 ----------------
 // 유예/타임아웃 값들이 파일 전체에 흩어져 있으면 서로 값이 겹치거나 모순되는지 한눈에 알기
@@ -210,6 +210,13 @@ type LeadRecord = {
   // queueLeadNotice로 재촉 메시지를 보낸다. 기본값(없음/false)은 반자동 — 안전 게이트(blocked
   // 하드 게이트·정규식 안전장치)는 이 값과 무관하게 항상 적용된다. 사용자가 팀장 카드에서 직접 켠다.
   autoStallNudge?: boolean;
+  // 팀원 생성 MCP 서버(src/mcp/teamMemberServer.ts)가 "이 프로세스가 어느 팀장인지"를 알아내는
+  // 상관값. sessionId를 그대로 못 쓰는 이유: launchTeamLead/restartLead처럼 새 세션을 스폰하는
+  // 경로는 claude --bg 실행 전엔 결과 sessionId를 알 수 없어서(CLI가 실행 후에 발급), 스폰 전에
+  // --mcp-config 환경변수로 미리 넘겨줄 값이 필요하다 — 그래서 이 앱이 스폰 직전에 직접 발급하는
+  // 별도 토큰을 쓴다. 짧은 id/sessionId와 달리 매 재개(resume)/재시작마다 새로 발급해도 무방하다
+  // (이 프로세스 인스턴스 하나의 수명 동안만 유효하면 됨 — internalId처럼 영구히 안정적일 필요는 없다).
+  mcpToken?: string;
 };
 
 // 'dir-approval': 사전 승인 안 된 디렉토리에 팀원을 새로 띄우고 싶을 때(requestedDir 사용).
@@ -1484,17 +1491,56 @@ function runClaudeBg(args: string[], cwd: string): Promise<string | null> {
     }, RUN_CLAUDE_TIMEOUT_MS);
     child.stdout?.on('data', d => { out += d.toString(); });
     child.on('close', () => {
-      const m = out.match(/backgrounded\s*[·:]\s*([a-f0-9]+)/i);
-      if (!m) {
+      const id = extractBackgroundedId(out);
+      if (!id) {
         console.error('[runClaudeBg] claude stdout에서 "backgrounded" 마커를 찾지 못했습니다. 원문:', out);
       }
-      finish(m ? m[1] : null);
+      finish(id);
     });
     child.on('error', err => {
       console.error('[runClaudeBg] claude 프로세스를 실행하지 못했습니다:', err);
       finish(null);
     });
   }));
+}
+
+// 팀원 생성 MCP 서버(src/mcp/teamMemberServer.ts, 빌드되면 dist/teamMemberServer.js)를 팀장
+// 세션에 붙여주는 CLI 인자들. stdio 방식이라 claude CLI 자신이 이 서버를 자식 프로세스로 실행하고
+// 세션 종료 시 같이 정리한다 — 이 앱이 따로 띄워두거나 관리할 필요가 없다.
+// --allowedTools로 이 툴 하나만 미리 승인해둔다(실측 확인: 승인 안 해두면 팀장 세션이 이
+// 백그라운드 세션이라 아무도 응답 못 하는 권한 프롬프트에 막혀버린다 — --dangerously-skip-permissions처럼
+// 전체를 우회하는 게 아니라 이 툴 하나만 화이트리스트에 추가하는 것이라 "권한을 절대 우회하지
+// 않는다"는 SKILL.md 원칙과 배치되지 않는다).
+const MEMBER_SPAWN_MCP_SERVER_NAME = 'team-monitor';
+const MEMBER_SPAWN_TOOL_NAME = `mcp__${MEMBER_SPAWN_MCP_SERVER_NAME}__spawn_team_member`;
+
+function buildMemberSpawnCliArgs(mcpToken: string): string[] {
+  const config = {
+    mcpServers: {
+      [MEMBER_SPAWN_MCP_SERVER_NAME]: {
+        command: 'node',
+        args: [path.join(__dirname, 'teamMemberServer.js')],
+        env: {
+          TEAM_MONITOR_LEAD_TOKEN: mcpToken,
+          TEAM_MONITOR_LEADS_PATH: LEADS_PATH,
+        },
+      },
+    },
+  };
+  return ['--mcp-config', JSON.stringify(config), '--allowedTools', MEMBER_SPAWN_TOOL_NAME];
+}
+
+// 기존(이미 leads.json에 있는) 팀장 레코드에 새 토큰을 발급해 즉시 저장한다 — resumeLead/
+// restartLead처럼 스폰 전에 이미 internalId를 아는 경로에서 쓴다. 다른 팀장의 동시 변경을
+// 덮어쓰지 않도록, 스폰 직전에 다시 읽어서 쓴다(forkSessionAsLead 등과 같은 패턴).
+// 짧은 id/sessionId와 달리 mcpToken은 안정적으로 유지할 필요가 없어서(이 프로세스 인스턴스
+// 하나의 수명 동안만 유효하면 됨) 매번 새로 발급해도 무방하다.
+function issueMcpToken(internalId: string): string {
+  const token = crypto.randomUUID();
+  const leads = loadLeads();
+  const rec = leads.find(l => l.internalId === internalId);
+  if (rec) { rec.mcpToken = token; saveLeads(leads); }
+  return token;
 }
 
 // claude --bg --resume <id>는 그 세션이 아직 살아있으면 "복사본"을 새로 만들어버린다(실측 확인) —
@@ -1566,7 +1612,8 @@ async function resumeLead(internalId: string, message: string): Promise<string |
   if (isCurrentlyLive) {
     await stopSession(current.id);
   }
-  const newId = await runClaudeBg(['--bg', '--resume', current.sessionId, message], current.targetDir);
+  const mcpToken = issueMcpToken(internalId);
+  const newId = await runClaudeBg(['--bg', ...buildMemberSpawnCliArgs(mcpToken), '--resume', current.sessionId, message], current.targetDir);
   // stop 후 resume하면 보통 같은 짧은 id로 깨어나지만(실측 확인), 혹시 달라지는 경우를 대비해 갱신해둔다.
   if (newId && newId !== current.id) {
     const leads = loadLeads();
@@ -1603,7 +1650,8 @@ async function restartLead(internalId: string, instruction: string): Promise<{ i
   const { paths: approvedMembers, text: approvedText } = approvedMemberBriefing(current.targetDir);
   const prompt = `/team-lead ${instruction}\n\n${approvedText}`;
 
-  const newId = await runClaudeBg(['--bg', prompt], current.targetDir);
+  const mcpToken = issueMcpToken(internalId);
+  const newId = await runClaudeBg(['--bg', ...buildMemberSpawnCliArgs(mcpToken), prompt], current.targetDir);
   if (!newId) {
     return { error: `claude --bg가 ${RUN_CLAUDE_TIMEOUT_MS / 1000}초 안에 새 세션 시작을 확인해주지 못했습니다(타임아웃 또는 "backgrounded" 표시를 못 찾음). claude CLI 로그인/설치 상태를 확인해보세요 — 자세한 로그는 앱 콘솔에 남습니다.` };
   }
@@ -1674,7 +1722,10 @@ async function launchTeamLead(targetDir: string, instruction: string): Promise<s
   const { paths: approvedMembers, text: approvedText } = approvedMemberBriefing(targetDir);
   const prompt = `/team-lead ${instruction}\n\n${approvedText}`;
 
-  const id = await runClaudeBg(['--bg', prompt], targetDir);
+  // 아직 leads.json 레코드가 없어서(브랜드 뉴 팀장) issueMcpToken을 못 쓴다 — 스폰 전에 직접
+  // 발급해서 --mcp-config에 실은 뒤, 스폰 성공 후 같은 값을 새 레코드에 그대로 저장한다.
+  const mcpToken = crypto.randomUUID();
+  const id = await runClaudeBg(['--bg', ...buildMemberSpawnCliArgs(mcpToken), prompt], targetDir);
   if (!id) return null;
 
   // 막 시작한 세션은 첫 턴을 처리 중일 수 있어 곧바로 stop시키면 방해가 된다 — 그래서 이 시점엔 자기 id를
@@ -1683,7 +1734,7 @@ async function launchTeamLead(targetDir: string, instruction: string): Promise<s
   const sessionId = (await findSessionIdByShortId(id)) ?? id;
 
   const leads = loadLeads();
-  leads.push({ id, sessionId, targetDir, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID() });
+  leads.push({ id, sessionId, targetDir, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID(), mcpToken });
   saveLeads(leads);
 
   return id;
@@ -1764,6 +1815,10 @@ async function adoptLead(shortId: string): Promise<string | null> {
     launchedAt: agent.startedAt ?? Date.now(),
     approvedMembers,
     internalId: crypto.randomUUID(),
+    // 이미 떠 있는 프로세스를 등록만 하는 경로라 --mcp-config를 지금 붙일 방법이 없다(그 값은
+    // 세션 시작 시점에만 줄 수 있다) — 여기서 발급해두면 다음 stop→resume(채팅 전송 등) 때부터
+    // resumeLead가 이 값을 이어받아 팀원 생성 툴을 쓸 수 있게 된다.
+    mcpToken: crypto.randomUUID(),
   });
   saveLeads(leads);
   return agent.id!;
@@ -1792,8 +1847,11 @@ async function forkSessionAsLead(sessionId: string, cwd: string): Promise<string
     return queueLeadOperation(existing.internalId, () =>
       resumeLead(existing.internalId, '지금 이 대화를 Claude Team Monitor로 다시 불러왔습니다. 계속 진행하세요.'));
   }
+  // 아직 leads.json 레코드가 없어서(브랜드 뉴 팀장) issueMcpToken을 못 쓴다 — launchTeamLead와
+  // 같은 이유로 스폰 전에 직접 발급한다.
+  const mcpToken = crypto.randomUUID();
   const id = await runClaudeBg(
-    ['--bg', '--resume', sessionId, '지금 이 대화를 Claude Team Monitor로 가져왔습니다(별도 복사본, 원본 세션과는 별개). 계속 진행하세요.'],
+    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), '--resume', sessionId, '지금 이 대화를 Claude Team Monitor로 가져왔습니다(별도 복사본, 원본 세션과는 별개). 계속 진행하세요.'],
     cwd,
   );
   if (!id) return null;
@@ -1805,7 +1863,7 @@ async function forkSessionAsLead(sessionId: string, cwd: string): Promise<string
   // 재현 확인됨). launchTeamLead/adoptLead/resumeLead/restartLead와 같은 패턴대로, 쓰기 직전에
   // 다시 읽어서 최신 상태 위에 얹는다.
   const latestLeads = loadLeads();
-  latestLeads.push({ id, sessionId: newSessionId, targetDir: cwd, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID() });
+  latestLeads.push({ id, sessionId: newSessionId, targetDir: cwd, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID(), mcpToken });
   saveLeads(latestLeads);
   return id;
 }

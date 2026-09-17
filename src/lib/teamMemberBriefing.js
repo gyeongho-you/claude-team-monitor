@@ -1,9 +1,8 @@
 // 모든 팀원 프롬프트 맨 앞에 붙는 공통 브리핑. 이 앱(Claude Team Monitor)이 직접 등록하는
-// 팀원(launchMember)뿐 아니라, SKILL.md 안내를 따라 팀장이 직접 `claude --bg`로 띄우는 팀원에도
-// 반드시 똑같은 문구가 전달돼야 한다(안 그러면 팀원이 개인 인터랙티브 세션처럼 굴다가 되묻고
-// 멈춘다). SKILL.md는 마크다운이라 이 모듈을 그대로 import할 수 없어서 완전 자동 동기화는 못
-// 하지만, tests/skillBriefingSync.test.js가 SKILL.md 안에 아래 문구가 그대로 포함돼있는지
-// 검증해서 둘이 어긋나면 테스트가 실패하게 한다 — 사실상의 동기화 검증이다.
+// 팀원(launchMember, main.ts)뿐 아니라, 팀장이 mcp__team-monitor__spawn_team_member 툴로
+// 만드는 팀원(src/mcp/teamMemberServer.ts)에도 반드시 똑같은 문구가 전달돼야 한다(안 그러면
+// 팀원이 개인 인터랙티브 세션처럼 굴다가 되묻고 멈춘다). 두 곳 다 이 모듈을 그대로 import해서
+// 쓰므로 자동으로 동기화된다 — tests/skillBriefingSync.test.js가 그 import 관계를 검증한다.
 const TEAM_MEMBER_BRIEFING = [
   '너는 지금 "팀장" 세션이 배정한 "팀원" 세션이다. 사람이 실시간으로 지켜보며 답해주는 세션이 아니니, 중간에 사용자에게 되묻지 말고 스스로 판단해서 진행해라.',
   '정보가 부족하면 저장소 안에서 직접 조사해서 합리적으로 판단하고, 정말로 진행이 불가능할 때만 왜 막혔는지를 최종 답변에 명확히 남기고 멈춰라(질문만 던지고 끝내지 마라).',
@@ -13,10 +12,10 @@ const TEAM_MEMBER_BRIEFING = [
 ].join('\n\n');
 
 // launchMember(main.ts)로 이 앱이 직접 팀원을 띄울 때만 붙는 문구 — "역할·지시를 먼저 등록해두고
-// 나중에 시작 신호를 보낸다"는 앱 UI의 2단계 흐름 때문에 필요하다. SKILL.md가 안내하는, 팀장이
-// 직접 Bash로 띄우는 흐름은 한 번의 명령에 실제 작업 지시를 통째로 담아 보내는 구조라 이 대기
-// 단계 자체가 없다 — 그래서 SKILL.md엔 이 문구를 넣지 않으며, TEAM_MEMBER_BRIEFING과 달리
-// SKILL.md 동기화 테스트 대상도 아니다.
+// 나중에 시작 신호를 보낸다"는 앱 UI의 2단계 흐름 때문에 필요하다. 팀장이 spawn_team_member
+// 툴로 띄우는 흐름은 한 번의 호출에 실제 작업 지시를 통째로 담아 보내는 구조라 이 대기 단계
+// 자체가 없다 — teamMemberServer.ts는 이 문구를 쓰지 않는다(tests/skillBriefingSync.test.js가
+// 검증).
 const TEAM_MEMBER_STANDBY_NOTE = '아래는 앞으로 맡을 작업에 대한 참고용 사전 지시다 — 이번 턴에서 곧바로 실행하지 마라. 내용을 확인했다는 짧은 준비 완료 응답만 남기고(예: "확인했습니다. 아래 작업을 맡을 준비가 됐습니다."), 실제로 작업을 시작하라는 팀장의 다음 메시지가 올 때까지 기다려라. 팀장이 다시 메시지를 보내기 전까지는 어떤 파일도 고치거나 만들지 마라.';
 
 module.exports = { TEAM_MEMBER_BRIEFING, TEAM_MEMBER_STANDBY_NOTE };
