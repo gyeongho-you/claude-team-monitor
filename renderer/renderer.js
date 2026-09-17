@@ -711,6 +711,13 @@ function movePendingChatTurns(fromLeadId, toLeadId) {
 // 팀장 자신이 busy인지, busy는 아니지만 소속 팀원이 아직 작업 중이라 사실상 대기 중인지를
 // 배너 문구로 계산한다.
 function computeBusyBannerHtml(row) {
+  // resumeSpawnWithRetry가 daemon 레이스로 인한 크래시를 재시도하는 중이면(main.ts 참고) 다른 어떤
+  // 상태보다도 먼저 보여준다 — 이 구간은 이 팀장이 잠깐 오프라인처럼 보일 수 있어서(stop 이후,
+  // 재시도용 재spawn 전) 사용자가 "채팅이 안 간다"고 오해하기 딱 좋은 타이밍이다.
+  if (row && row.resumeRetrying) {
+    const { attempt, max } = row.resumeRetrying;
+    return `<div class="chat-working">🔄 재연결 재시도 중 (${attempt}/${max})...</div>`;
+  }
   const ownStatus = row && !row.offline ? getStatus(row) : '';
   const isBusy = ownStatus === 'busy';
   const waitingOnMember = !isBusy && !!row && (ownStatus === 'idle' || ownStatus === 'done') && hasBusyMember(row.id);

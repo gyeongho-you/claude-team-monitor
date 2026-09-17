@@ -54,6 +54,20 @@ const STOP_SESSION_TIMEOUT_MS = 15000;
 // 낭비하지 않기 위한 회로차단기(팀원 코드리뷰에서 지적).
 const MAX_NOTICE_DELIVERY_ATTEMPTS = 5;
 
+// resumeLead가 stop 직후 --resume을 걸었을 때, daemon이 방금 죽은 세션을 아직 "재개 가능" 상태로
+// 정리하기 전이라 "source session ... not found"로 크래시하는 레이스(실사용 재현: 2026-09-17,
+// 3초 유예만으로는 부족한 사례가 실제로 나왔다)를 겪을 수 있다. 크래시 여부는 spawn 직후 바로 알 수
+// 없고(그 세션이 "backgrounded" 마커까지는 정상적으로 찍은 뒤 한참 있다가서야 죽는다), 실측으로 확인된
+// 크래시 시점(spawn 후 약 12초)보다 넉넉히 더 기다려서 그때도 살아있으면 진짜 성공으로 본다. 그래도
+// 실패하면(레이스가 반복되거나 다른 이유든) 간격을 두고 최대 이 횟수만큼 재시도한다 — 사용자 피드백:
+// "쭉은 아니고 텀을 두고 세 번 정도".
+const RESUME_SETTLE_CHECK_MS = 13000;
+const RESUME_RETRY_GAP_MS = 5000;
+const MAX_RESUME_ATTEMPTS = 3;
+// internalId -> 지금 몇 번째/최대 몇 번 재시도 중인지 — 렌더러가 채팅창에 "재시도 중 (n/m)"으로
+// 보여줄 수 있게 buildSessionRowsInternal이 SessionRow에 실어서 내려준다.
+const resumeRetryStatus = new Map<string, { attempt: number; max: number }>();
+
 // 팀장/팀원 오프라인 확정 유예(아래 LEAD_OFFLINE_GRACE_MS/MEMBER_MISS_GRACE_MS)는 반드시
 // "정상적인 stop→resume 재기동이 최악의 경우 걸릴 수 있는 시간"보다 커야 한다 — 그렇지 않으면
 // 재기동이 끝나기도 전에 유예가 먼저 끝나서, 아직 살아있는(그저 느리게 재기동 중인) 팀장/팀원을
@@ -64,7 +78,13 @@ const MAX_NOTICE_DELIVERY_ATTEMPTS = 5;
 // 생기기 쉬우므로, 유예를 하드코딩하지 않고 두 타임아웃의 합(stopSession이 최악으로 다 걸리고
 // 그 뒤 runClaudeBg도 최악으로 다 걸리는 순차 케이스) + 여유분으로 계산한다 — 앞으로 타임아웃만
 // 늘리고 유예를 깜빡하는 실수 자체가 구조적으로 나지 않게 하기 위함이다.
-const STOP_AND_RELAUNCH_WORST_CASE_MS = STOP_SESSION_TIMEOUT_MS + RUN_CLAUDE_TIMEOUT_MS;
+// resumeSpawnWithRetry가 추가된 뒤로는 "resume 한 번"의 최악 시간이 RUN_CLAUDE_TIMEOUT_MS
+// 하나가 아니라 (RUN_CLAUDE_TIMEOUT_MS + 크래시 확인 대기) x 최대 재시도 횟수 + 재시도 사이 간격
+// 전부를 더한 값이다 — 바로 위 주석이 경고하는 실수(타임아웃만 늘리고 유예는 안 늘리는 것)를
+// 그대로 반복하지 않기 위해 이것도 계산식에 포함한다.
+const RESUME_SPAWN_WORST_CASE_MS =
+  MAX_RESUME_ATTEMPTS * (RUN_CLAUDE_TIMEOUT_MS + RESUME_SETTLE_CHECK_MS) + (MAX_RESUME_ATTEMPTS - 1) * RESUME_RETRY_GAP_MS;
+const STOP_AND_RELAUNCH_WORST_CASE_MS = STOP_SESSION_TIMEOUT_MS + RESUME_SPAWN_WORST_CASE_MS;
 const OFFLINE_GRACE_BUFFER_MS = 15000; // 폴링 지연·시스템 부하 등을 감안한 추가 여유분(위 두 타임아웃의 합 위에 더 얹는다).
 
 // 유예 기간이 지난, 멀쩡히 동작 중이던 팀원도 claude stop→resume되는 그 짧은 순간(프로세스가 잠깐
@@ -150,6 +170,9 @@ type SessionRow = AgentEntry & {
   // 전환해버려 사용자 모르게 대화창이 엉뚱한 팀장으로 바뀔 수 있었다.
   internalId?: string;
   autoStallNudge?: boolean; // 팀장 카드일 때만: 정체 감시가 확인 없이 곧바로 재촉 메시지를 보낼지
+  // 팀장 카드일 때만: resumeSpawnWithRetry가 daemon 레이스로 인한 크래시를 재시도하는 중이면
+  // 채워진다 — 렌더러가 채팅창에 "재시도 중 (n/m)"으로 보여준다.
+  resumeRetrying?: { attempt: number; max: number };
 };
 
 type TranscriptEntry = { time: string; prompt: string; answer: string };
@@ -1398,6 +1421,12 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
   const { rows: graceRows, leadsDirty: graceLeadsDirty } = buildGraceRows(leads, agentIdSet, offlineLeads, members);
   if (graceLeadsDirty) saveLeads(leads);
   const rows = [...liveRows, ...graceRows, ...offlineRows];
+  for (const row of rows) {
+    if (row.isLead && row.internalId) {
+      const retryState = resumeRetryStatus.get(row.internalId);
+      if (retryState) row.resumeRetrying = retryState;
+    }
+  }
 
   pruneMissingKeys(lastKnownLiveLeadRow, new Set(leads.map(l => l.id)));
   cleanupStaleMembers(members, agentIdSet, now);
@@ -1719,6 +1748,41 @@ function queueLeadOperation<T>(internalId: string, fn: () => Promise<T>): Promis
   return run;
 }
 
+// resumeLead가 --resume을 건 뒤, 그 세션이 daemon 레이스로 몇 초 뒤 조용히 크래시하는지(실사용
+// 재현: 2026-09-17) 확인해서, 크래시했으면 간격을 두고 다시 시도한다 — 성공한(끝까지 살아있던) 짧은
+// id만 반환한다. 호출부(resumeLead)는 internalId를 넘겨서, 재시도 중인 동안 resumeRetryStatus에
+// 진행 상황(몇 번째/최대 몇 번)을 남겨 렌더러가 "재시도 중" 표시를 할 수 있게 한다.
+async function resumeSpawnWithRetry(internalId: string, current: LeadRecord, message: string, mcpToken: string): Promise<string | null> {
+  try {
+    for (let attempt = 1; attempt <= MAX_RESUME_ATTEMPTS; attempt++) {
+      resumeRetryStatus.set(internalId, { attempt, max: MAX_RESUME_ATTEMPTS });
+      const candidateId = await runClaudeBg(['--bg', ...buildMemberSpawnCliArgs(mcpToken), '--resume', current.sessionId, message], current.targetDir);
+      if (candidateId) {
+        // "backgrounded" 마커는 찍었지만 daemon이 소스 세션을 못 찾아 몇 초 뒤 조용히 죽는 레이스가
+        // 있다(실측: 크래시가 spawn 후 약 12초 뒤에 일어남) — 그 시점까지 넉넉히 기다렸다가 여전히
+        // agents 목록에 있는지 확인해야, 죽어버릴 세션을 성공으로 착각해 leads.json에 기록하는
+        // 사고(대화 기록을 통째로 잃은 것처럼 보이는 원인)를 막을 수 있다.
+        await new Promise(resolve => setTimeout(resolve, RESUME_SETTLE_CHECK_MS));
+        let survived: boolean;
+        try {
+          const agents = await fetchAgentsStrict();
+          survived = agents.some(a => a.id === candidateId);
+        } catch {
+          survived = true; // 확인 자체가 실패하면 fail-closed(성공으로 간주) — 불필요한 재시도를 피한다.
+        }
+        if (survived) return candidateId;
+        logCritical(`[resumeLead] 팀장 ${internalId}의 resume 시도 ${attempt}/${MAX_RESUME_ATTEMPTS}가 daemon 레이스로 크래시한 것으로 보입니다(${candidateId}).`);
+      } else {
+        logCritical(`[resumeLead] 팀장 ${internalId}의 resume 시도 ${attempt}/${MAX_RESUME_ATTEMPTS}가 "backgrounded" 마커조차 못 찍고 실패했습니다.`);
+      }
+      if (attempt < MAX_RESUME_ATTEMPTS) await new Promise(resolve => setTimeout(resolve, RESUME_RETRY_GAP_MS));
+    }
+    return null;
+  } finally {
+    resumeRetryStatus.delete(internalId);
+  }
+}
+
 // 큐에서 대기하는 동안 앞선 작업(예: 재시작)이 이미 이 팀장의 짧은 id/sessionId를 바꿔놨을 수
 // 있으므로, 넘겨받은 값을 그대로 믿지 않고 internalId(절대 안 바뀜)로 leads.json에서 최신
 // 레코드를 실행 시점에 다시 찾아서 사용한다. 호출부는 반드시 queueLeadOperation(internalId, ...)으로
@@ -1771,7 +1835,7 @@ async function resumeLead(internalId: string, message: string): Promise<string |
     await new Promise(resolve => setTimeout(resolve, 3000));
   }
   const mcpToken = issueMcpToken(internalId);
-  const newId = await runClaudeBg(['--bg', ...buildMemberSpawnCliArgs(mcpToken), '--resume', current.sessionId, message], current.targetDir);
+  const newId = await resumeSpawnWithRetry(internalId, current, message, mcpToken);
   if (newId) {
     // stop 후 resume하면 보통 같은 짧은 id/sessionId로 깨어나지만, 위 가드를 다 통과하고도 CLI가
     // 어떤 이유로든 새 세션(포크)을 만들었다면 sessionId 자체가 바뀐다 — 이걸 안 챙기고 짧은 id만
