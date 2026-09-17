@@ -1887,7 +1887,18 @@ function scheduleBackgroundResumeHealing(internalId: string, current: LeadRecord
       const latestRec = latestLeads.find(l => l.internalId === internalId);
       if (latestRec && latestRec.id === expectedId) {
         latestRec.id = healedId;
-        if (newSessionId) latestRec.sessionId = newSessionId;
+        // resumeOnce가 이미 healedId === current.id(즉 expectedId)임을 보장하므로, 여기서 sessionId가
+        // current.sessionId와 달라져 보이면 resumeLead의 같은 가드와 동일한 이유로 신뢰하지 않는다
+        // (위 resumeLead 본문의 동일 주석 참고 — 실사용 재현: 이 조합에서 존재하지 않는 sessionId를
+        // 그대로 저장해 대화 기록이 안 보이는 사고로 이어졌었다).
+        if (newSessionId && newSessionId !== current.sessionId) {
+          logCritical(
+            `[resumeLead] 팀장 ${internalId}(${healedId}) 백그라운드 복구 — 짧은 id는 그대로인데 sessionId만 달라진 걸로 조회됐습니다` +
+            `(${current.sessionId} → ${newSessionId}). 신뢰하지 않고 기존 sessionId를 유지합니다.`
+          );
+        } else if (newSessionId) {
+          latestRec.sessionId = newSessionId;
+        }
         saveLeads(latestLeads);
       }
     }).catch(err => logCritical(`[resumeLead] 팀장 ${internalId} 백그라운드 복구 큐 처리 중 오류가 났습니다: ${err}`));
@@ -1980,7 +1991,21 @@ async function resumeLead(internalId: string, message: string): Promise<string |
     const rec = leads.find(l => l.internalId === internalId);
     if (rec) {
       rec.id = newId;
-      if (newSessionId) {
+      // 짧은 id가 stop 이전과 동일한데(newId === current.id) sessionId만 달라진 조합은, 이 코드베이스가
+      // 곳곳에서 의존하는 전제("정상 resume은 항상 같은 짧은 id로 깨어나고, 그러면 sessionId도 당연히
+      // 그대로다")에 어긋난다 — 실사용으로 확인됨(2026-09-17): g1cl-mgt와 이 팀장(Team Monitor) 자신
+      // 둘 다에서, claude agents --json 조회가 이 순간 daemon의 일시적으로 꼬인 상태를 읽어 존재하지도
+      // 않는 sessionId를 돌려줬고, 그걸 그대로 믿고 저장해서 leads.json이 실제로는 아무 데도 없는
+      // sessionId를 가리키게 됐다(대화 기록이 통째로 안 보이는 사고로 이어짐 — 실제 세션·대화 자체는
+      // 멀쩡히 살아있었는데 이 앱이 엉뚱한 sessionId로 필터링해서 못 찾은 것뿐이었다). 짧은 id가 안
+      // 바뀌었는데 sessionId가 바뀌어 보이면 조회 자체를 못 믿는 게 낫다 — 기존 값을 그대로 유지한다
+      // (포크로 짧은 id 자체가 바뀐 경우는 이 조건에 안 걸리므로 정상적으로 갱신된다).
+      if (newSessionId && newId === current.id && newSessionId !== current.sessionId) {
+        logCritical(
+          `[resumeLead] 팀장 ${internalId}(${newId}) — 짧은 id는 그대로인데 sessionId만 달라진 걸로 조회됐습니다` +
+          `(${current.sessionId} → ${newSessionId}). 정상 resume이라면 있을 수 없는 조합이라 신뢰하지 않고 기존 sessionId를 유지합니다.`
+        );
+      } else if (newSessionId) {
         rec.sessionId = newSessionId;
       } else {
         logCritical(`[resumeLead] 팀장 ${internalId}(${newId})의 새 sessionId를 확인하지 못했습니다 — leads.json이 낡은 sessionId(${rec.sessionId})를 계속 가리킬 수 있습니다.`);
