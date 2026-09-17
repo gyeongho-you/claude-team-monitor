@@ -745,6 +745,8 @@ function loadMembers(): MemberRecord[] {
 // 정리와 팀장 오프라인 판정이 겪는 TOCTOU가 완전히 같아서 그 4단계 로직을 공용으로 쓴다.
 const memberFirstMissAt = new Map<string, number>();
 const leadFirstMissAt = new Map<string, number>();
+// computeOfflineLeads의 콜드 스타트 그레이스 우회에 쓴다 — 앱을 새로 켠 뒤 첫 폴링에서만 false.
+let hasCompletedFirstPoll = false;
 
 // 팀장이 agents 스냅샷에 이번 폴링에서만 못 잡힌(유예 구간, 아직 오프라인 확정 전) 순간에 보여줄
 // "마지막으로 살아있던 스냅숏" — liveRows에 잡힐 때마다 갱신한다. 이게 없으면 stop→resume 재기동
@@ -1078,10 +1080,22 @@ function deliverPendingNotices(agents: AgentEntry[], leads: LeadRecord[]): void 
 // 화면에서 처리한다), 유예 시간이 지나야 진짜 오프라인으로 확정한다. 만료돼도 leadFirstMissAt
 // 기록은 지우지 않는다 — 지우면 다음 폴링에 "처음 못 잡힘"부터 다시 시작해 유예 시간 동안 또
 // 온라인처럼 보이므로, 다시 잡힐 때까지 계속 만료 상태를 유지해야 한다.
-function computeOfflineLeads(leads: LeadRecord[], agentIdSet: Set<string | undefined>, now: number): LeadRecord[] {
+//
+// graceMs를 매개변수로 받는 이유(실사용 재현된 사고 대응): 이 유예값은 "이 앱이 방금 stop을 걸어서
+// 재기동 중인" 상황을 봐주기 위한 것인데, leadFirstMissAt/lastKnownLiveLeadRow가 전부 메모리에만
+// 있어서 앱을 껐다 켜면 완전히 비어버린다. 그러면 앱을 새로 켰을 때 이미 죽어있던 팀장도 "처음
+// 못 잡힘"부터 다시 시작해서, graceMs(약 75초)가 다 지날 때까지 liveRows에도(안 잡히니까)
+// graceRows에도(캐시가 비어있으니까) offlineRows에도(아직 안 만료됐으니까) 안 잡혀 화면
+// 어디에도 안 보이는 공백이 생긴다 — 실사용 재현: 앱을 껐다 켠 날 아침, 이미 죽어있던 팀장이
+// 작업 탭에도 히스토리 탭에도 안 보여서 사용자가 세션 ID를 직접 찾아 수동으로 이어야 했다.
+// 앱이 막 시작해서 이 팀장에 대해 아직 stop을 걸어본 적이 없는 시점(hasCompletedFirstPoll이
+// false인 첫 폴링)에는 "재기동 중일 수도 있다"고 봐줄 이유가 아예 없으므로, 그 폴링 한 번만
+// graceMs=0을 줘서 다음 폴링(3초 뒤)에 곧바로 만료 판정이 나게 한다 — 평소 동작(진짜 stop→resume
+// 재기동 유예)은 그대로 유지된다.
+function computeOfflineLeads(leads: LeadRecord[], agentIdSet: Set<string | undefined>, now: number, graceMs: number): LeadRecord[] {
   const offlineLeads: LeadRecord[] = [];
   leads.forEach(l => {
-    const result = trackFirstMiss(leadFirstMissAt, agentIdSet.has(l.id), l.id, now, LEAD_OFFLINE_GRACE_MS);
+    const result = trackFirstMiss(leadFirstMissAt, agentIdSet.has(l.id), l.id, now, graceMs);
     if (result === 'expired') offlineLeads.push(l);
   });
   // 다른 경로로 이미 사라진(현재는 없지만 혹시 모를) leadId의 기록을 정리해 Map이 무한정 자라지
@@ -1261,7 +1275,8 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
     console.error('[runStallWatchdog] 정체 감시 도중 오류:', err);
   });
 
-  const offlineLeads = computeOfflineLeads(leads, agentIdSet, now);
+  const offlineLeads = computeOfflineLeads(leads, agentIdSet, now, hasCompletedFirstPoll ? LEAD_OFFLINE_GRACE_MS : 0);
+  hasCompletedFirstPoll = true;
   const offlineRows = buildOfflineRows(offlineLeads, leads);
   const graceRows = buildGraceRows(leads, agentIdSet, offlineLeads);
   const rows = [...liveRows, ...graceRows, ...offlineRows];

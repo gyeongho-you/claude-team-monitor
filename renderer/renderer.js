@@ -1511,6 +1511,7 @@ async function refreshBoardNow() {
     renderBoard(rows || []);
     renderRequests(requests || []);
     renderStallAlerts(stallAlerts || []);
+    renderHistory();
     lastUpdatedEl.textContent = `마지막 갱신: ${new Date().toLocaleTimeString('ko-KR')}`;
   } catch (err) {
     console.error('보드 새로고침 실패:', err);
@@ -1734,6 +1735,13 @@ window.api.onAgentsUpdate(({ rows, requests, stallAlerts }) => {
   renderBoard(rows || []);
   renderRequests(requests || []);
   renderStallAlerts(stallAlerts || []);
+  // 히스토리 탭은 원래 탭을 클릭하거나 새로고침 버튼을 눌러야만 다시 그려졌다 — 앱을 껐다 켠
+  // 직후 이미 죽어있던 팀장이 "아직 오프라인 확정 전" 상태로 잠깐 안 보이다가(콜드 스타트 유예,
+  // computeOfflineLeads 참고) 뒤늦게 오프라인으로 확정돼도, 탭을 벗어났다 다시 들어오지 않는 한
+  // 화면이 그 변화를 반영하지 못했다(실사용 재현: 팀장이 작업 탭에도 히스토리 탭에도 안 보여서
+  // 세션 ID를 직접 찾아 수동으로 이어야 했음). 카드 자체엔 입력창처럼 보존해야 할 상태가 없어서
+  // (renderRequests/renderStallAlerts와 마찬가지로) 매 폴링마다 다시 그려도 안전하다.
+  renderHistory();
   lastUpdatedEl.textContent = `마지막 갱신: ${new Date().toLocaleTimeString('ko-KR')}`;
 });
 
