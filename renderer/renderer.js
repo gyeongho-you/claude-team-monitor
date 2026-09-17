@@ -1241,10 +1241,14 @@ function cleanupItemHtml(s, indented) {
   const registerBtn = s.tag === 'untracked' && s.probableLeadId
     ? `<button class="register-probable-btn" data-register-probable="${escapeHtml(s.id)}" data-lead-id="${escapeHtml(s.probableLeadId)}" title="이 세션을 ${escapeHtml(s.probableLeadId)} 팀장의 정식 팀원으로 등록합니다">팀원으로 등록</button>`
     : '';
+  // 팀장이 EnterWorktree로 잠깐 자리를 옮기면 s.cwd가 등록된 디렉토리와 달라진다 — 그걸로 제목을
+  // 지으면 마치 새 팀장이 생긴 것처럼 보이므로(실사용 재현), 등록된 디렉토리(registeredDir)가 있으면
+  // 그걸 제목으로 쓴다. cwd 자체는 메타 줄에 그대로 남겨서 "지금 어디 있는지"는 계속 보이게 한다.
+  const titleDir = s.registeredDir || s.cwd;
   return `
     <div class="cleanup-item ${statusClass(s)}${indented ? ' cleanup-item-indented' : ''}">
       <div class="cleanup-info">
-        <div class="cleanup-top">${escapeHtml(dirLabel(s.cwd))}<span class="cleanup-tag">${tagLabel(s)}</span></div>
+        <div class="cleanup-top">${escapeHtml(dirLabel(titleDir))}<span class="cleanup-tag">${tagLabel(s)}</span></div>
         <div class="cleanup-meta">${escapeHtml(s.cwd)} · ${relativeAge(s.startedAt)} · ${escapeHtml(s.status || s.state || '')}</div>
       </div>
       ${registerBtn}
@@ -1294,7 +1298,7 @@ async function renderCleanupSessions() {
       const s = lastCleanupSessions.find(x => x.id === id);
       cleanupStopTargetId = id;
       cleanupStopInfoEl.textContent = s
-        ? `${tagLabel(s)} · ${dirLabel(s.cwd)} (${s.cwd}) · ${s.status || s.state || ''}`
+        ? `${tagLabel(s)} · ${dirLabel(s.registeredDir || s.cwd)} (${s.cwd}) · ${s.status || s.state || ''}`
         : id;
       showModal(cleanupStopPanelEl);
     });

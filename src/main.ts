@@ -1387,13 +1387,21 @@ function reconcileMemberIds(agents: AgentEntry[], members: MemberRecord[]): Memb
 //
 // 책임이 여럿(실시간 스냅샷 구성, 팀원 완료 알림, 대기열 배달, 팀장 오프라인 판정, 팀원 정리)이라
 // 각각을 위 헬퍼로 뽑고, 여기서는 순서대로 호출해 조합만 한다.
-// 지금 이 앱이 아는 모든 디렉토리(팀장 자신 + 사전승인된 팀원 디렉토리 + 실제로 떠있거나 떠있던
-// 세션의 cwd) 중, claude 최초 실행 승인(checkDirectoryClaudeReady)이 안 된 곳을 모아서 화면에
+// 이 앱이 실제로 claude --bg를 새로 스폰할 수 있는 디렉토리(팀장 자신의 targetDir + 사전승인된
+// 팀원 디렉토리)만 모아서, claude 최초 실행 승인(checkDirectoryClaudeReady)이 안 된 곳을 화면에
 // 알림으로 띄우는 데 쓴다 — "터미널 열기"와 같은 방식으로 사용자가 그 자리에서 바로 승인할 수
 // 있게(open-terminal-for-approval IPC) 하기 위함.
-function computeUnapprovedDirs(rows: SessionRow[], leads: LeadRecord[]): { dir: string; reason: string }[] {
+//
+// 예전엔 "지금 실제로 떠있는 세션들의 cwd"도 여기 같이 넣었었다 — 그런데 팀장이 EnterWorktree로
+// 자기 자신의 작업 디렉토리를 일시적으로 워크트리 서브디렉토리로 옮기면(이 앱도 코딩할 때 쓰는
+// 흔한 패턴), 그 워크트리 경로는 애초에 이 앱이 헤드리스로 spawn할 일이 없는 곳인데도(resumeLead/
+// restartLead는 항상 lead.targetDir을, spawn_team_member는 항상 approvedMembers를 쓴다 — 살아있는
+// 세션의 "지금 이 순간의" cwd는 안 쓴다) 매번 "미승인"으로 잡혀서, 사용자가 터미널을 열어 확인해봐도
+// 지울 방법이 없는 알림으로 영구히 남는 사고가 있었다(실사용 재현: g1cl-mgt가 e2e 작업 중
+// .claude/worktrees/e2e-consolidated-report로 옮겨간 사례). 그래서 실제 spawn 대상이 될 수 있는
+// 디렉토리만 검사한다.
+function computeUnapprovedDirs(leads: LeadRecord[]): { dir: string; reason: string }[] {
   const dirs = new Set<string>();
-  for (const row of rows) if (row.cwd) dirs.add(row.cwd);
   for (const lead of leads) {
     dirs.add(lead.targetDir);
     lead.approvedMembers.forEach(dir => dirs.add(dir));
@@ -1452,7 +1460,7 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
   cleanupStaleMembers(members, agentIdSet, now);
 
   const requests = loadPendingRequests();
-  const unapprovedDirs = computeUnapprovedDirs(rows, leads);
+  const unapprovedDirs = computeUnapprovedDirs(leads);
   return { rows, requests, unapprovedDirs };
 }
 
@@ -2157,7 +2165,7 @@ function guessProbableLeadId(agent: AgentEntry, leads: LeadRecord[]): string | u
 
 // "세션 정리" 탭 전용 — 지금 떠있는 모든 백그라운드 세션(팀장/팀원으로 등록된 것 포함, 좀비도 포함)을
 // 보여준다. 작업 화면(연결 흐름)과 완전히 분리해서, 실수로 잘못 끄는 사고를 줄인다.
-async function getAllBackgroundSessions(): Promise<(AgentEntry & { tag: 'lead' | 'member' | 'untracked'; leadId?: string; probableLeadId?: string })[]> {
+async function getAllBackgroundSessions(): Promise<(AgentEntry & { tag: 'lead' | 'member' | 'untracked'; leadId?: string; probableLeadId?: string; registeredDir?: string })[]> {
   const agents = await fetchAgents();
   const leads = loadLeads();
   const leadIds = new Set(leads.map(l => l.id));
@@ -2173,6 +2181,13 @@ async function getAllBackgroundSessions(): Promise<(AgentEntry & { tag: 'lead' |
         leadId: memberLeadById.get(a.id!),
         // 미등록 세션에만 의미가 있다 — 확정 등록된 것과 헷갈리지 않게 tag는 여전히 'untracked'로 둔다.
         probableLeadId: tag === 'untracked' ? guessProbableLeadId(a, leads) : undefined,
+        // 팀장이 EnterWorktree로 자기 작업 디렉토리를 일시적으로 워크트리 서브디렉토리로 옮기면
+        // a.cwd(지금 이 순간의 실제 cwd)가 등록된 디렉토리와 달라진다 — 렌더러가 이 값이 있으면
+        // 이름 표시에 a.cwd 대신 이걸 써서, "팀장이 잠깐 자리를 옮겼을 뿐인데 완전히 다른 팀장이
+        // 새로 생긴 것처럼" 보이는 걸 막는다(실사용 재현: g1cl-mgt가 e2e 작업 중 워크트리로 옮겨간
+        // 사례 — cleanup 탭이 "e2e-consolidated-report"라는 별개의 팀장처럼 보여줬었다). cwd 자체는
+        // 그대로 남겨서 "지금 어디서 뭘 하고 있는지"는 여전히 보이게 한다.
+        registeredDir: tag === 'lead' ? leads.find(l => l.id === a.id)?.targetDir : undefined,
       };
     })
     .sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
@@ -2668,8 +2683,7 @@ function envWithoutClaudeCodeSessionMarkers(): NodeJS.ProcessEnv {
 // 아직 승인이 안 된 디렉토리인지 서버 쪽에서 다시 확인한다.
 ipcMain.handle('open-terminal-for-approval', async (_e, targetDir: string) => {
   if (typeof targetDir !== 'string') return;
-  const { rows } = await buildSessionRows();
-  const isKnownUnapproved = computeUnapprovedDirs(rows, loadLeads()).some(u => u.dir === targetDir);
+  const isKnownUnapproved = computeUnapprovedDirs(loadLeads()).some(u => u.dir === targetDir);
   if (!isKnownUnapproved) {
     console.error('[open-terminal-for-approval] 알 수 없거나 이미 승인된 디렉토리라 거부합니다:', targetDir);
     return;
