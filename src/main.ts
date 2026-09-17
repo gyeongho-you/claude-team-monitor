@@ -1781,18 +1781,25 @@ function queueLeadOperation<T>(internalId: string, fn: () => Promise<T>): Promis
   return run;
 }
 
-// resumeLead가 --resume을 건 뒤, 그 세션이 몇 초 뒤 조용히 크래시하는지(실사용 재현: 2026-09-17)
-// 확인해서, 크래시했으면 간격을 두고 다시 시도한다 — 성공한(끝까지 살아있던) 짧은 id만 반환한다.
-// 근본 원인은 아직 확정 못 했다(위 RESUME_SETTLE_CHECK_MS 주석 참고 — "stop 후 시간이 덜 지나서"라는
-// 가설은 하루치 로그 재분석으로 이미 반증됐고, 지금은 "서로 다른 팀장의 stop/resume이 겹쳐서 daemon을
-// 헷갈리게 한다"는 쪽이 더 유력하지만 이것도 확정은 아니다) — 원인 불문하고 "실패하면 다시 해본다"가
-// 유효한 완화책이라 재시도로 대응한다. 호출부(resumeLead)는 internalId를 넘겨서, 재시도 중인 동안
-// resumeRetryStatus에 진행 상황(몇 번째/최대 몇 번)을 남겨 렌더러가 "재시도 중" 표시를 할 수 있게 한다.
-async function resumeSpawnWithRetry(internalId: string, current: LeadRecord, message: string, mcpToken: string): Promise<string | null> {
+// 직접 원인 확정(팀원이 CLI로 대조 실험, 2026-09-17): claude CLI는 background 세션이 "자기 자신의
+// 저장된 옵션(mcp-config/allowedTools/model)"을 그대로 갖고 있어서, --resume에 이 옵션들을 다시
+// 실어 보내면 그 세션을 잇는 게 아니라 그 자리에서 매번 완전히 새로운 session-id를 가진 "복사본"을
+// 만든다 — CLI 자신이 이걸 stdout에 그대로 알려준다("... started a copy as <newId>. Without flags,
+// the same command continues <id> itself."). 이 앱의 resumeLead는 지금까지 매번 buildMemberSpawnCliArgs
+// (mcp-config+allowedTools)를 --resume과 함께 실어 보내고 있었다 — 즉 오늘 겪은 "한 stop 이벤트 뒤
+// 새 세션이 생기는" 사고는 타이밍 레이스가 아니라, 이 조합을 쓰는 한 매번 확정적으로 벌어지는
+// 일이었다(대조 실험: 플래그 없이 --resume만 쓴 그룹은 5/5 전부 같은 session-id로 정상 재개, 크래시도
+// 포크도 0건). 그래서 여기서는 --resume에 mcp-config류를 아예 실어 보내지 않는다 — 최초 실행 때 이미
+// 저장된 mcp-config/allowedTools/model을 CLI가 그대로 물려받으므로 다시 넘길 필요가 없다(이 팀장이
+// 처음 뜰 때 설정한 spawn_team_member 허용은 계속 유효하다). 그럼에도 남을 수 있는 다른 원인의 크래시를
+// 대비해 간격을 두고 재시도하는 안전장치는 유지한다. 호출부(resumeLead)는 internalId를 넘겨서,
+// 재시도 중인 동안 resumeRetryStatus에 진행 상황(몇 번째/최대 몇 번)을 남겨 렌더러가 "재시도 중"
+// 표시를 할 수 있게 한다.
+async function resumeSpawnWithRetry(internalId: string, current: LeadRecord, message: string): Promise<string | null> {
   try {
     for (let attempt = 1; attempt <= MAX_RESUME_ATTEMPTS; attempt++) {
       resumeRetryStatus.set(internalId, { attempt, max: MAX_RESUME_ATTEMPTS });
-      const candidateId = await runClaudeBg(['--bg', ...buildMemberSpawnCliArgs(mcpToken), '--resume', current.sessionId, message], current.targetDir);
+      const candidateId = await runClaudeBg(['--bg', '--resume', current.sessionId, message], current.targetDir);
       if (candidateId) {
         // "backgrounded" 마커는 찍었지만 소스 세션을 못 찾아 몇 초 뒤 조용히 죽는 사고가 있다 —
         // 원인 불문하고 관측된 크래시들이 spawn 후 십수 초 안에 일어났으므로 그 시점까지 기다렸다가
@@ -1872,8 +1879,11 @@ async function resumeLead(internalId: string, message: string): Promise<string |
     // 필드로 원인을 더 파볼 수 있다.
     await new Promise(resolve => setTimeout(resolve, 3000));
   }
-  const mcpToken = issueMcpToken(internalId);
-  const newId = await resumeSpawnWithRetry(internalId, current, message, mcpToken);
+  // 더 이상 issueMcpToken을 여기서 새로 발급하지 않는다 — --resume에 mcp-config를 다시 실어 보내지
+  // 않으므로(위 resumeSpawnWithRetry 주석 참고) 새 토큰을 만들어봤자 그 값을 전달할 방법이 없고,
+  // leads.json의 mcpToken은 이 팀장이 마지막으로 실제 --mcp-config를 실어 떴을 때(launchTeamLead/
+  // restartLead) 발급된 값 그대로 유효하다 — CLI가 세션 자신의 저장된 옵션으로 계속 그 값을 쓴다.
+  const newId = await resumeSpawnWithRetry(internalId, current, message);
   if (newId) {
     // stop 후 resume하면 보통 같은 짧은 id/sessionId로 깨어나지만, 위 가드를 다 통과하고도 CLI가
     // 어떤 이유로든 새 세션(포크)을 만들었다면 sessionId 자체가 바뀐다 — 이걸 안 챙기고 짧은 id만
