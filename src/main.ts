@@ -54,13 +54,20 @@ const STOP_SESSION_TIMEOUT_MS = 15000;
 // 낭비하지 않기 위한 회로차단기(팀원 코드리뷰에서 지적).
 const MAX_NOTICE_DELIVERY_ATTEMPTS = 5;
 
-// resumeLead가 stop 직후 --resume을 걸었을 때, daemon이 방금 죽은 세션을 아직 "재개 가능" 상태로
-// 정리하기 전이라 "source session ... not found"로 크래시하는 레이스(실사용 재현: 2026-09-17,
-// 3초 유예만으로는 부족한 사례가 실제로 나왔다)를 겪을 수 있다. 크래시 여부는 spawn 직후 바로 알 수
-// 없고(그 세션이 "backgrounded" 마커까지는 정상적으로 찍은 뒤 한참 있다가서야 죽는다), 실측으로 확인된
-// 크래시 시점(spawn 후 약 12초)보다 넉넉히 더 기다려서 그때도 살아있으면 진짜 성공으로 본다. 그래도
-// 실패하면(레이스가 반복되거나 다른 이유든) 간격을 두고 최대 이 횟수만큼 재시도한다 — 사용자 피드백:
-// "쭉은 아니고 텀을 두고 세 번 정도".
+// resumeLead가 stop 직후 --resume을 걸면 "source session ... not found"로 크래시하는 사고가
+// 실사용 중 여러 번 재현됐다(2026-09-17). 처음엔 "stop 후 daemon이 세션을 정리하는 데 시간이
+// 걸린다"고 보고 3초 유예 → 실패 사례가 또 나와서 "크래시가 spawn 후 약 12초 뒤에 일어난다"고
+// 보고 이 값들을 정했었다 — 그런데 daemon.log 전체(하루치 kill→respawn 433건)를 다시 분석해보니
+// 이 "간격 이론" 자체가 틀렸다: 정상 성공한 수백 건의 간격이 0.4~5초였고, 반대로 크래시난 사례
+// 중엔 간격이 255초(4분 넘게)였는데도 크래시한 것도 있었다 — 간격 길이와 크래시 여부는 상관관계가
+// 없다. 실제로 크래시가 몰린 사례들을 보면 서로 다른 두 팀장의 stop→resume이 몇 초 간격으로 겹쳐
+// 일어난 타이밍이 많았다 — queueLeadOperation은 팀장 하나 안에서만 순차 처리를 보장할 뿐, 서로 다른
+// 팀장의 resume이 동시에 daemon에 걸리는 건 막지 않는다. 그래서 지금은 "팀장 간 동시 stop/resume이
+// daemon을 헷갈리게 하는 것 아닌가"가 더 유력한 가설이지만 확정은 아니다. 근본 원인이 뭐든, 크래시
+// 여부를 spawn 직후 바로 알 수는 없고(그 세션이 "backgrounded" 마커까지는 정상적으로 찍은 뒤 한참
+// 있다가서야 죽는다) 아래 값만큼 기다렸다가 그때도 살아있으면 성공으로 본다. 원인을 확정 못 했어도
+// "실패하면 간격을 두고 다시 해본다"는 원인에 무관하게 유효한 완화책이라 재시도 자체는 유지한다 —
+// 사용자 피드백: "쭉은 아니고 텀을 두고 세 번 정도".
 const RESUME_SETTLE_CHECK_MS = 13000;
 const RESUME_RETRY_GAP_MS = 5000;
 const MAX_RESUME_ATTEMPTS = 3;
@@ -1748,19 +1755,22 @@ function queueLeadOperation<T>(internalId: string, fn: () => Promise<T>): Promis
   return run;
 }
 
-// resumeLead가 --resume을 건 뒤, 그 세션이 daemon 레이스로 몇 초 뒤 조용히 크래시하는지(실사용
-// 재현: 2026-09-17) 확인해서, 크래시했으면 간격을 두고 다시 시도한다 — 성공한(끝까지 살아있던) 짧은
-// id만 반환한다. 호출부(resumeLead)는 internalId를 넘겨서, 재시도 중인 동안 resumeRetryStatus에
-// 진행 상황(몇 번째/최대 몇 번)을 남겨 렌더러가 "재시도 중" 표시를 할 수 있게 한다.
+// resumeLead가 --resume을 건 뒤, 그 세션이 몇 초 뒤 조용히 크래시하는지(실사용 재현: 2026-09-17)
+// 확인해서, 크래시했으면 간격을 두고 다시 시도한다 — 성공한(끝까지 살아있던) 짧은 id만 반환한다.
+// 근본 원인은 아직 확정 못 했다(위 RESUME_SETTLE_CHECK_MS 주석 참고 — "stop 후 시간이 덜 지나서"라는
+// 가설은 하루치 로그 재분석으로 이미 반증됐고, 지금은 "서로 다른 팀장의 stop/resume이 겹쳐서 daemon을
+// 헷갈리게 한다"는 쪽이 더 유력하지만 이것도 확정은 아니다) — 원인 불문하고 "실패하면 다시 해본다"가
+// 유효한 완화책이라 재시도로 대응한다. 호출부(resumeLead)는 internalId를 넘겨서, 재시도 중인 동안
+// resumeRetryStatus에 진행 상황(몇 번째/최대 몇 번)을 남겨 렌더러가 "재시도 중" 표시를 할 수 있게 한다.
 async function resumeSpawnWithRetry(internalId: string, current: LeadRecord, message: string, mcpToken: string): Promise<string | null> {
   try {
     for (let attempt = 1; attempt <= MAX_RESUME_ATTEMPTS; attempt++) {
       resumeRetryStatus.set(internalId, { attempt, max: MAX_RESUME_ATTEMPTS });
       const candidateId = await runClaudeBg(['--bg', ...buildMemberSpawnCliArgs(mcpToken), '--resume', current.sessionId, message], current.targetDir);
       if (candidateId) {
-        // "backgrounded" 마커는 찍었지만 daemon이 소스 세션을 못 찾아 몇 초 뒤 조용히 죽는 레이스가
-        // 있다(실측: 크래시가 spawn 후 약 12초 뒤에 일어남) — 그 시점까지 넉넉히 기다렸다가 여전히
-        // agents 목록에 있는지 확인해야, 죽어버릴 세션을 성공으로 착각해 leads.json에 기록하는
+        // "backgrounded" 마커는 찍었지만 소스 세션을 못 찾아 몇 초 뒤 조용히 죽는 사고가 있다 —
+        // 원인 불문하고 관측된 크래시들이 spawn 후 십수 초 안에 일어났으므로 그 시점까지 기다렸다가
+        // 여전히 agents 목록에 있는지 확인해야, 죽어버릴 세션을 성공으로 착각해 leads.json에 기록하는
         // 사고(대화 기록을 통째로 잃은 것처럼 보이는 원인)를 막을 수 있다.
         await new Promise(resolve => setTimeout(resolve, RESUME_SETTLE_CHECK_MS));
         let survived: boolean;
@@ -1771,7 +1781,7 @@ async function resumeSpawnWithRetry(internalId: string, current: LeadRecord, mes
           survived = true; // 확인 자체가 실패하면 fail-closed(성공으로 간주) — 불필요한 재시도를 피한다.
         }
         if (survived) return candidateId;
-        logCritical(`[resumeLead] 팀장 ${internalId}의 resume 시도 ${attempt}/${MAX_RESUME_ATTEMPTS}가 daemon 레이스로 크래시한 것으로 보입니다(${candidateId}).`);
+        logCritical(`[resumeLead] 팀장 ${internalId}의 resume 시도 ${attempt}/${MAX_RESUME_ATTEMPTS}가 크래시한 것으로 보입니다(${candidateId}, 원인 미확정).`);
       } else {
         logCritical(`[resumeLead] 팀장 ${internalId}의 resume 시도 ${attempt}/${MAX_RESUME_ATTEMPTS}가 "backgrounded" 마커조차 못 찍고 실패했습니다.`);
       }
@@ -1824,14 +1834,16 @@ async function resumeLead(internalId: string, message: string): Promise<string |
       logCritical(`[resumeLead] 팀장 ${internalId}(${current.id}) 정지에 실패해 세션 포크 위험이 있어 resume을 중단합니다.`);
       return null;
     }
-    // stopSession이 성공(claude agents --json에서 사라짐)을 확인해도, daemon이 그 세션을 실제로
-    // "resume 가능한 상태"로 완전히 정리하기까지는 추가 시간이 더 걸릴 수 있다(실사용 재현:
-    // 2026-09-17, stop 성공 직후 자연스러운 간격(약 3초)만으로 --resume을 걸었다가 "source session
-    // ... not found"로 크래시 — 크래시한 세션은 대화 내용이 전혀 없는 빈 세션이라 그대로 leads.json에
-    // 기록되면 팀장이 대화 기록을 통째로 잃은 것처럼 보인다, 실제로 두 팀장 모두 겪음). 관측된
-    // 자연 간격(3초)으로도 실패했으므로 여유를 넉넉히 둔다 — 표본이 2건뿐이라 이 값이 충분하다는
-    // 보장은 없고, 다시 재현되면 ~/.claude/jobs/<id>/state.json의 state/detail 필드로 원인을
-    // 확인할 수 있다.
+    // stopSession이 성공(claude agents --json에서 사라짐)을 확인해도 곧바로 --resume을 걸면
+    // "source session ... not found"로 크래시하는 사고가 실사용 중 여러 번 났다(2026-09-17, 두
+    // 팀장 모두 겪음) — 처음엔 "stop 직후라 시간이 덜 지나서"라고 보고 이 유예를 넣었는데, 하루치
+    // daemon.log를 다시 분석해보니 그 가설은 틀렸다(정상 성공 사례 수백 건의 간격이 0.4~5초였고,
+    // 크래시 사례 중엔 간격이 255초였는데도 크래시한 것도 있었다 — 간격 길이 자체는 원인이 아니다).
+    // 지금은 "서로 다른 팀장의 stop/resume이 겹쳐서 daemon을 헷갈리게 한다" 쪽이 더 유력한 가설이지만
+    // 확정은 아니다. 이 3초 유예는 그 잘못된 가설 위에서 넣은 것이라 실제 방지 효과는 불확실하고,
+    // 진짜 안전장치는 아래 resumeSpawnWithRetry의 크래시 감지+재시도 쪽이다 — 그래도 해될 게 없는
+    // 짧은 지연이라 없애지는 않았다. 다시 재현되면 ~/.claude/jobs/<id>/state.json의 state/detail
+    // 필드로 원인을 더 파볼 수 있다.
     await new Promise(resolve => setTimeout(resolve, 3000));
   }
   const mcpToken = issueMcpToken(internalId);
