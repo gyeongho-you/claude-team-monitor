@@ -14,6 +14,7 @@ import { MEMBER_MODEL_OPTIONS, clampMinutes, normalizeMemberModel } from './lib/
 import { extractBackgroundedId } from './lib/claudeBgOutput';
 import { CLAUDE_HOME, MEMBERS_DIR } from './lib/teamMemberPaths';
 import { hasLiveMember } from './lib/leadPresence';
+import { execAgentsJson } from './lib/agentsJson';
 
 const SESSION_EDITS_DIR = path.join(CLAUDE_HOME, 'session-edits');
 const JOURNAL_DATA_DIR = path.join(CLAUDE_HOME, 'daily-journal', 'data');
@@ -26,6 +27,7 @@ const LEADS_PATH = path.join(app.getPath('userData'), 'leads.json');
 const PENDING_NOTICES_PATH = path.join(app.getPath('userData'), 'pendingNotices.json');
 const STALL_ALERTS_PATH = path.join(app.getPath('userData'), 'stallAlerts.json');
 const SETTINGS_PATH = path.join(app.getPath('userData'), 'settings.json');
+const APP_LOG_PATH = path.join(app.getPath('userData'), 'app.log');
 // 팀장 세션(claude 프로세스, 이 앱과 별개)도 알아야 하는 고정 경로라서 앱 userData가 아니라 ~/.claude 밑에 둔다.
 const REQUESTS_DIR = path.join(CLAUDE_HOME, 'claude-team-monitor', 'requests');
 // MEMBERS_DIR은 lib/teamMemberPaths에서 가져온다 — 팀원 생성 MCP 서버도 똑같은 경로를 써야 한다.
@@ -46,6 +48,10 @@ const MEMBER_CLEANUP_GRACE_MS = 15000;
 // 여유를 두었다("재시작이 자꾸 실패한다" 리포트 대응).
 const RUN_CLAUDE_TIMEOUT_MS = 45000;
 const STOP_SESSION_TIMEOUT_MS = 15000;
+// deliverPendingNotices가 같은 알림(그룹)의 배달(resumeLead)을 이 횟수만큼 연속 실패하면 더 이상
+// 자동 재시도하지 않는다 — 영원히 안 풀리는 팀장에게 무기한 재시도하며 프로세스 스폰/로그를
+// 낭비하지 않기 위한 회로차단기(팀원 코드리뷰에서 지적).
+const MAX_NOTICE_DELIVERY_ATTEMPTS = 5;
 
 // 팀장/팀원 오프라인 확정 유예(아래 LEAD_OFFLINE_GRACE_MS/MEMBER_MISS_GRACE_MS)는 반드시
 // "정상적인 stop→resume 재기동이 최악의 경우 걸릴 수 있는 시간"보다 커야 한다 — 그렇지 않으면
@@ -244,7 +250,11 @@ type MemberRequest = {
 // 자동으로 만든 알림인지('system', 팀원 완료 알림·직접 추가 알림 등)를 구분한다 — deliverPendingNotices가
 // 같은 팀장 앞으로 쌓인 것이어도 이 둘을 절대 한 덩어리로 묶지 않기 위해 쓴다(섞어서 묶으면
 // isAutoInjectedPrompt가 '[알림]' 문구 때문에 사용자 메시지까지 자동알림으로 오판해 잘못 표시된다).
-type PendingNotice = { id: string; leadInternalId: string; message: string; createdAt: number; origin: 'user' | 'system' };
+// attempts는 deliverPendingNotices가 이 알림의 배달(resumeLead)을 시도했다가 실패해서 큐에 되돌린
+// 횟수다(옵션 — 옛 파일/새로 쌓인 알림엔 없을 수 있어 없으면 0으로 취급). 영원히 stop이 안 되는
+// 팀장(좀비 프로세스 등)에게 무한정 재시도하며 프로세스 스폰과 에러 로그를 낭비하지 않도록 상한을
+// 두는 데 쓴다(팀원 코드리뷰에서 지적: 재시도 횟수 상한/회로차단기가 없었다).
+type PendingNotice = { id: string; leadInternalId: string; message: string; createdAt: number; origin: 'user' | 'system'; attempts?: number };
 
 // 정체 감시(runStallWatchdog)가 만들어내는, 사용자 확인을 기다리는 항목. 사용자가 화면에서
 // "이어서 진행 지시"를 눌러야 실제로 queueLeadNotice로 전달된다(반자동 — 앱이 판단은 하되
@@ -290,7 +300,9 @@ function resolveProjectName(sessionId: string, cwd: string): string {
 // mtime 필터 없이 git status 원본을 그대로 보여주는 걸로 되돌렸다.
 function getGitChangedFiles(cwd: string): Promise<{ file: string; status: string }[]> {
   return new Promise(resolve => {
-    exec('git status --porcelain', { cwd, windowsHide: true, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
+    // git이 자격증명 프롬프트나 lock 경합으로 멈추면 타임아웃 없이는 이 패널이 무한 로딩에 빠진다
+    // (팀원 버그헌팅에서 지적) — 다른 exec 호출들과 같은 방어를 준다.
+    exec('git status --porcelain', { cwd, windowsHide: true, maxBuffer: 10 * 1024 * 1024, timeout: 10000 }, (err, stdout) => {
       if (err) { resolve([]); return; } // git 저장소가 아니거나 git이 없으면 빈 목록
       const files = stdout.split('\n')
         .map(l => l.replace(/\r$/, ''))
@@ -315,7 +327,7 @@ function getFileDiff(cwd: string, file: string): Promise<{ diff: string; isNew: 
       resolve({ diff: '', isNew: false, binary: false });
       return;
     }
-    execFile('git', ['diff', 'HEAD', '--', file], { cwd, windowsHide: true, maxBuffer: 20 * 1024 * 1024 }, (err, stdout) => {
+    execFile('git', ['diff', 'HEAD', '--', file], { cwd, windowsHide: true, maxBuffer: 20 * 1024 * 1024, timeout: 10000 }, (err, stdout) => {
       if (!err && stdout.trim()) {
         resolve({ diff: stdout, isNew: false, binary: /^Binary files /m.test(stdout) });
         return;
@@ -547,17 +559,32 @@ function getSessionAiTitle(sessionId: string, cwd: string): string | null {
   }
 }
 
+// 패키지된(배포된) 앱은 콘솔 창이 없어서 console.error가 정말로 아무 데도 안 남는다(실사용으로
+// 확인됨 — 오늘 겪은 세션 포크/알림 유실 사고의 원인을 사후에 전혀 추적할 수 없었던 이유). 사용자가
+// 원인을 알 수 없이 겪는 실패("왜 메시지가 하나도 안 가지")로 이어지는 핵심 실패 지점만 골라
+// 콘솔과 별개로 파일에도 남긴다 — 모든 console.error를 다 옮기진 않는다(그러면 이 파일이 통상적인
+// 디버그 로그가 돼서 정작 봐야 할 때 못 찾는다).
+function logCritical(message: string): void {
+  console.error(message);
+  try {
+    fs.appendFileSync(APP_LOG_PATH, `[${new Date().toISOString()}] ${message}\n`);
+  } catch {
+    // 로그 자체가 실패해도(디스크 문제 등) 앱 동작에는 지장이 없어야 한다.
+  }
+}
+
+// exec/파싱 실패 시 빈 배열로 fail-open한다 — 보드 표시처럼 "일시적으로 몇 초 못 그려도 그만"인
+// 곳엔 맞는 선택이다. stopSession의 생존 확인처럼 "빈 배열=확실히 죽었다"로 오판하면 안 되는 안전
+// 검사에는 아래 fetchAgentsStrict를 대신 써라(팀원 코드리뷰에서 지적됨).
 function fetchAgents(): Promise<AgentEntry[]> {
-  return new Promise(resolve => {
-    exec('claude agents --json', { windowsHide: true, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
-      if (err) { resolve([]); return; }
-      try {
-        resolve(JSON.parse(stdout));
-      } catch {
-        resolve([]);
-      }
-    });
-  });
+  return (execAgentsJson() as Promise<AgentEntry[]>).catch(() => [] as AgentEntry[]);
+}
+
+// exec/파싱이 실패하면(타임아웃 포함) 조용히 빈 배열로 넘어가지 않고 reject한다 — 호출부가 "확인
+// 안 됨"과 "정말 빈 목록"을 구분해서, 확인 안 된 상황을 fail-closed(안전한 쪽으로 가정)로 처리할 수
+// 있게 한다.
+function fetchAgentsStrict(): Promise<AgentEntry[]> {
+  return execAgentsJson() as Promise<AgentEntry[]>;
 }
 
 // 단일 JSON 파일 하나를 안전하게 읽는다 — 없거나 깨져 있으면 null.
@@ -669,6 +696,13 @@ function loadPendingNotices(): PendingNotice[] {
   // 매번 다시 마이그레이션할 필요가 없게 한다(1회성 정리 — loadLeads의 internalId 백필과 동일한 이유).
   if (dirty) savePendingNotices(notices);
   return notices;
+}
+
+// deliverPendingNotices가 배달을 "시도"한 시점에 큐에서 미리 지워둔 알림을, 그 시도(resumeLead)가
+// 실제로 실패했을 때 되돌리는 데 쓴다 — 되돌릴 때는 그 사이(비동기로 기다리는 동안) 다른 경로가
+// pendingNotices.json에 새로 쌓아뒀을 수 있는 항목을 덮어쓰지 않도록, 그 시점의 최신 목록에 이어붙인다.
+function requeuePendingNotices(notices: PendingNotice[]): void {
+  savePendingNotices([...loadPendingNotices(), ...notices]);
 }
 
 function savePendingNotices(notices: PendingNotice[]): void {
@@ -1068,11 +1102,42 @@ function deliverPendingNotices(agents: AgentEntry[], leads: LeadRecord[]): void 
   for (const notices of byLeadAndOrigin.values()) {
     const leadRec = leads.find(l => l.internalId === notices[0].leadInternalId);
     const liveAgent = leadRec ? agents.find(a => a.id === leadRec.id) : undefined;
+    // blocked는 send-to-lead와 같은 이유로 busy와 다르게 취급한다 — 저절로 안 풀리는 상태라 여기서
+    // 큐에 계속 묶어두면 영원히 배달 안 되는 메시지가 된다(2026-09-17 실사용 재현). blocked도 배달을
+    // 시도해 stop→resume으로 깨우고, 세션 포크 방지는 resumeLead 안의 안전장치가 맡는다.
     const isBusy = !!liveAgent && getStatus(liveAgent) === 'busy';
+    // 영원히 stop이 안 되는 팀장(좀비 프로세스, 영구히 망가진 세션 등)에게는 재시도해봤자 매번
+    // 실패한다 — 상한 없이 폴링마다 계속 resume을 시도하면 프로세스 스폰과 에러 로그만 무기한
+    // 낭비된다(팀원 코드리뷰에서 지적). 상한을 넘으면 자동 재시도를 멈추고 큐에 그대로(제거하지
+    // 않고) 남겨서 사용자가 채팅창에서 직접 취소하거나, 팀장을 복구한 뒤 다시 보내게 한다.
+    const attemptsSoFar = Math.max(0, ...notices.map(n => n.attempts ?? 0));
+    const exhausted = attemptsSoFar >= MAX_NOTICE_DELIVERY_ATTEMPTS;
+    if (exhausted) {
+      stillPending.push(...notices);
+      continue;
+    }
     if (leadRec && liveAgent && !isBusy) {
       const message = combinePendingNoticeMessages(notices);
+      const attemptedNotices = notices.map(n => ({ ...n, attempts: (n.attempts ?? 0) + 1 }));
+      // resumeLead가 null을 반환(정지 실패 등으로 포기)하는 건 예외가 아니라 정상적인 resolve라
+      // .catch만으로는 못 잡는다 — 이 알림은 이미 위에서 큐(stillPending)에서 빠진 뒤라, 그대로 두면
+      // 아무도 모르게 영구히 사라진다(팀원 코드리뷰에서 지적, 실측 재현). 실패(null 또는 예외) 시
+      // 다음 폴링에서 다시 시도할 수 있도록(단, 상한까지만) 큐에 되돌린다.
       queueLeadOperation(leadRec.internalId, () => resumeLead(leadRec.internalId, message))
-        .catch(() => { /* 실패해도 알림 자체는 소모(재시도 안 함) */ });
+        .then(result => {
+          if (result === null) {
+            const attempts = attemptedNotices[0].attempts!;
+            logCritical(`[deliverPendingNotices] 팀장 ${leadRec.internalId} 알림 배달(resume)이 실패해 큐에 되돌립니다(시도 ${attempts}/${MAX_NOTICE_DELIVERY_ATTEMPTS}).`);
+            if (attempts >= MAX_NOTICE_DELIVERY_ATTEMPTS) {
+              logCritical(`[deliverPendingNotices] 팀장 ${leadRec.internalId} 알림이 ${MAX_NOTICE_DELIVERY_ATTEMPTS}회 연속 실패해 자동 재시도를 멈춥니다 — 채팅창에서 직접 취소하거나 팀장을 복구한 뒤 다시 보내야 합니다.`);
+            }
+            requeuePendingNotices(attemptedNotices);
+          }
+        })
+        .catch(err => {
+          logCritical(`[deliverPendingNotices] 팀장 ${leadRec.internalId} 알림 배달 중 예외가 발생해 큐에 되돌립니다: ${err}`);
+          requeuePendingNotices(attemptedNotices);
+        });
       continue;
     }
     stillPending.push(...notices);
@@ -1470,7 +1535,10 @@ let claudeBinaryCheck: Promise<void> | null = null;
 function checkClaudeBinaryOnce(): Promise<void> {
   if (!claudeBinaryCheck) {
     claudeBinaryCheck = new Promise(resolve => {
-      exec('where claude', { windowsHide: true }, (err, stdout) => {
+      // 타임아웃 없이 이 exec가 멈추면(예: PATH에 응답 없는 네트워크 드라이브가 섞여있는 경우),
+      // 이 프라미스가 앱 수명 내내 캐시된 채로 절대 resolve되지 않아 이후 팀장/팀원 스폰이 전부
+      // 영구히 막힌다(팀원 버그헌팅에서 지적) — 다른 exec 호출들과 마찬가지로 타임아웃을 준다.
+      exec('where claude', { windowsHide: true, timeout: 5000 }, (err, stdout) => {
         if (err) {
           console.warn('[claude-team-monitor] claude 실행 파일 경로를 확인하지 못했습니다(where claude 실패) — .exe 여부 검증을 생략합니다.');
           resolve();
@@ -1582,12 +1650,19 @@ function stopSession(id: string): Promise<boolean> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      fetchAgents().then(agents => {
+      fetchAgentsStrict().then(agents => {
         const stillAlive = agents.some(a => a.id === id);
         if (stillAlive) {
           console.error(`[stopSession] claude stop ${id} 이후에도 agents 목록에 여전히 남아있습니다 — 정지 실패로 간주합니다.`);
         }
         resolve(exitedCleanly && !stillAlive);
+      }).catch(err => {
+        // 생존 여부 확인 자체가 실패하면(exec/파싱 오류) "안 살아있다"고 fail-open으로 단정하지
+        // 않는다 — 그러면 resumeLead가 그대로 --resume을 걸어, 실제로는 아직 살아있는 세션을 향해
+        // resume해서 복사본(포크)이 생기는 바로 그 사고로 이어질 수 있다. 확인이 안 되면 안전한
+        // 쪽(정지 실패로 간주)으로 fail-closed 한다.
+        console.error(`[stopSession] claude stop ${id} 이후 생존 여부 확인 자체가 실패했습니다 — 안전을 위해 정지 실패로 간주합니다:`, err);
+        resolve(false);
       });
     };
     const child = spawn('claude', ['stop', id]);
@@ -1633,18 +1708,57 @@ async function resumeLead(internalId: string, message: string): Promise<string |
   // 히스토리 탭에서 이미 오프라인인(agents 스냅샷에 안 잡히는) 팀장에게 메시지를 보내도 여기까지
   // 그대로 들어온다 — restartLead와 같은 이유로, 실제로 떠있을 때만 stop을 호출한다(없는 프로세스에
   // claude stop을 걸어 시간을 낭비하고 이어지는 runClaudeBg 타임아웃과 겹치는 걸 막기 위함).
-  const agents = await fetchAgents();
-  const isCurrentlyLive = agents.some(a => a.id === current.id);
+  // 이 판정에 fail-open인 fetchAgents()를 쓰면, exec 자체가 실패했을 때 "확인 안 됨"을 "안
+  // 살아있음"으로 잘못 해석해 stopSession을 건너뛰고 곧장 --resume을 걸어버릴 수 있다 — 그러면
+  // 실제로는 살아있는 세션에 resume을 걸어 복사본(포크)이 생기는, 바로 아래에서 막으려는 그 사고를
+  // 상류에서 그대로 재현하게 된다(팀원 코드리뷰에서 지적: stopSession만 fail-closed로 고쳐봤자
+  // 이 판정 자체가 fail-open이면 무의미하다). 그래서 여기도 fail-closed로 맞춘다 — 확인이 안 되면
+  // "혹시 몰라 살아있다고 가정"하고 stop을 한 번 거친다.
+  let isCurrentlyLive: boolean;
+  try {
+    const agents = await fetchAgentsStrict();
+    isCurrentlyLive = agents.some(a => a.id === current.id);
+  } catch {
+    isCurrentlyLive = true;
+  }
   if (isCurrentlyLive) {
-    await stopSession(current.id);
+    // stop이 실패했는데(타임아웃 등) 그대로 --resume을 걸면, 세션이 아직 살아있는 채로 resume하는
+    // 셈이 되어 claude CLI가 같은 세션을 잇는 대신 복사본(포크)을 새로 만들어버린다(실측 확인, 아래
+    // runClaudeBg 호출부 참고) — 실사용 사고 재현: blocked(권한 승인 대기)로 멈춰있던 팀장이 이
+    // 경로를 타면서 고아 세션(leads.json에 없는 별도 agent)이 하나 더 생겼다. endLeadWork와 같은
+    // 1회 재시도 패턴으로 한 번 더 시도해보고, 그래도 실패하면 포크 위험을 감수하지 않고 여기서
+    // 포기한다(호출부는 null을 실패로 처리).
+    let stopped = await stopSession(current.id);
+    if (!stopped) stopped = await stopSession(current.id);
+    if (!stopped) {
+      logCritical(`[resumeLead] 팀장 ${internalId}(${current.id}) 정지에 실패해 세션 포크 위험이 있어 resume을 중단합니다.`);
+      return null;
+    }
   }
   const mcpToken = issueMcpToken(internalId);
   const newId = await runClaudeBg(['--bg', ...buildMemberSpawnCliArgs(mcpToken), '--resume', current.sessionId, message], current.targetDir);
-  // stop 후 resume하면 보통 같은 짧은 id로 깨어나지만(실측 확인), 혹시 달라지는 경우를 대비해 갱신해둔다.
-  if (newId && newId !== current.id) {
+  if (newId) {
+    // stop 후 resume하면 보통 같은 짧은 id/sessionId로 깨어나지만, 위 가드를 다 통과하고도 CLI가
+    // 어떤 이유로든 새 세션(포크)을 만들었다면 sessionId 자체가 바뀐다 — 이걸 안 챙기고 짧은 id만
+    // 갱신하면 leads.json이 낡은 sessionId를 계속 붙들고 있어서, 다음 메시지도 그 낡은(포크 이전)
+    // 세션을 향해 resume을 시도하다 또 포크가 나는 악순환으로 이어진다(실사용 재현). 그래서 실제
+    // sessionId를 다시 조회해 함께 갱신한다. 이 조회 자체가 (막 spawn된 직후라 claude agents
+    // --json에 아직 안 잡히는 등의 이유로) 실패하면 leads.json이 fork 이전의 낡은 sessionId를
+    // 영구히 붙들고, 이후 모든 메시지가 그 낡은(대화가 거의 안 쌓인) 지점만 계속 resume하게 되어
+    // "새 세션이라 기억이 없다"처럼 보이는 사고로 이어진다(팀원 리뷰에서 지적, 실측 재현) — 그래서
+    // 한 번 실패해도 바로 포기하지 않고 재시도한다.
+    const newSessionId = await findSessionIdByShortIdRetrying(newId);
     const leads = loadLeads();
     const rec = leads.find(l => l.internalId === internalId);
-    if (rec) { rec.id = newId; saveLeads(leads); }
+    if (rec) {
+      rec.id = newId;
+      if (newSessionId) {
+        rec.sessionId = newSessionId;
+      } else {
+        logCritical(`[resumeLead] 팀장 ${internalId}(${newId})의 새 sessionId를 확인하지 못했습니다 — leads.json이 낡은 sessionId(${rec.sessionId})를 계속 가리킬 수 있습니다.`);
+      }
+      saveLeads(leads);
+    }
   }
   return newId;
 }
@@ -1741,6 +1855,25 @@ async function endLeadWork(internalId: string): Promise<{ success: boolean; memb
 async function findSessionIdByShortId(shortId: string): Promise<string | null> {
   const agents = await fetchAgents();
   return agents.find(a => a.id === shortId)?.sessionId ?? null;
+}
+
+// resumeLead가 방금 막 spawn된 짧은 id의 실제 sessionId를 되찾을 때 쓴다 — claude agents --json이
+// 방금 뜬 프로세스를 아직 못 잡았을 수 있는 짧은 반영 지연을 봐주기 위해 재시도한다(팀원 리뷰에서
+// 지적: 이 조회가 실패하면 leads.json이 fork 이전의 낡은 sessionId를 영구히 붙들게 된다). 세션이
+// 여러 개 떠있으면 claude agents --json 자체가 500~940ms씩 걸리는 게 실측으로 확인돼 있어서(위
+// checkClaudeBinaryOnce 주변 실측 주석 참고), 처음엔 500ms 한 번만 쉬고 재시도해서 부족하다는
+// 지적(팀원 리뷰)을 받아 총 3회(딜레이 800ms→1500ms)로 늘렸다 — 이 조회 실패의 대가(leads.json이
+// 영구히 낡은 세션을 가리키게 됨)가 몇 초 더 기다리는 것보다 훨씬 크기 때문이다.
+async function findSessionIdByShortIdRetrying(shortId: string): Promise<string | null> {
+  const delaysMs = [800, 1500];
+  const first = await findSessionIdByShortId(shortId);
+  if (first) return first;
+  for (const delay of delaysMs) {
+    await new Promise(resolve => setTimeout(resolve, delay));
+    const found = await findSessionIdByShortId(shortId);
+    if (found) return found;
+  }
+  return null;
 }
 
 async function launchTeamLead(targetDir: string, instruction: string): Promise<string | null> {
@@ -2087,43 +2220,56 @@ async function findLeadByShortIdWithReconcile(shortId: string): Promise<{ leads:
   return { leads, lead };
 }
 
+// 승인/거부 결정(writeRequestDecision)은 파일에 영구 기록되지만, 그걸 팀장에게 알리는 resumeLead가
+// 실패(null)할 수 있다 — 예전엔 이 반환값을 아예 안 보고 무조건 true를 돌려줘서, 결정은 기록됐는데
+// 팀장은 영원히 그 사실을 모르는 채로(승인 대기 상태 그대로) 남을 수 있었다(팀원 코드리뷰에서 지적).
+// decided(결정 자체가 기록됐는지)와 delivered(팀장에게 실제로 전달됐는지)를 분리해서 렌더러가 후자의
+// 실패를 사용자에게 보여줄 수 있게 한다.
 ipcMain.handle('approve-request', async (_e, requestId: string) => {
   const req = writeRequestDecision(requestId, 'approved');
-  if (!req) return false;
-  const { leads, lead } = await findLeadByShortIdWithReconcile(req.teamLeadId);
-  if (!lead) return false;
+  if (!req) return { decided: false, delivered: false };
+  const { lead } = await findLeadByShortIdWithReconcile(req.teamLeadId);
+  if (!lead) return { decided: true, delivered: false };
 
   if (req.type === 'stop-member') {
     if (req.memberId) await stopSession(req.memberId);
-    await queueLeadOperation(lead.internalId, () =>
+    const result = await queueLeadOperation(lead.internalId, () =>
       resumeLead(lead.internalId, `팀원 종료 요청이 승인됐습니다 — "${req.memberId}" 세션을 종료했습니다. 계속 진행하세요.`));
-    return true;
+    return { decided: true, delivered: result !== null };
   }
 
-  if (!lead.approvedMembers.includes(req.requestedDir!)) {
-    lead.approvedMembers.push(req.requestedDir!);
-    saveLeads(leads);
+  // findLeadByShortIdWithReconcile이 짧은 id 드리프트 때문에 await fetchAgents()를 거쳤을 수 있고
+  // (수백 ms~1초 가까이 걸릴 수 있음, 위 실측 주석 참고), 그 사이 3초 폴링이 leads.json을 다시 저장
+  // (aiTitle 캐싱·id 재조정 등)했을 수 있다 — 여기서 그 폴링 이전에 로드해둔 낡은 leads 배열을 그대로
+  // saveLeads하면 폴링이 방금 쓴 내용을 통째로 덮어써서 잃어버린다(팀원 버그헌팅에서 지적, lost
+  // update). 이 코드베이스의 다른 모든 쓰기(resumeLead/restartLead 등)가 그러듯, 쓰기 직전에
+  // internalId로 최신 레코드를 다시 찾아서 쓴다.
+  const freshLeads = loadLeads();
+  const freshLead = freshLeads.find(l => l.internalId === lead.internalId);
+  if (freshLead && !freshLead.approvedMembers.includes(req.requestedDir!)) {
+    freshLead.approvedMembers.push(req.requestedDir!);
+    saveLeads(freshLeads);
   }
-  await queueLeadOperation(lead.internalId, () =>
+  const result = await queueLeadOperation(lead.internalId, () =>
     resumeLead(lead.internalId, `팀원 요청이 승인됐습니다 — "${req.requestedDir}"에 팀원을 띄워도 됩니다. 이어서 진행하세요.`));
-  return true;
+  return { decided: true, delivered: result !== null };
 });
 
 ipcMain.handle('deny-request', async (_e, requestId: string) => {
   const req = writeRequestDecision(requestId, 'denied');
-  if (!req) return false;
+  if (!req) return { decided: false, delivered: false };
   const { lead } = await findLeadByShortIdWithReconcile(req.teamLeadId);
-  if (!lead) return false;
+  if (!lead) return { decided: true, delivered: false };
 
   if (req.type === 'stop-member') {
-    await queueLeadOperation(lead.internalId, () =>
+    const result = await queueLeadOperation(lead.internalId, () =>
       resumeLead(lead.internalId, `팀원 종료 요청이 거부됐습니다 — "${req.memberId}"는 종료하지 말고 계속 두세요.`));
-    return true;
+    return { decided: true, delivered: result !== null };
   }
 
-  await queueLeadOperation(lead.internalId, () =>
+  const result = await queueLeadOperation(lead.internalId, () =>
     resumeLead(lead.internalId, `팀원 요청이 거부됐습니다 — "${req.requestedDir}"에는 팀원을 띄우지 마세요. 다른 방법을 찾거나 사용자에게 다시 확인하세요.`));
-  return true;
+  return { decided: true, delivered: result !== null };
 });
 
 ipcMain.handle('get-changed-files', (_e, cwd: string) => getGitChangedFiles(cwd));
@@ -2149,6 +2295,12 @@ ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string) => {
 
   const agents = await fetchAgents();
   const agent = agents.find(a => a.id === leadId);
+  // blocked(권한 승인 대기 등)는 busy와 달리 "언젠가 저절로 풀리는" 상태가 아니다 — headless라
+  // 아무도 승인해줄 수 없어 사실상 무기한 멈춰있을 수 있다. 그래서 여기서 blocked를 busy처럼 큐로
+  // 돌리면(한때 그렇게 해봤다가 실사용에서 바로 걸림, 2026-09-17) 메시지가 다시는 안 풀리는 큐에
+  // 영원히 갇혀버린다 — blocked는 오히려 stop→resume으로 깨워서 풀어줘야 하는 상황이다. 세션이
+  // 복사본으로 갈라지는 사고(예전엔 여기서 났다)를 막는 안전장치는 이제 resumeLead 안에 있으므로
+  // (stop 성공 여부를 확인하고 실패하면 resume 자체를 포기함) 여기서는 busy만 큐로 돌리면 된다.
   const isBusy = !!agent && getStatus(agent) === 'busy';
   if (isBusy) {
     const noticeId = queueLeadNotice(lead.internalId, message, 'user');
@@ -2156,6 +2308,10 @@ ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string) => {
   }
 
   const id = await queueLeadOperation(lead.internalId, () => resumeLead(lead.internalId, message));
+  // resumeLead가 null이면(정지 실패 등으로 resume 자체를 포기) 실제로는 메시지가 전달 안 된 것인데,
+  // 예전엔 이걸 그냥 'sent'로 돌려줘서 렌더러가 성공으로 착각해 selectedLeadId를 null로 덮어쓰며
+  // 대화창이 조용히 깨지는 문제가 있었다(팀원 코드리뷰에서 지적) — 별도 상태로 구분해서 알린다.
+  if (id === null) return { status: 'failed' as const };
   return { status: 'sent' as const, id };
 });
 

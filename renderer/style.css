@@ -83,6 +83,10 @@ header h1 { font-size: 15px; margin: 0; }
   gap: 8px;
   width: 220px;
 }
+/* author 스타일의 display 선언은 origin이 달라 브라우저 기본 [hidden]{display:none}보다 항상
+   우선 적용된다 — 위 display:flex가 hidden 속성을 완전히 무력화시켜 패널이 절대 안 닫히던
+   버그(실사용 재현: 2026-09-17)라, hidden일 때는 명시적으로 다시 꺼준다. */
+#app-settings-panel[hidden] { display: none; }
 #app-settings-panel label {
   display: flex;
   flex-direction: column;

@@ -17,13 +17,14 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
-import { spawn, exec } from 'child_process';
+import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { isSafeId } from '../lib/pathGuard';
 import { extractBackgroundedId } from '../lib/claudeBgOutput';
 import { normalizeMemberModel } from '../lib/appSettings';
 import { MEMBERS_DIR } from '../lib/teamMemberPaths';
+import { execAgentsJson } from '../lib/agentsJson';
 // TEAM_MEMBER_BRIEFING은 launchMember(main.ts)가 쓰는 것과 정확히 같은 상수를 그대로 재사용한다
 // — 둘이 어긋나면 앱이 직접 등록하는 팀원과 팀장이 이 툴로 만드는 팀원이 서로 다른 브리핑을
 // 받게 된다. TEAM_MEMBER_STANDBY_NOTE는 여기서 안 쓴다(아래 prompt 조립부 주석 참고).
@@ -57,18 +58,13 @@ function loadLeadFromEnv(): { lead: LeadRecord } | { error: string } {
   return { lead };
 }
 
-function findSessionIdByShortId(shortId: string): Promise<string | null> {
-  return new Promise(resolve => {
-    exec('claude agents --json', { windowsHide: true, maxBuffer: 10 * 1024 * 1024 }, (err, stdout) => {
-      if (err) { resolve(null); return; }
-      try {
-        const agents = JSON.parse(stdout) as { id?: string; sessionId?: string }[];
-        resolve(agents.find(a => a.id === shortId)?.sessionId ?? null);
-      } catch {
-        resolve(null);
-      }
-    });
-  });
+async function findSessionIdByShortId(shortId: string): Promise<string | null> {
+  try {
+    const agents = await execAgentsJson() as { id?: string; sessionId?: string }[];
+    return agents.find(a => a.id === shortId)?.sessionId ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function runClaudeBg(args: string[], cwd: string): Promise<string | null> {

@@ -925,6 +925,15 @@ async function sendChatMessage() {
       chatTranscriptEl.insertAdjacentHTML('beforeend', '<p style="color:#f14c4c">이어하기에 실패했습니다 — 세션이 만료됐거나 claude CLI 실행에 문제가 있을 수 있습니다.</p>');
       return;
     }
+    if (result.status === 'failed') {
+      // main.ts의 resumeLead가 null을 반환한 경우(정지 실패 등으로 resume 자체를 포기) — 예전엔
+      // 이걸 'sent'로 뭉뚱그려서 selectedLeadId가 null로 덮어써지며 대화창이 조용히 사라지는 것처럼
+      // 보이는 버그가 있었다. 'not-found'와 같은 방식으로 명확히 실패를 알린다.
+      removePendingChatTurn(leadId, localId);
+      await renderChat();
+      chatTranscriptEl.insertAdjacentHTML('beforeend', '<p style="color:#f14c4c">전송에 실패했습니다 — 팀장 세션을 정지하지 못해 재개를 포기했습니다. 잠시 후 다시 시도해보세요.</p>');
+      return;
+    }
     if (result.status === 'queued') {
       // 팀장이 지금 작업 중이면 claude CLI 자체에 실행 중인 세션에 끼어들어 입력만 추가하는 기능이
       // 없어서(claude --help 확인) stop→resume으로 끊는 수밖에 없다 — main.ts가 끊지 않고 큐에
@@ -1670,7 +1679,15 @@ function renderRequests(requests) {
     card.querySelectorAll('button').forEach(b => { b.disabled = true; });
     if (leadId) { busyLeadIds.add(leadId); updateBusyUI(); }
     try {
-      await apiCall();
+      const result = await apiCall();
+      // approve-request/deny-request는 이제 { decided, delivered }를 돌려준다 — decided는 결정
+      // 자체가 기록됐는지, delivered는 그 결정을 팀장에게 실제로 전달했는지다. delivered가
+      // false면 결정은 기록됐지만 팀장은 아직 모른다는 뜻이라 조용히 넘어가지 않고 알려준다.
+      if (result && result.decided && !result.delivered) {
+        card.insertAdjacentHTML('beforeend', '<div style="color:#f14c4c">결정은 기록됐지만 팀장에게 전달하지 못했습니다(세션 정지 실패 등) — 팀장이 이 결정을 모르고 있을 수 있습니다.</div>');
+      } else if (result && !result.decided) {
+        card.insertAdjacentHTML('beforeend', '<div style="color:#f14c4c">요청을 찾지 못해 처리하지 못했습니다.</div>');
+      }
     } catch (err) {
       card.insertAdjacentHTML('beforeend', `<div style="color:#f14c4c">처리 중 오류가 발생했습니다: ${escapeHtml(errMsg(err))}</div>`);
     } finally {
