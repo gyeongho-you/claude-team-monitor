@@ -162,17 +162,18 @@ type AgentEntry = {
   state?: string;
 };
 
-// getStatus()의 'busy' 판정은 status 필드 하나만 본다(state는 'done'/'blocked'일 때만 우선 적용) —
-// 그런데 팀원 실측(2026-09-17)으로 실제 프로덕션 세션이 status:'idle' · state:'working'을 동시에
-// 보인 사례가 확인됐다. 이 조합에서 getStatus()는 'idle'을 반환하므로, 실제로는 도구를 실행 중인
-// 팀장에게 send-to-lead/deliverPendingNotices가 "안 바쁘다"고 오판해 stop→resume을 강행할 수
-// 있다 — 이게 오늘 반복된 "한 stop 이벤트 뒤 두 개의 새 세션(중복 스폰)" 사고의 실제 트리거로
-// 보인다(팀원이 CLI 레벨에서 별도로 재현: claude stop 직후 아주 짧은 시간 안에 --resume하면 daemon이
-// "이미 실행 중이라 복사본을 만들었다"고 실제로 로그를 남기며 복사본을 생성함). status든 state든
-// 하나라도 "일하는 중"을 가리키면 안전하게 바쁘다고 봐서 끼어들지 않는다 — send-to-lead/
-// deliverPendingNotices 전용 판정이고, 보드 표시용 getStatus()의 일반 라벨링 의미는 안 건드린다.
+// (2026-09-17 실사용 사고로 되돌림) 한때 이 함수가 getStatus()==='busy'뿐 아니라 state==='working'도
+// "바쁘다"로 봤다 — 실제 프로덕션에서 status:'idle'·state:'working'이 동시에 관측된 사례가 있어서,
+// 도구 실행 중인 팀장을 안 바쁘다고 오판해 끼어드는 사고를 막으려던 것이었다. 그런데 그 우려의 진짜
+// 원인은 "resume에 mcp-config를 다시 실어 보내면 CLI가 복사본을 만든다"는 것이었고(resumeSpawnWithRetry
+// 주석 참고) 그건 이제 근본적으로 고쳤다 — 더 이상 끼어들어도 복사본이 생기지 않는다. 반면 state가
+// 'working'에서 실제로는 다 끝났는데도 계속 고정된 채 안 바뀌는 세션이 실사용으로 확인됐다(d53632df,
+// 몇 분 넘게 idle인데 state만 working) — state==='working'을 바쁨 신호로 쓰면 이런 세션은 큐에 쌓인
+// 메시지가 영원히(자동으로는 다시 안 풀리는 채로) 배달 안 되는, 원래 막으려던 것보다 더 나쁜 사고로
+// 이어진다. 그래서 status만 다시 본다 — send-to-lead/deliverPendingNotices 전용 판정이고, 보드
+// 표시용 getStatus()의 일반 라벨링 의미는 안 건드린다.
 function isLeadTooBusyToInterrupt(agent: AgentEntry): boolean {
-  return getStatus(agent) === 'busy' || agent.state === 'working';
+  return getStatus(agent) === 'busy';
 }
 
 type SessionRow = AgentEntry & {
