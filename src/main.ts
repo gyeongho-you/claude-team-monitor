@@ -2642,6 +2642,25 @@ ipcMain.handle('open-in-terminal', (_e, sessionShortId: string) => {
   child.unref();
 });
 
+// 이 앱(Claude Team Monitor.exe) 자신이 다른 claude 세션 안에서(팀장 세션의 자식 프로세스 등으로)
+// 실행되는 경우가 흔해서, process.env에 CLAUDE_CODE_CHILD_SESSION=1 같은 "나는 상위 세션의 자식이다"
+// 마커가 이미 실려 있을 수 있다(실사용 확인: 2026-09-17). spawn()은 기본적으로 이 env를 그대로
+// 자식 프로세스에 물려주는데, open-terminal-for-approval이 새로 띄우는 터미널의 claude에까지 이
+// 마커가 그대로 전달되면 claude가 그 터미널을 "진짜 새 최상위 세션"이 아니라 기존 세션의 연장으로
+// 보고 워크스페이스 신뢰 다이얼로그 자체를 건너뛴다(터미널 배너에 "inherited CLAUDE_CODE_CHILD_SESSION
+// marker"로 직접 찍힘) — 그런데 그러면서도 ~/.claude.json에 그 디렉토리의 신뢰 승인 기록은 남기지
+// 않는다. 결과적으로 사용자는 눌러야 할 승인 다이얼로그 자체를 못 보고, 승인도 실제로는 안 된 채로
+// 끝나서 checkDirectoryClaudeReady가 여전히 "미승인"으로 판정하는(즉 이 버튼이 아무 효과가 없는)
+// 사고로 이어진다(실사용 재현). 그래서 이 터미널만큼은 CLAUDE_CODE_ 접두사가 붙은 환경변수를 전부
+// 지운 깨끗한 env로 띄워서, 그 안의 claude가 진짜 독립된 최상위 세션처럼 동작하게 한다.
+function envWithoutClaudeCodeSessionMarkers(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('CLAUDE_CODE_')) delete env[key];
+  }
+  return env;
+}
+
 // 사용자가 "승인하기" 버튼을 눌렀을 때, 그 디렉토리에서 새 터미널 창으로 claude를 인터랙티브로
 // 한 번 띄워준다 — claude CLI 최초 실행 시 뜨는 워크스페이스 신뢰/CLAUDE.md include 승인 다이얼로그를
 // 사용자가 그 자리에서 바로 클릭해서 넘길 수 있게 하기 위함(open-in-terminal과 같은 패턴). 렌더러가
@@ -2660,6 +2679,7 @@ ipcMain.handle('open-terminal-for-approval', async (_e, targetDir: string) => {
     detached: true,
     stdio: 'ignore',
     shell: true,
+    env: envWithoutClaudeCodeSessionMarkers(),
   });
   child.on('error', err => console.error('[open-terminal-for-approval] 터미널을 여는 데 실패했습니다:', err));
   child.unref();
