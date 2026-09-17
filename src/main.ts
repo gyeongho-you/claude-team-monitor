@@ -11,7 +11,7 @@ import { writeJsonFileAtomic } from './lib/jsonFile';
 import { TEAM_MEMBER_BRIEFING, TEAM_MEMBER_STANDBY_NOTE } from './lib/teamMemberBriefing';
 import { looksLikeApprovalRequest, parseStallVerdict, isStatusEligibleForStall, shouldCheckStall, shouldSendNudge } from './lib/stallGuard';
 import { MEMBER_MODEL_OPTIONS, clampMinutes, normalizeMemberModel } from './lib/appSettings';
-import { extractBackgroundedId } from './lib/claudeBgOutput';
+import { extractBackgroundedId, extractStartedCopyId } from './lib/claudeBgOutput';
 import { CLAUDE_HOME, MEMBERS_DIR } from './lib/teamMemberPaths';
 import { hasLiveMember } from './lib/leadPresence';
 import { execAgentsJson } from './lib/agentsJson';
@@ -161,6 +161,19 @@ type AgentEntry = {
   status?: string;
   state?: string;
 };
+
+// getStatus()의 'busy' 판정은 status 필드 하나만 본다(state는 'done'/'blocked'일 때만 우선 적용) —
+// 그런데 팀원 실측(2026-09-17)으로 실제 프로덕션 세션이 status:'idle' · state:'working'을 동시에
+// 보인 사례가 확인됐다. 이 조합에서 getStatus()는 'idle'을 반환하므로, 실제로는 도구를 실행 중인
+// 팀장에게 send-to-lead/deliverPendingNotices가 "안 바쁘다"고 오판해 stop→resume을 강행할 수
+// 있다 — 이게 오늘 반복된 "한 stop 이벤트 뒤 두 개의 새 세션(중복 스폰)" 사고의 실제 트리거로
+// 보인다(팀원이 CLI 레벨에서 별도로 재현: claude stop 직후 아주 짧은 시간 안에 --resume하면 daemon이
+// "이미 실행 중이라 복사본을 만들었다"고 실제로 로그를 남기며 복사본을 생성함). status든 state든
+// 하나라도 "일하는 중"을 가리키면 안전하게 바쁘다고 봐서 끼어들지 않는다 — send-to-lead/
+// deliverPendingNotices 전용 판정이고, 보드 표시용 getStatus()의 일반 라벨링 의미는 안 건드린다.
+function isLeadTooBusyToInterrupt(agent: AgentEntry): boolean {
+  return getStatus(agent) === 'busy' || agent.state === 'working';
+}
 
 type SessionRow = AgentEntry & {
   projectName: string;
@@ -1136,7 +1149,7 @@ function deliverPendingNotices(agents: AgentEntry[], leads: LeadRecord[]): void 
     // blocked는 send-to-lead와 같은 이유로 busy와 다르게 취급한다 — 저절로 안 풀리는 상태라 여기서
     // 큐에 계속 묶어두면 영원히 배달 안 되는 메시지가 된다(2026-09-17 실사용 재현). blocked도 배달을
     // 시도해 stop→resume으로 깨우고, 세션 포크 방지는 resumeLead 안의 안전장치가 맡는다.
-    const isBusy = !!liveAgent && getStatus(liveAgent) === 'busy';
+    const isBusy = !!liveAgent && isLeadTooBusyToInterrupt(liveAgent);
     // 영원히 stop이 안 되는 팀장(좀비 프로세스, 영구히 망가진 세션 등)에게는 재시도해봤자 매번
     // 실패한다 — 상한 없이 폴링마다 계속 resume을 시도하면 프로세스 스폰과 에러 로그만 무기한
     // 낭비된다(팀원 코드리뷰에서 지적). 상한을 넘으면 자동 재시도를 멈추고 큐에 그대로(제거하지
@@ -1642,6 +1655,19 @@ function runClaudeBg(args: string[], cwd: string): Promise<string | null> {
     }, RUN_CLAUDE_TIMEOUT_MS);
     child.stdout?.on('data', d => { out += d.toString(); });
     child.on('close', () => {
+      // claude stop이 반환해도 daemon이 실제로 정리를 끝냈다는 보장이 약하다(팀원이 CLI 레벨에서
+      // 직접 재현: stop 직후 짧은 시간 안에 --resume하면 원본을 잇는 대신 "이미 실행 중이라 복사본을
+      // 만들었다"고 stdout에 남기고 완전히 별개의 새 세션을 만들어버림 — exit code 0, 겉보기엔 성공).
+      // 이 마커가 있으면 방금 뜬 세션은 원치 않는 복사본이므로, 곧바로(best-effort로) 정리하고
+      // 실패로 반환한다 — 호출부(resumeSpawnWithRetry)가 간격을 두고 다시 시도하면서, 그때는 원본이
+      // 진짜로 정리돼 있기를 기대한다.
+      const copyId = extractStartedCopyId(out);
+      if (copyId) {
+        logCritical(`[runClaudeBg] daemon이 아직 원본을 정리하지 못해 복사본(${copyId})을 새로 만들었습니다 — 원치 않는 복사본이라 정리하고 실패로 처리합니다(재시도로 이어짐).`);
+        spawn('claude', ['stop', copyId], { stdio: 'ignore' }).on('error', () => { /* best-effort 정리 — 실패해도 이 함수 자체는 어차피 실패로 반환한다 */ });
+        finish(null);
+        return;
+      }
       const id = extractBackgroundedId(out);
       if (!id) {
         console.error('[runClaudeBg] claude stdout에서 "backgrounded" 마커를 찾지 못했습니다. 원문:', out);
@@ -2421,8 +2447,9 @@ ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string) => {
   // 돌리면(한때 그렇게 해봤다가 실사용에서 바로 걸림, 2026-09-17) 메시지가 다시는 안 풀리는 큐에
   // 영원히 갇혀버린다 — blocked는 오히려 stop→resume으로 깨워서 풀어줘야 하는 상황이다. 세션이
   // 복사본으로 갈라지는 사고(예전엔 여기서 났다)를 막는 안전장치는 이제 resumeLead 안에 있으므로
-  // (stop 성공 여부를 확인하고 실패하면 resume 자체를 포기함) 여기서는 busy만 큐로 돌리면 된다.
-  const isBusy = !!agent && getStatus(agent) === 'busy';
+  // (stop 성공 여부를 확인하고 실패하면 resume 자체를 포기함) 여기서는 busy만 큐로 돌리면 된다 —
+  // 다만 "busy"는 status만이 아니라 isLeadTooBusyToInterrupt로 판정한다(위 주석 참고).
+  const isBusy = !!agent && isLeadTooBusyToInterrupt(agent);
   if (isBusy) {
     const noticeId = queueLeadNotice(lead.internalId, message, 'user');
     return { status: 'queued' as const, id: noticeId };

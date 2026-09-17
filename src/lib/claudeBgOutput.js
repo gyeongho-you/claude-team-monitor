@@ -19,4 +19,21 @@ function extractBackgroundedId(stdout) {
   return m ? m[1] : null;
 }
 
-module.exports = { extractBackgroundedId };
+// claude stop이 반환한 뒤 daemon이 실제로 정리를 끝내기 전에 같은 대상으로 --resume을 걸면, CLI가
+// 원래 세션을 잇는 대신 "note: session <원본id> is already running in the background, so this
+// started a copy as <새id>"라는 안내를 stdout에 남기고 완전히 별개의 새 세션(복사본)을 만들어버린다
+// (팀원이 CLI 레벨에서 직접 재현·확인, 2026-09-17 — claude stop의 "정지 완료" 보장이 실제로는 약하다는
+// 뜻). 이 마커를 잡아내면, 방금 만든 세션이 이어받기가 아니라 원치 않는 복사본이라는 걸 그 자리에서
+// 알 수 있다.
+/**
+ * @param {string} stdout - claude --bg --resume 프로세스의 stdout 원문
+ * @returns {string | null} 복사본으로 새로 생긴 짧은 id, 마커를 못 찾으면 null
+ */
+function extractStartedCopyId(stdout) {
+  if (typeof stdout !== 'string') return null;
+  const clean = stdout.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+  const m = clean.match(/started a copy as\s*([a-f0-9]+)/i);
+  return m ? m[1] : null;
+}
+
+module.exports = { extractBackgroundedId, extractStartedCopyId };
