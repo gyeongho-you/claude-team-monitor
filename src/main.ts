@@ -1705,7 +1705,17 @@ function checkClaudeBinaryOnce(): Promise<void> {
 // 사라진다("역할: reviewer"까지만 전달되고 실제 지시가 날아가는 등). `claude`는 실제로 .exe라
 // (`where claude` 확인) shell 없이 바로 spawn해도 PATH에서 찾아 실행되고, 이 경우 인자는 OS의
 // CreateProcess 인자 규칙을 따르므로 개행이 든 문자열도 그대로 온전히 전달된다.
-function runClaudeBg(args: string[], cwd: string): Promise<string | null> {
+//
+// prompt는 반드시 flags와 분리된 별도 인자로 받아서 flags 뒤에 `--`(옵션 종료 마커)를 끼워 넣고서야
+// argv에 싣는다 — 실측 확인(2026-09-18): `--allowedTools`/`--mcp-config`는 `claude --help`에
+// `<tools...>`/`<configs...>`로 명시된 가변인자(variadic) 플래그라, 그 바로 뒤에 구분자 없이 prompt를
+// 붙이면 CLI가 prompt 문자열 전체를 "허용할 도구 이름 하나 더"로 먹어버리고 실제 메시지는 통째로
+// 사라진다. 이 경우 `claude --bg`가 에러 없이 "backgrounded · <id> (idle — send a prompt to start)"를
+// 찍고 뜨는데, 새 세션은 완전히 빈 입력창 상태로 시작해서 지시도 안 가고 스킬(`/team-lead` 등)도 전혀
+// 로드되지 않는다 — 사용자가 "값이랑 명령이 안 간다"고 리포트한 것과 정확히 일치하는 증상이었다.
+// `--`는 POSIX 표준 "이후는 전부 위치 인자" 마커라 그 앞의 플래그가 가변인자든 아니든 항상 안전하다.
+function runClaudeBg(flags: string[], prompt: string, cwd: string): Promise<string | null> {
+  const args = [...flags, '--', prompt];
   return checkClaudeBinaryOnce().then(() => new Promise<string | null>(resolve => {
     let out = '';
     let settled = false;
@@ -1877,7 +1887,7 @@ function queueLeadOperation<T>(internalId: string, fn: () => Promise<T>): Promis
 // 참고, "woke session ... with its saved options"로 확인됨)를 이용해, 돌아온 짧은 id가 resume 전
 // id(current.id)와 다르면 문구를 못 알아봤어도 복사본으로 단정하고 정리한다(resumeOnce).
 function resumeOnce(internalId: string, current: LeadRecord, message: string, attempt: number): Promise<string | null> {
-  return runClaudeBg(['--bg', '--resume', current.sessionId, resolveLongPrompt(message)], current.targetDir).then(candidateId => {
+  return runClaudeBg(['--bg', '--resume', current.sessionId], resolveLongPrompt(message), current.targetDir).then(candidateId => {
     if (!candidateId) return null;
     if (candidateId !== current.id) {
       logCritical(
@@ -2120,7 +2130,8 @@ async function restartLead(internalId: string, instruction: string): Promise<{ i
   // 재시작은 완전히 새 세션(--resume이 아님)이라 launchTeamLead와 같은 이유로 이 시점에 SECRET_MODE_CLI_ARGS를
   // 다시 실어야 한다 — resumeLead와 달리 "저장된 옵션을 물려받는" 경로가 아니다.
   const newId = await runClaudeBg(
-    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), ...(current.secret ? SECRET_MODE_CLI_ARGS : []), resolveLongPrompt(prompt)],
+    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), ...(current.secret ? SECRET_MODE_CLI_ARGS : [])],
+    resolveLongPrompt(prompt),
     current.targetDir,
   );
   if (!newId) {
@@ -2221,7 +2232,8 @@ async function launchTeamLead(targetDir: string, instruction: string, secret?: b
   // 발급해서 --mcp-config에 실은 뒤, 스폰 성공 후 같은 값을 새 레코드에 그대로 저장한다.
   const mcpToken = crypto.randomUUID();
   const id = await runClaudeBg(
-    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), ...(secret ? SECRET_MODE_CLI_ARGS : []), resolveLongPrompt(prompt)],
+    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), ...(secret ? SECRET_MODE_CLI_ARGS : [])],
+    resolveLongPrompt(prompt),
     targetDir,
   );
   if (!id) return null;
@@ -2356,7 +2368,8 @@ async function forkSessionAsLead(sessionId: string, cwd: string): Promise<string
   // 같은 이유로 스폰 전에 직접 발급한다.
   const mcpToken = crypto.randomUUID();
   const id = await runClaudeBg(
-    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), '--resume', sessionId, '지금 이 대화를 Claude Team Monitor로 가져왔습니다(별도 복사본, 원본 세션과는 별개). 계속 진행하세요.'],
+    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), '--resume', sessionId],
+    '지금 이 대화를 Claude Team Monitor로 가져왔습니다(별도 복사본, 원본 세션과는 별개). 계속 진행하세요.',
     cwd,
   );
   if (!id) return null;
@@ -2405,7 +2418,7 @@ async function launchMember(leadId: string, targetDir: string, instruction: stri
   const prompt = `${TEAM_MEMBER_BRIEFING}\n\n${roleLine}${TEAM_MEMBER_STANDBY_NOTE}\n\n"""\n${instruction}\n"""`;
   const normalizedModel = normalizeMemberModel(model);
   const modelArgs = normalizedModel === 'default' ? [] : ['--model', normalizedModel];
-  const id = await runClaudeBg(['--bg', ...modelArgs, resolveLongPrompt(prompt)], targetDir);
+  const id = await runClaudeBg(['--bg', ...modelArgs], resolveLongPrompt(prompt), targetDir);
   if (!id) return null;
   registerMember({ memberId: id, leadId, createdAt: Date.now(), role: role || undefined, label: label.trim() });
 
