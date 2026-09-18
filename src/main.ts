@@ -17,6 +17,7 @@ import { hasLiveMember } from './lib/leadPresence';
 import { execAgentsJson } from './lib/agentsJson';
 import { checkDirectoryClaudeReady, claudeNotReadyMessage } from './lib/claudeReadiness';
 import { shellSingleQuote, escapeAppleScriptString } from './lib/terminalCommand';
+import { resolveLongPrompt } from './lib/longPromptGuard';
 
 const SESSION_EDITS_DIR = path.join(CLAUDE_HOME, 'session-edits');
 // daily-journal은 별도로 설치하는 플러그인이라(이 앱이 번들하지 않음) 있을 수도 없을 수도 있고,
@@ -1865,7 +1866,7 @@ function queueLeadOperation<T>(internalId: string, fn: () => Promise<T>): Promis
 // 참고, "woke session ... with its saved options"로 확인됨)를 이용해, 돌아온 짧은 id가 resume 전
 // id(current.id)와 다르면 문구를 못 알아봤어도 복사본으로 단정하고 정리한다(resumeOnce).
 function resumeOnce(internalId: string, current: LeadRecord, message: string, attempt: number): Promise<string | null> {
-  return runClaudeBg(['--bg', '--resume', current.sessionId, message], current.targetDir).then(candidateId => {
+  return runClaudeBg(['--bg', '--resume', current.sessionId, resolveLongPrompt(message)], current.targetDir).then(candidateId => {
     if (!candidateId) return null;
     if (candidateId !== current.id) {
       logCritical(
@@ -2108,7 +2109,7 @@ async function restartLead(internalId: string, instruction: string): Promise<{ i
   // 재시작은 완전히 새 세션(--resume이 아님)이라 launchTeamLead와 같은 이유로 이 시점에 SECRET_MODE_CLI_ARGS를
   // 다시 실어야 한다 — resumeLead와 달리 "저장된 옵션을 물려받는" 경로가 아니다.
   const newId = await runClaudeBg(
-    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), ...(current.secret ? SECRET_MODE_CLI_ARGS : []), prompt],
+    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), ...(current.secret ? SECRET_MODE_CLI_ARGS : []), resolveLongPrompt(prompt)],
     current.targetDir,
   );
   if (!newId) {
@@ -2209,7 +2210,7 @@ async function launchTeamLead(targetDir: string, instruction: string, secret?: b
   // 발급해서 --mcp-config에 실은 뒤, 스폰 성공 후 같은 값을 새 레코드에 그대로 저장한다.
   const mcpToken = crypto.randomUUID();
   const id = await runClaudeBg(
-    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), ...(secret ? SECRET_MODE_CLI_ARGS : []), prompt],
+    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), ...(secret ? SECRET_MODE_CLI_ARGS : []), resolveLongPrompt(prompt)],
     targetDir,
   );
   if (!id) return null;
@@ -2393,7 +2394,7 @@ async function launchMember(leadId: string, targetDir: string, instruction: stri
   const prompt = `${TEAM_MEMBER_BRIEFING}\n\n${roleLine}${TEAM_MEMBER_STANDBY_NOTE}\n\n"""\n${instruction}\n"""`;
   const normalizedModel = normalizeMemberModel(model);
   const modelArgs = normalizedModel === 'default' ? [] : ['--model', normalizedModel];
-  const id = await runClaudeBg(['--bg', ...modelArgs, prompt], targetDir);
+  const id = await runClaudeBg(['--bg', ...modelArgs, resolveLongPrompt(prompt)], targetDir);
   if (!id) return null;
   registerMember({ memberId: id, leadId, createdAt: Date.now(), role: role || undefined, label: label.trim() });
 

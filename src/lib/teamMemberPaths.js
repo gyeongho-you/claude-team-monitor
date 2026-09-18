@@ -8,5 +8,8 @@ const os = require('os');
 // 서버는 TEAM_MONITOR_LEADS_PATH 환경변수로 전달받는다).
 const CLAUDE_HOME = path.join(os.homedir(), '.claude');
 const MEMBERS_DIR = path.join(CLAUDE_HOME, 'claude-team-monitor', 'members');
+// longPromptGuard.js가 argv 길이 한도를 넘는 지시문을 파일로 대신 써두는 곳 — 같은 이유(main.ts와
+// MCP 서버가 정확히 같은 경로를 봐야 함)로 여기 같이 둔다.
+const PROMPTS_DIR = path.join(CLAUDE_HOME, 'claude-team-monitor', 'prompts');
 
-module.exports = { CLAUDE_HOME, MEMBERS_DIR };
+module.exports = { CLAUDE_HOME, MEMBERS_DIR, PROMPTS_DIR };

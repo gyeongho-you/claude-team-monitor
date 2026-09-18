@@ -30,6 +30,7 @@ import { checkDirectoryClaudeReady, claudeNotReadyMessage } from '../lib/claudeR
 // — 둘이 어긋나면 앱이 직접 등록하는 팀원과 팀장이 이 툴로 만드는 팀원이 서로 다른 브리핑을
 // 받게 된다. TEAM_MEMBER_STANDBY_NOTE는 여기서 안 쓴다(아래 prompt 조립부 주석 참고).
 import { TEAM_MEMBER_BRIEFING } from '../lib/teamMemberBriefing';
+import { resolveLongPrompt } from '../lib/longPromptGuard';
 
 // main.ts의 RUN_CLAUDE_TIMEOUT_MS와 같은 값을 쓴다(콜드 스타트가 오래 걸릴 수 있음을 감안) —
 // 상수 파일을 공유하기엔 main.ts 쪽 값이 다른 여러 타이밍 상수와 얽혀 있어서, 여기서는 그
@@ -158,7 +159,7 @@ server.registerTool(
     }
 
     const memberId = await runClaudeBg(
-      ['--bg', ...modelArgs, ...(lead.secret ? SECRET_MODE_CLI_ARGS : []), prompt],
+      ['--bg', ...modelArgs, ...(lead.secret ? SECRET_MODE_CLI_ARGS : []), resolveLongPrompt(prompt)],
       resolvedTarget,
     );
     if (!memberId) {
