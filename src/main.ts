@@ -1310,10 +1310,21 @@ function deliverPendingNotices(agents: AgentEntry[], leads: LeadRecord[]): void 
     // 큐에 계속 묶어두면 영원히 배달 안 되는 메시지가 된다(2026-09-17 실사용 재현). blocked도 배달을
     // 시도해 stop→resume으로 깨우고, 세션 포크 방지는 resumeLead 안의 안전장치가 맡는다.
     const isBusy = !!liveAgent && isLeadTooBusyToInterrupt(liveAgent);
+    // "터미널에서 직접 열기"로 띄운 attach 창이 아직 붙어있으면 여기서 stop→resume을 시도하지
+    // 않는다(send-to-lead와 같은 이유, 위 isAttachTerminalOpenFor 주석 참고) — 다만 이건 busy와
+    // 달리 attempts를 소모시키지 않는다: 사람이 그 터미널에서 아직 답하고 있는 중일 뿐 실패한 게
+    // 아니므로, 시도 횟수를 깎지 않고 그냥 이번 폴링만 건너뛴다(창을 닫으면 다음 폴링부터 정상
+    // 배달된다).
+    const attachOpen = !!liveAgent?.id && isAttachTerminalOpenFor(liveAgent.id);
+    if (attachOpen) {
+      stillPending.push(...notices);
+      continue;
+    }
     // 영원히 stop이 안 되는 팀장(좀비 프로세스, 영구히 망가진 세션 등)에게는 재시도해봤자 매번
     // 실패한다 — 상한 없이 폴링마다 계속 resume을 시도하면 프로세스 스폰과 에러 로그만 무기한
     // 낭비된다(팀원 코드리뷰에서 지적). 상한을 넘으면 자동 재시도를 멈추고 큐에 그대로(제거하지
-    // 않고) 남겨서 사용자가 채팅창에서 직접 취소하거나, 팀장을 복구한 뒤 다시 보내게 한다.
+    // 않고) 남겨서 사용자가 채팅창에서 직접 취소하거나 다시 보내게 한다(실제로 없는 "팀장 복구"
+    // 버튼을 안내하지 않는다).
     const attemptsSoFar = Math.max(0, ...notices.map(n => n.attempts ?? 0));
     const exhausted = attemptsSoFar >= MAX_NOTICE_DELIVERY_ATTEMPTS;
     if (exhausted) {
@@ -1333,7 +1344,7 @@ function deliverPendingNotices(agents: AgentEntry[], leads: LeadRecord[]): void 
             const attempts = attemptedNotices[0].attempts!;
             logCritical(`[deliverPendingNotices] 팀장 ${leadRec.internalId} 알림 배달(resume)이 실패해 큐에 되돌립니다(시도 ${attempts}/${MAX_NOTICE_DELIVERY_ATTEMPTS}).`);
             if (attempts >= MAX_NOTICE_DELIVERY_ATTEMPTS) {
-              logCritical(`[deliverPendingNotices] 팀장 ${leadRec.internalId} 알림이 ${MAX_NOTICE_DELIVERY_ATTEMPTS}회 연속 실패해 자동 재시도를 멈춥니다 — 채팅창에서 직접 취소하거나 팀장을 복구한 뒤 다시 보내야 합니다.`);
+              logCritical(`[deliverPendingNotices] 팀장 ${leadRec.internalId} 알림이 ${MAX_NOTICE_DELIVERY_ATTEMPTS}회 연속 실패해 자동 재시도를 멈춥니다 — 채팅창에서 직접 취소하고 다시 보내야 합니다.`);
             }
             requeuePendingNotices(attemptedNotices);
           }
@@ -2827,6 +2838,14 @@ ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string) => {
   const lead = loadLeads().find(l => l.id === leadId);
   if (!lead) return { status: 'not-found' as const };
 
+  // "터미널에서 직접 열기"로 띄운 attach 창이 아직 이 세션에 붙어있으면, 여기서 stop→resume을
+  // 걸었다가 attach 쪽의 독립적인 재연결 시도와 경합해서 daemon이 복사본을 만들 수 있다(위
+  // isAttachTerminalOpenFor 주석 참고, 실사용 재현됨). 큐로 돌리지 않고(그러면 영원히 안 풀릴
+  // 수 있다) 바로 실패로 알려서 사용자가 터미널을 닫고 다시 보내게 한다.
+  if (isAttachTerminalOpenFor(leadId)) {
+    return { status: 'attach-open' as const };
+  }
+
   const agents = await fetchAgents();
   const agent = agents.find(a => a.id === leadId);
   // blocked(권한 승인 대기 등)는 busy와 달리 "언젠가 저절로 풀리는" 상태가 아니다 — headless라
@@ -2995,6 +3014,64 @@ function openTerminalRunning(command: string, cwd?: string, winEnv?: NodeJS.Proc
   console.error(`[openTerminalRunning] 이 OS(${process.platform})에서는 터미널 자동 열기를 지원하지 않습니다.`);
 }
 
+// "터미널에서 직접 열기"로 띄운 attach 터미널의 PID를 세션 짧은 id별로 기억해둔다 — 이 창이 열려
+// 있는 동안 앱이 같은 세션에 stop→resume을 걸면(메시지 배달) attach 쪽도 독립적으로 재연결을
+// 시도해서 daemon이 복사본을 만드는 경합이 실제로 재현됐다(2026-09-18, 이 앱 자신의 팀장 세션에서
+// 실사용 재현 — daemon.log에 fleet/shell 태그가 같은 세션에 몇 초 간격으로 번갈아 찍히며 6연속
+// 포크). Windows에서만 지원한다 — macOS는 osascript가 이미 떠있는 Terminal.app에 Apple Event로
+// 명령만 보내는 방식이라 새로 생기는 자식 프로세스가 없어서 PID로 추적할 방법이 없다.
+const attachTerminalPids = new Map<string, number[]>(); // key: session 짧은 id
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// resumeLead/deliverPendingNotices가 stop→resume을 걸기 전에 확인한다 — 살아있는 PID가 하나도
+// 없으면(창을 닫았거나 애초에 못 찾았으면) false를 돌려주면서 지도도 정리한다.
+function isAttachTerminalOpenFor(sessionShortId: string): boolean {
+  const pids = attachTerminalPids.get(sessionShortId);
+  if (!pids || pids.length === 0) return false;
+  const alive = pids.filter(isProcessAlive);
+  if (alive.length === 0) {
+    attachTerminalPids.delete(sessionShortId);
+    return false;
+  }
+  if (alive.length !== pids.length) attachTerminalPids.set(sessionShortId, alive);
+  return true;
+}
+
+// openTerminalRunning으로 claude attach 터미널을 띄운 직후, 그 창의 실제 PID를 찾아 기록한다.
+// Windows에서 콘솔 없는 프로세스(Electron main)가 `cmd.exe /c start cmd.exe /k <command>`로 새
+// 콘솔 창을 띄우면, spawn()이 돌려주는 child(=`cmd.exe /c start ...` 자신)는 `start`가 새 창을
+// 띄우자마자 곧바로 종료돼버려서 child.pid로는 실제 창의 PID를 못 잡는다 — 대신 명령줄에 이
+// 세션의 짧은 id가 고유하게 박혀있는 걸 이용해 WMI로 찾는다. `start`가 실제로 새 창을 띄우기까지
+// 짧은 지연이 있어 800ms 뒤에 조회한다(그 사이 사라지는 `/c start` 자신의 프로세스가 같이 잡혀도
+// 무해하다 — isAttachTerminalOpenFor가 매번 살아있는 것만 걸러낸다).
+function trackAttachTerminal(sessionShortId: string): void {
+  if (process.platform !== 'win32') return;
+  setTimeout(() => {
+    const needle = `claude attach ${sessionShortId}`;
+    const ps = spawn('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command',
+      `Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" | Where-Object { $_.CommandLine -like '*${needle}*' } | Select-Object -ExpandProperty ProcessId`,
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    ps.stdout?.on('data', d => { out += d.toString(); });
+    ps.on('close', () => {
+      const pids = out.split(/\s+/).map(s => parseInt(s, 10)).filter(n => Number.isFinite(n));
+      if (pids.length) attachTerminalPids.set(sessionShortId, pids);
+    });
+    // 못 찾아도(예: powershell 자체가 없는 환경) 이 세션에 대해서만 경합 감지를 못 하는 것뿐이고
+    // 예전(이 기능 추가 전)과 같은 동작으로 남으므로 best-effort로 둔다.
+    ps.on('error', () => { /* ignore */ });
+  }, 800);
+}
+
 ipcMain.handle('open-in-terminal', (_e, sessionShortId: string) => {
   if (typeof sessionShortId !== 'string' || !SESSION_SHORT_ID_RE.test(sessionShortId)) {
     console.error('[open-in-terminal] 유효하지 않은 세션 id라 거부합니다:', sessionShortId);
@@ -3002,6 +3079,7 @@ ipcMain.handle('open-in-terminal', (_e, sessionShortId: string) => {
   }
   // claude attach는 인터랙티브 터미널이 필요해서, 새 콘솔 창을 띄워 그 안에서 attach를 실행한다.
   openTerminalRunning(`claude attach ${sessionShortId}`);
+  trackAttachTerminal(sessionShortId);
 });
 
 // 이 앱(Claude Team Monitor.exe) 자신이 다른 claude 세션 안에서(팀장 세션의 자식 프로세스 등으로)
