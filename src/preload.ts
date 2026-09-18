@@ -17,8 +17,8 @@ contextBridge.exposeInMainWorld('api', {
   adoptLead: (shortId: string) => ipcRenderer.invoke('adopt-lead', shortId),
   getInteractiveSessions: () => ipcRenderer.invoke('get-interactive-sessions'),
   forkSessionAsLead: (sessionId: string, cwd: string) => ipcRenderer.invoke('fork-session-as-lead', sessionId, cwd),
-  launchTeamLead: (targetDir: string, instruction: string) =>
-    ipcRenderer.invoke('launch-team-lead', targetDir, instruction),
+  launchTeamLead: (targetDir: string, instruction: string, secret?: boolean) =>
+    ipcRenderer.invoke('launch-team-lead', targetDir, instruction, secret),
   launchMember: (leadId: string, targetDir: string, instruction: string, role: string, label: string, model?: string) =>
     ipcRenderer.invoke('launch-member', leadId, targetDir, instruction, role, label, model),
   getMemberTemplates: () => ipcRenderer.invoke('get-member-templates'),
@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld('api', {
   getFileDiff: (cwd: string, file: string) => ipcRenderer.invoke('get-file-diff', cwd, file),
   sendToLead: (leadId: string, message: string) => ipcRenderer.invoke('send-to-lead', leadId, message),
   cancelQueuedMessage: (leadId: string, noticeId: string) => ipcRenderer.invoke('cancel-queued-message', leadId, noticeId),
+  deleteLeadHistory: (internalId: string) => ipcRenderer.invoke('delete-lead-history', internalId),
   getPendingNoticeIds: (leadId: string) => ipcRenderer.invoke('get-pending-notice-ids', leadId),
   getStallAlerts: () => ipcRenderer.invoke('get-stall-alerts'),
   confirmStallAlert: (alertId: string) => ipcRenderer.invoke('confirm-stall-alert', alertId),

@@ -111,7 +111,11 @@ const cleanupStopPanelEl = document.getElementById('cleanup-stop-panel');
 const cleanupStopInfoEl = document.getElementById('cleanup-stop-info');
 const cleanupStopConfirmBtn = document.getElementById('cleanup-stop-confirm-btn');
 const cleanupStopCancelBtn = document.getElementById('cleanup-stop-cancel-btn');
-const ALL_MODAL_PANELS = () => [restartLeadPanelEl, endWorkPanelEl, fileListPanelEl, cleanupStopPanelEl];
+const historyDeletePanelEl = document.getElementById('history-delete-panel');
+const historyDeleteInfoEl = document.getElementById('history-delete-info');
+const historyDeleteConfirmBtn = document.getElementById('history-delete-confirm-btn');
+const historyDeleteCancelBtn = document.getElementById('history-delete-cancel-btn');
+const ALL_MODAL_PANELS = () => [restartLeadPanelEl, endWorkPanelEl, fileListPanelEl, cleanupStopPanelEl, historyDeletePanelEl];
 
 // "새 작업 시작"/"작업 종료"/"변경 파일" 같은 확인창·상세창은 대화창 아래쪽에 인라인으로 뜨면
 // 스크롤 밖이라 눈에 안 띄어서(사용자 피드백), 화면 가운데 팝업(모달)으로 띄운다 — 배경을
@@ -250,6 +254,7 @@ const addMemberStatusEl = document.getElementById('add-member-status');
 const targetDirSelect = document.getElementById('target-dir-select');
 const pickDirBtn = document.getElementById('pick-dir-btn');
 const instructionEl = document.getElementById('instruction');
+const launchSecretToggle = document.getElementById('launch-secret-toggle');
 const launchBtn = document.getElementById('launch-btn');
 const launchStatusEl = document.getElementById('launch-status');
 
@@ -492,6 +497,7 @@ function renderLeadCard(row) {
     <div class="session-card lead-card ${cardStatusClass} ${selected}" data-lead="${escapeHtml(row.id)}">
       <div class="top-line">
         <input class="lead-label-input" data-lead-label="${escapeHtml(row.id)}" value="${escapeHtml(row.label || '')}" placeholder="${escapeHtml(row.projectName)}" />
+        ${row.secret ? '<span class="secret-badge" title="daily-journal 등 user-level 기록이 안 남는 시크릿 모드입니다">🔒</span>' : ''}
         <span>${escapeHtml(statusLabel)}</span>
       </div>
       ${row.name ? `<div class="lead-topic">${escapeHtml(row.name)}</div>` : ''}
@@ -1441,8 +1447,10 @@ function renderHistoryCard(row) {
     <div class="history-item" data-history-lead="${escapeHtml(row.id)}">
       <div class="history-top">
         <span>${escapeHtml(row.label || row.projectName)}</span>
+        ${row.secret ? '<span class="secret-badge" title="시크릿 모드로 띄웠던 팀장입니다">🔒</span>' : ''}
         ${row.name ? `<span class="history-topic">${escapeHtml(row.name)}</span>` : ''}
         ${historyRiskBadge(row)}
+        <button class="history-delete-btn" data-delete-history="${escapeHtml(row.internalId || '')}" title="Team Monitor 히스토리에서만 삭제합니다(실제 대화 파일은 안 지움)">삭제</button>
       </div>
       <div class="history-meta">${escapeHtml(row.cwd)} · ${relativeAge(row.startedAt)} 시작</div>
       ${row.preview ? `<div class="history-preview">${formatPreview(row.preview, 80, 160)}</div>` : ''}
@@ -1450,6 +1458,8 @@ function renderHistoryCard(row) {
     </div>
   `;
 }
+
+let historyDeleteTargetId = null;
 
 function renderHistory() {
   const offlineLeads = lastRows.filter(r => r.isLead && r.offline);
@@ -1463,7 +1473,45 @@ function renderHistory() {
       selectLead(el.dataset.historyLead);
     });
   });
+
+  // "삭제" 버튼은 카드 전체의 클릭(이어하기로 이동)과 같은 영역에 있으므로 stopPropagation으로
+  // 부모 카드의 클릭 리스너를 막는다 — 안 그러면 삭제 확인 모달을 열려다 작업 탭으로 튕겨나간다.
+  historyListEl.querySelectorAll('[data-delete-history]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const internalId = btn.dataset.deleteHistory;
+      const row = lastRows.find(r => r.isLead && r.internalId === internalId);
+      historyDeleteTargetId = internalId;
+      historyDeleteInfoEl.textContent = row ? `${row.label || row.projectName} · ${row.cwd}` : '';
+      showModal(historyDeletePanelEl);
+    });
+  });
 }
+
+historyDeleteCancelBtn.addEventListener('click', () => {
+  historyDeleteTargetId = null;
+  hideModal(historyDeletePanelEl);
+});
+
+historyDeleteConfirmBtn.addEventListener('click', async () => {
+  if (!historyDeleteTargetId) return hideModal(historyDeletePanelEl);
+  const internalId = historyDeleteTargetId;
+  historyDeleteConfirmBtn.disabled = true;
+  try {
+    const result = await window.api.deleteLeadHistory(internalId);
+    if (!result || !result.success) {
+      historyDeleteInfoEl.insertAdjacentHTML('beforeend', `<div style="color:#f14c4c">삭제 실패: ${escapeHtml((result && result.error) || '알 수 없는 오류')}</div>`);
+      return;
+    }
+    historyDeleteTargetId = null;
+    hideModal(historyDeletePanelEl);
+    await renderHistory();
+  } catch (err) {
+    historyDeleteInfoEl.insertAdjacentHTML('beforeend', `<div style="color:#f14c4c">삭제 중 오류: ${escapeHtml(errMsg(err))}</div>`);
+  } finally {
+    historyDeleteConfirmBtn.disabled = false;
+  }
+});
 
 refreshHistoryBtn.addEventListener('click', renderHistory);
 
@@ -1482,6 +1530,7 @@ function renderMemberCard(row, leadLabelById) {
     <div class="session-card member-card ${statusClass(row)}">
       <div class="top-line">
         <span>${escapeHtml(row.label || row.projectName)}</span>
+        ${row.secret ? '<span class="secret-badge" title="시크릿 팀장이 만든 팀원입니다">🔒</span>' : ''}
         <span>${escapeHtml(statusLabel)}</span>
       </div>
       ${row.leadId ? `<div class="member-of">소속 팀장: ${escapeHtml(leadDisplay)}${row.role ? ` · 역할: ${escapeHtml(row.role)}` : ''}</div>` : ''}
@@ -2018,11 +2067,12 @@ launchBtn.addEventListener('click', async () => {
   launchBtn.disabled = true;
   launchStatusEl.textContent = '띄우는 중...';
   try {
-    const id = await window.api.launchTeamLead(targetDirSelect.value, instructionEl.value);
+    const id = await window.api.launchTeamLead(targetDirSelect.value, instructionEl.value, launchSecretToggle.checked);
     if (id) {
       launchStatusEl.textContent = `팀장 세션(${id})을 시작했습니다.`;
       formMode = 'none';
       selectedLeadId = id;
+      launchSecretToggle.checked = false; // 다음 팀장은 기본값(일반 모드)에서 다시 시작 — 매번 실수로 켜져 있으면 안 됨
       renderMemberRow(); // 새 팀장이라 소속 팀원이 없을 테니, 폴링 안 기다리고 바로 비워서 보여준다
     } else {
       launchStatusEl.textContent = '팀장 세션 시작에 실패했습니다 — 터미널을 직접 열어 claude --version, claude --bg가 정상 동작하는지 확인해보세요(CLI 미설치·PATH 문제·로그인 만료가 흔한 원인입니다).';

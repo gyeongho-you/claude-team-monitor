@@ -36,7 +36,13 @@ import { TEAM_MEMBER_BRIEFING } from '../lib/teamMemberBriefing';
 // 값만 그대로 복사해 유지한다.
 const RUN_CLAUDE_TIMEOUT_MS = 45000;
 
-type LeadRecord = { id: string; sessionId: string; approvedMembers: string[]; mcpToken?: string };
+type LeadRecord = { id: string; sessionId: string; approvedMembers: string[]; mcpToken?: string; secret?: boolean };
+
+// main.ts의 SECRET_MODE_CLI_ARGS와 정확히 같은 값이다 — 시크릿 팀장이 만드는 팀원도 daily-journal
+// 등 user-level 훅에 안 남아야 "팀장만 시크릿이고 팀원은 흔적이 남는" 반쪽짜리가 안 된다. 상수
+// 파일을 공유하기엔 main.ts 쪽이 다른 타이밍 상수와 얽혀 있어서, RUN_CLAUDE_TIMEOUT_MS와 같은
+// 이유로 여기서도 값만 그대로 복사해 유지한다 — main.ts에서 이 값을 바꾸면 여기도 같이 바꿔야 한다.
+const SECRET_MODE_CLI_ARGS = ['--setting-sources', 'project,local'];
 
 function errorResult(text: string) {
   return { content: [{ type: 'text' as const, text }], isError: true as const };
@@ -88,7 +94,7 @@ function runClaudeBg(args: string[], cwd: string): Promise<string | null> {
   });
 }
 
-function registerMember(member: { memberId: string; leadId: string; createdAt: number; role?: string; label?: string; sessionId?: string }): void {
+function registerMember(member: { memberId: string; leadId: string; createdAt: number; role?: string; label?: string; sessionId?: string; secret?: boolean }): void {
   if (!isSafeId(member.memberId)) {
     throw new Error(`memberId 형식이 안전하지 않습니다: ${JSON.stringify(member.memberId)}`);
   }
@@ -151,14 +157,17 @@ server.registerTool(
       return errorResult(claudeNotReadyMessage(resolvedTarget, readiness.reason!));
     }
 
-    const memberId = await runClaudeBg(['--bg', ...modelArgs, prompt], resolvedTarget);
+    const memberId = await runClaudeBg(
+      ['--bg', ...modelArgs, ...(lead.secret ? SECRET_MODE_CLI_ARGS : []), prompt],
+      resolvedTarget,
+    );
     if (!memberId) {
       return errorResult('claude --bg 실행에 실패했습니다 — claude CLI 설치/로그인 상태 또는 대상 디렉토리를 확인하세요.');
     }
 
     const sessionId = (await findSessionIdByShortId(memberId)) ?? undefined;
     try {
-      registerMember({ memberId, leadId: lead.id, createdAt: Date.now(), role, label: label.trim(), sessionId });
+      registerMember({ memberId, leadId: lead.id, createdAt: Date.now(), role, label: label.trim(), sessionId, secret: lead.secret });
     } catch (err) {
       return errorResult(
         `팀원(${memberId})은 떴지만 등록에 실패했습니다: ${err instanceof Error ? err.message : String(err)}. ` +

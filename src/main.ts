@@ -208,6 +208,7 @@ type SessionRow = AgentEntry & {
   // 팀장 카드일 때만: resumeSpawnWithRetry가 daemon 레이스로 인한 크래시를 재시도하는 중이면
   // 채워진다 — 렌더러가 채팅창에 "재시도 중 (n/m)"으로 보여준다.
   resumeRetrying?: { attempt: number; max: number };
+  secret?: boolean; // 팀장·팀원 카드 공통: LeadRecord.secret/MemberRecord.secret을 그대로 반영 — 🔒 표시용
 };
 
 type TranscriptEntry = { time: string; prompt: string; answer: string };
@@ -223,6 +224,9 @@ type MemberRecord = {
                        // 이 필드를 추가하기 전에 등록된(또는 SKILL.md를 그대로 따라 팀장이 직접 쓴)
                        // 레코드에는 없을 수 있어 optional이다 — 그런 레코드는 살아있는 동안 자동으로
                        // 채워진다(reconcileMemberIds 참고).
+  secret?: boolean; // 시크릿 팀장이 spawn_team_member로 띄운 팀원이면 true — 화면 표시용
+                     // (실제로 훅을 껐는지는 스폰 시점의 CLI 인자가 결정하고, 이 필드는 그 결과를
+                     // 사용자에게 보여주기 위한 라벨일 뿐이다).
 };
 
 // "팀장 디렉토리" — 팀장을 어디서 띄울지 고르는 용도의 단순 등록 목록. 팀원 관련 결정(역할·사전승인)은
@@ -283,6 +287,13 @@ type LeadRecord = {
   // 별도 토큰을 쓴다. 짧은 id/sessionId와 달리 매 재개(resume)/재시작마다 새로 발급해도 무방하다
   // (이 프로세스 인스턴스 하나의 수명 동안만 유효하면 됨 — internalId처럼 영구히 안정적일 필요는 없다).
   mcpToken?: string;
+  // true면 launchTeamLead/restartLead가 SECRET_MODE_CLI_ARGS를 실어 daily-journal 등 user-level
+  // 훅이 아예 안 뜨게 띄운다(실측 확인: --setting-sources project,local이면 PostToolUse/Stop 훅이
+  // 트리거되지 않는다 — daily-journal의 user-config.json을 건드릴 필요가 없다). resumeLead는 이
+  // 플래그를 다시 안 실어 보낸다 — --resume에 저장된 옵션을 다시 실으면 복사본이 생기는 것과 같은
+  // 이유로(resumeSpawnWithRetry 주석 참고), 세션이 이미 시작 시점에 물려받은 설정을 그대로 쓴다.
+  // 사용자가 팀장 카드에서 직접 켠다.
+  secret?: boolean;
 };
 
 // 'dir-approval': 사전 승인 안 된 디렉토리에 팀원을 새로 띄우고 싶을 때(requestedDir 사용).
@@ -881,6 +892,7 @@ function computeLiveRows(
         offline: false,
         internalId: isLead ? lead?.internalId : undefined,
         autoStallNudge: isLead ? lead?.autoStallNudge : undefined,
+        secret: isLead ? lead?.secret : member?.secret,
       };
     });
 }
@@ -1253,6 +1265,7 @@ function buildLeadRecordRow(l: LeadRecord, offline: boolean): { row: SessionRow;
     offline,
     internalId: l.internalId,
     autoStallNudge: l.autoStallNudge,
+    secret: l.secret,
   };
   return { row, aiTitleUpdated };
 }
@@ -1730,6 +1743,14 @@ function buildMemberSpawnCliArgs(mcpToken: string): string[] {
   return ['--mcp-config', JSON.stringify(config), '--allowedTools', MEMBER_SPAWN_TOOL_NAME];
 }
 
+// 실측 확인(2026-09-18): --setting-sources project,local로 띄우면(즉 user-level 설정을 안 읽으면)
+// daily-journal 플러그인의 PostToolUse(파일 편집 기록)·Stop(세션 요약) 훅이 아예 트리거되지 않는다
+// — daily-journal의 user-config.json을 손대지 않고도 "이 세션은 기록에 안 남긴다"를 완전히
+// 달성한다(daily-journal 훅이 user-level settings.json에 등록돼 있어서 가능한 것 — plugin 훅
+// 등록 방식이 바뀌면 이 값도 다시 검증해야 한다). 워크스페이스 신뢰 승인 여부는 이 옵션과 무관하게
+// 정상 동작함을 실측으로 확인했다(트러스트 상태는 설정 소스가 아니라 별도 메커니즘인 것으로 보임).
+const SECRET_MODE_CLI_ARGS = ['--setting-sources', 'project,local'];
+
 // 기존(이미 leads.json에 있는) 팀장 레코드에 새 토큰을 발급해 즉시 저장한다 — resumeLead/
 // restartLead처럼 스폰 전에 이미 internalId를 아는 경로에서 쓴다. 다른 팀장의 동시 변경을
 // 덮어쓰지 않도록, 스폰 직전에 다시 읽어서 쓴다(forkSessionAsLead 등과 같은 패턴).
@@ -2064,7 +2085,12 @@ async function restartLead(internalId: string, instruction: string): Promise<{ i
   const prompt = `/team-lead ${instruction}\n\n${approvedText}`;
 
   const mcpToken = issueMcpToken(internalId);
-  const newId = await runClaudeBg(['--bg', ...buildMemberSpawnCliArgs(mcpToken), prompt], current.targetDir);
+  // 재시작은 완전히 새 세션(--resume이 아님)이라 launchTeamLead와 같은 이유로 이 시점에 SECRET_MODE_CLI_ARGS를
+  // 다시 실어야 한다 — resumeLead와 달리 "저장된 옵션을 물려받는" 경로가 아니다.
+  const newId = await runClaudeBg(
+    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), ...(current.secret ? SECRET_MODE_CLI_ARGS : []), prompt],
+    current.targetDir,
+  );
   if (!newId) {
     return { error: `claude --bg가 ${RUN_CLAUDE_TIMEOUT_MS / 1000}초 안에 새 세션 시작을 확인해주지 못했습니다(타임아웃 또는 "backgrounded" 표시를 못 찾음). claude CLI 로그인/설치 상태를 확인해보세요 — 자세한 로그는 앱 콘솔에 남습니다.` };
   }
@@ -2149,7 +2175,7 @@ async function findSessionIdByShortIdRetrying(shortId: string): Promise<string |
   return null;
 }
 
-async function launchTeamLead(targetDir: string, instruction: string): Promise<string | null> {
+async function launchTeamLead(targetDir: string, instruction: string, secret?: boolean): Promise<string | null> {
   const readiness = checkDirectoryClaudeReady(targetDir);
   if (!readiness.ready) {
     logCritical(claudeNotReadyMessage(targetDir, readiness.reason!));
@@ -2162,7 +2188,10 @@ async function launchTeamLead(targetDir: string, instruction: string): Promise<s
   // 아직 leads.json 레코드가 없어서(브랜드 뉴 팀장) issueMcpToken을 못 쓴다 — 스폰 전에 직접
   // 발급해서 --mcp-config에 실은 뒤, 스폰 성공 후 같은 값을 새 레코드에 그대로 저장한다.
   const mcpToken = crypto.randomUUID();
-  const id = await runClaudeBg(['--bg', ...buildMemberSpawnCliArgs(mcpToken), prompt], targetDir);
+  const id = await runClaudeBg(
+    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), ...(secret ? SECRET_MODE_CLI_ARGS : []), prompt],
+    targetDir,
+  );
   if (!id) return null;
 
   // 막 시작한 세션은 첫 턴을 처리 중일 수 있어 곧바로 stop시키면 방해가 된다 — 그래서 이 시점엔 자기 id를
@@ -2171,7 +2200,7 @@ async function launchTeamLead(targetDir: string, instruction: string): Promise<s
   const sessionId = (await findSessionIdByShortId(id)) ?? id;
 
   const leads = loadLeads();
-  leads.push({ id, sessionId, targetDir, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID(), mcpToken });
+  leads.push({ id, sessionId, targetDir, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID(), mcpToken, secret });
   saveLeads(leads);
 
   return id;
@@ -2419,9 +2448,9 @@ ipcMain.handle('update-favorite-name', (_e, dir: string, name: string) => {
   return favs;
 });
 
-ipcMain.handle('launch-team-lead', async (_e, targetDir: string, instruction: string) => {
+ipcMain.handle('launch-team-lead', async (_e, targetDir: string, instruction: string, secret?: boolean) => {
   const finalInstruction = instruction || '지금 상황을 파악하고 다음 작업을 시작해줘.';
-  return launchTeamLead(targetDir, finalInstruction);
+  return launchTeamLead(targetDir, finalInstruction, secret);
 });
 
 ipcMain.handle('get-adoptable-sessions', () => getAdoptableSessions());
@@ -2661,6 +2690,33 @@ ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string) => {
 
 // 대기열에 쌓아둔 메시지 중 아직 전달 안 된 것을 사용자가 취소할 수 있게 한다(채팅창의 "취소" 버튼).
 ipcMain.handle('cancel-queued-message', (_e, leadId: string, noticeId: string) => cancelQueuedNotice(leadId, noticeId));
+
+// 히스토리 탭에서 "삭제" — 실제 claude 세션·대화 파일(daily-journal 포함)은 전혀 안 건드리고, 이
+// 앱 자신의 추적 기록(leads.json)에서만 지운다. 시크릿 모드를 쓴 사용자가 Team Monitor 화면에서도
+// 흔적을 지우고 싶을 때를 위한 기능이라, "이 앱이 기억하는 목록에서 빼는 것"이 전부다 — 더 깊이
+// (원본 세션 transcript 자체)까지 지우는 건 되돌릴 수 없는 파괴적 작업이라 여기서 다루지 않는다.
+// 살아있는 팀장(또는 그 소속 팀원)을 실수로 지우면 다음 폴링 때 "미등록" 세션으로 다시 나타나
+// 혼란을 주므로, 오프라인 상태일 때만 지우도록 막는다.
+async function deleteLeadHistory(internalId: string): Promise<{ success: boolean; error?: string }> {
+  const leads = loadLeads();
+  const rec = leads.find(l => l.internalId === internalId);
+  if (!rec) return { success: false, error: '팀장 기록을 찾을 수 없습니다(이미 삭제됐을 수 있음).' };
+  let isLive: boolean;
+  try {
+    const agents = await fetchAgentsStrict();
+    const agentIdSet = new Set(agents.map(a => a.id));
+    isLive = agentIdSet.has(rec.id) || hasLiveMember(rec.id, loadMembers(), agentIdSet);
+  } catch {
+    isLive = true; // 확인 자체가 실패하면 fail-closed — 살아있는데 지워버리는 사고보다 안전하다.
+  }
+  if (isLive) {
+    return { success: false, error: '이 팀장(또는 소속 팀원)이 아직 살아있는 것으로 보입니다 — 오프라인 상태에서만 히스토리를 삭제할 수 있습니다.' };
+  }
+  saveLeads(leads.filter(l => l.internalId !== internalId));
+  return { success: true };
+}
+
+ipcMain.handle('delete-lead-history', (_e, internalId: string) => deleteLeadHistory(internalId));
 
 // 이 팀장 앞으로 아직 서버에 남아있는(전달 안 된) 대기열 알림들의 id 목록을 돌려준다 — 렌더러는
 // 짧은 id만 알고 있으므로 여기서 internalId로 변환해서 찾는다. 두 곳에서 쓴다: (1) 재시작/작업종료

@@ -696,6 +696,11 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 .history-item:hover { border-color: var(--accent); }
 .history-top { display: flex; align-items: baseline; gap: 8px; font-weight: 600; }
 .history-topic { color: var(--accent-2); font-weight: 400; font-size: 12px; }
+/* daily-journal 등 기록을 안 남기는 시크릿 모드 표시 — 팀장/팀원 카드·히스토리 공통. */
+.secret-badge { font-size: 12px; }
+/* 히스토리 카드 안의 "삭제"는 카드를 누르면 이어하기로 이동하는 큰 클릭 영역 한가운데 있어서,
+   실수로 안 눌리게 오른쪽 끝으로 밀어내고 눈에 덜 띄는 톤으로 둔다. */
+.history-delete-btn { margin-left: auto; background: var(--border-2); color: var(--text-faint); font-size: 11px; padding: 2px 8px; }
 .history-meta { color: var(--text-faint); font-size: 11px; word-break: break-all; margin-top: 2px; }
 .history-preview {
   margin-top: 6px;
