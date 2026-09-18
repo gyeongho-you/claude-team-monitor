@@ -178,8 +178,16 @@ type AgentEntry = {
 // 메시지가 영원히(자동으로는 다시 안 풀리는 채로) 배달 안 되는, 원래 막으려던 것보다 더 나쁜 사고로
 // 이어진다. 그래서 status만 다시 본다 — send-to-lead/deliverPendingNotices 전용 판정이고, 보드
 // 표시용 getStatus()의 일반 라벨링 의미는 안 건드린다.
+//
+// waitingFor==='input needed'(AskUserQuestion으로 멈춘 상태)도 여기서 같이 막는다 — 실사용 지적
+// (2026-09-18): 채팅 "전송"(수동)뿐 아니라 deliverPendingNotices(자동 큐 배달)도 이 판정 하나를
+// 그대로 타므로, 여기서 안 막으면 대기 중이던 큐 메시지가 자동으로 stop→resume을 걸어 선택지를
+// declined 처리해버린다(오늘 실측 확인된 그 사고를, 사람이 안 시켰는데도 재현하는 셈). state===
+// 'working'과 달리 이건 "끝났는데도 안 풀리는" 종류가 아니라 "터미널에서 답하거나 daemon이 자체
+// 재기동하면서 자연히 풀리는" 종류라(오늘 실측: 두 경우 다 waitingFor가 사라짐) 영구 미배달로
+// 이어질 위험은 낮다고 판단했다.
 function isLeadTooBusyToInterrupt(agent: AgentEntry): boolean {
-  return getStatus(agent) === 'busy';
+  return getStatus(agent) === 'busy' || agent.waitingFor === 'input needed';
 }
 
 type SessionRow = AgentEntry & {
