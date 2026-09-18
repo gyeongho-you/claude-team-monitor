@@ -370,6 +370,8 @@ body.modal-open { overflow: hidden; }
    경고하고, 원문 에러 메시지는 작은 글씨로 참고용으로만 보여준다. */
 .pending-choice-unresolvable { border-color: #f14c4c; }
 .pending-choice-detail { color: var(--text-dim); font-size: 11px; margin-bottom: 6px; white-space: pre-wrap; }
+/* 한 번의 AskUserQuestion 호출에 질문이 여러 개 실렸을 때 — 첫 질문 옆에 붙는 "+N개 더" 배지. */
+.pending-choice-extra { color: var(--text-dim); font-size: 10px; font-weight: normal; }
 .chat-input-row { display: flex; gap: 6px; }
 #chat-input { flex: 1; height: 50px; background: var(--bg); border: 1px solid var(--border-2); color: var(--text); padding: 6px; resize: vertical; }
 

@@ -814,13 +814,23 @@ async function renderChat() {
     } catch { /* 아래에서 questions가 null이면 그냥 안내를 안 보여준다 */ }
     if (mySeq !== renderChatSeq) return; // 위와 같은 이유로 최신 호출만 화면을 쓴다
     if (questions && questions.length) {
-      pendingChoiceHtml = questions.map(q => `
+      // AskUserQuestion 한 번 호출에 질문이 여러 개 실릴 수 있다 — 예전엔 질문마다 카드를 통째로
+      // 반복해서 "터미널에서 직접 열기" 버튼까지 여러 개 찍혔다(실사용 지적, 2026-09-18: 답은 터미널
+      // 하나로만 하는데 버튼이 여러 개면 어느 걸 눌러야 하는지 헷갈림). 첫 질문만 카드로 보여주고,
+      // 나머지는 "+N개 더"로 한 줄만 더 붙인다 — 버튼은 카드당 하나로 고정.
+      const [first, ...rest] = questions;
+      const extraBadge = rest.length ? `<span class="pending-choice-extra">+${rest.length}개 더</span>` : '';
+      const restLineHtml = rest.length
+        ? `<div class="pending-choice-detail">${rest.map(q => escapeHtml(q.question)).join(' · ')}</div>`
+        : '';
+      pendingChoiceHtml = `
         <div class="pending-choice">
-          <div class="pending-choice-question">${escapeHtml(q.question)}</div>
-          <div class="pending-choice-detail">선택지: ${q.options.map(o => escapeHtml(o.label)).join(' / ')}</div>
+          <div class="pending-choice-question">${escapeHtml(first.question)} ${extraBadge}</div>
+          <div class="pending-choice-detail">선택지: ${first.options.map(o => escapeHtml(o.label)).join(' / ')}</div>
+          ${restLineHtml}
           <div class="pending-choice-options">${terminalBtnHtml}</div>
         </div>
-      `).join('');
+      `;
     }
   } else if (row && getStatus(row) === 'blocked') {
     // AskUserQuestion이 아니어도 채팅으로는 절대 못 푸는 blocked가 있다(예: 로그인 갱신 실패) —
