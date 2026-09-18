@@ -33,6 +33,7 @@ contextBridge.exposeInMainWorld('api', {
   openInTerminal: (id: string) => ipcRenderer.invoke('open-in-terminal', id),
   openTerminalForApproval: (targetDir: string) => ipcRenderer.invoke('open-terminal-for-approval', targetDir),
   getLeadTranscript: (leadId: string) => ipcRenderer.invoke('get-lead-transcript', leadId),
+  getPendingChoice: (shortId: string) => ipcRenderer.invoke('get-pending-choice', shortId),
   getChangedFiles: (cwd: string) => ipcRenderer.invoke('get-changed-files', cwd),
   getFileDiff: (cwd: string, file: string) => ipcRenderer.invoke('get-file-diff', cwd, file),
   sendToLead: (leadId: string, message: string) => ipcRenderer.invoke('send-to-lead', leadId, message),

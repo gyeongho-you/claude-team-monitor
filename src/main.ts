@@ -31,6 +31,9 @@ const SETTINGS_PATH = path.join(app.getPath('userData'), 'settings.json');
 const APP_LOG_PATH = path.join(app.getPath('userData'), 'app.log');
 // 팀장 세션(claude 프로세스, 이 앱과 별개)도 알아야 하는 고정 경로라서 앱 userData가 아니라 ~/.claude 밑에 둔다.
 const REQUESTS_DIR = path.join(CLAUDE_HOME, 'claude-team-monitor', 'requests');
+// claude CLI 자신의 daemon job 상태 파일 — readPendingChoiceQuestions가 AskUserQuestion으로 뜬
+// 구조화된 선택지를 읽어오는 데 쓴다(claude agents --json엔 이 상세 내용이 없다).
+const JOBS_DIR = path.join(CLAUDE_HOME, 'jobs');
 // MEMBERS_DIR은 lib/teamMemberPaths에서 가져온다 — 팀원 생성 MCP 서버도 똑같은 경로를 써야 한다.
 
 // ---------------- 타이밍 상수 ----------------
@@ -159,6 +162,10 @@ type AgentEntry = {
   name?: string;
   status?: string;
   state?: string;
+  // AskUserQuestion처럼 구조화된 선택지로 멈춘 경우에만 claude agents --json이 이 값을 준다(실측
+  // 확인: 2026-09-17, 자연어로만 물어본 경우엔 안 뜸) — "input needed"면 readPendingChoiceQuestions로
+  // 실제 질문·선택지를 더 가져올 수 있다는 신호로 쓴다.
+  waitingFor?: string;
 };
 
 // (2026-09-17 실사용 사고로 되돌림) 한때 이 함수가 getStatus()==='busy'뿐 아니라 state==='working'도
@@ -2552,6 +2559,38 @@ ipcMain.handle('get-lead-transcript', (_e, leadId: string) => {
   const projectName = resolveProjectName(lead.sessionId, lead.targetDir);
   return getTranscript(projectName, lead.sessionId, lead.targetDir);
 });
+
+// AskUserQuestion으로 멈춘 세션이 실제로 무엇을 물었는지(질문 문구 + 선택지)는 claude agents --json엔
+// 없고, daemon이 그 job마다 따로 관리하는 state.json에만 있다(실측 확인: 2026-09-17, block.questions
+// 필드) — 지금까지 이 정보를 볼 방법이 없어서 사용자가 매번 터미널로 가서 직접 확인해야 했다. 이걸
+// 읽어서 채팅창에 선택지 버튼으로 그대로 보여주면, "네/아니오"·"A/B/C" 같은 답을 클릭 한 번으로
+// 보낼 수 있다(실측 확인: 이렇게 --resume에 실어 보낸 일반 채팅 메시지로도 AskUserQuestion이 정상
+// 해소됨 — 터미널에 가야만 풀리는 게 아니었다). 이 파일은 daemon이 수시로 덮어쓰는 내부 상태라
+// 스키마가 안 바뀐다는 보장이 없으므로, 읽기 실패나 예상과 다른 형태는 전부 조용히 null로 넘긴다
+// (선택지 버튼을 못 보여줄 뿐, 채팅 자체는 그대로 정상 동작해야 한다).
+function readPendingChoiceQuestions(shortId: string): { question: string; options: { label: string; description?: string }[] }[] | null {
+  if (!isSafeId(shortId)) return null;
+  try {
+    const raw = fs.readFileSync(path.join(JOBS_DIR, shortId, 'state.json'), 'utf-8');
+    const data = JSON.parse(raw);
+    const questions = data?.block?.questions;
+    if (!Array.isArray(questions) || questions.length === 0) return null;
+    return questions
+      .filter((q: unknown): q is { question: string; options: unknown } =>
+        !!q && typeof q === 'object' && typeof (q as any).question === 'string' && Array.isArray((q as any).options))
+      .map((q: any) => ({
+        question: q.question,
+        options: (q.options as unknown[])
+          .filter((o): o is { label: string; description?: string } => !!o && typeof o === 'object' && typeof (o as any).label === 'string')
+          .map((o: any) => ({ label: o.label, description: typeof o.description === 'string' ? o.description : undefined })),
+      }))
+      .filter(q => q.options.length > 0);
+  } catch {
+    return null;
+  }
+}
+
+ipcMain.handle('get-pending-choice', (_e, shortId: string) => readPendingChoiceQuestions(shortId));
 
 // claude CLI에는 이미 생성(응답) 중인 세션에 중간에 끼어들어 입력만 추가하는 기능이 없다(claude
 // --help로 확인) — 개입할 수 있는 유일한 수단인 stop→resume은 하던 응답을 그대로 끊어버린다. 그래서

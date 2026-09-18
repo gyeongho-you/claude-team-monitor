@@ -371,6 +371,11 @@ function statusLabelKo(row) {
   if (row.offline) return '오프라인';
   const s = getStatus(row);
   if (s === 'busy') return '● 작업 중';
+  // waitingFor==='input needed'는 AskUserQuestion처럼 구조화된 선택지로 멈춘 경우에만 claude
+  // agents --json이 주는 값이다(실측 확인, readPendingChoiceQuestions 주석 참고) — 채팅창에 실제
+  // 선택지 버튼이 뜰 거라는 걸 라벨에서부터 구분해서 알려준다(그냥 "확인 필요"라고만 하면 자연어
+  // 질문과 구분이 안 됐다).
+  if (row.waitingFor === 'input needed') return '⚠ 선택지 응답 대기';
   if (s === 'blocked' || s === 'waiting') return '⚠ 확인 필요';
   if (s === 'done') return '완료';
   if (s === 'idle') return '대기 중';
@@ -788,12 +793,35 @@ async function renderChat() {
   const busyBanner = computeBusyBannerHtml(row);
   const queuedTurnHtml = renderQueuedTurnsHtml(leadId);
 
+  // waitingFor==='input needed'일 때만 조회한다 — 매 폴링마다 모든 팀장에 대해 파일을 읽을 필요는
+  // 없고, 실제로 선택지 응답을 기다리는 이 팀장 하나만 필요할 때 가져온다(readPendingChoiceQuestions
+  // 주석 참고). 조회 자체가 실패해도(파일 형식이 예상과 다르거나 이미 사라졌거나) 채팅창은 그대로
+  // 정상 표시돼야 하므로 조용히 빈 값으로 넘어간다.
+  let pendingChoiceHtml = '';
+  if (row && row.waitingFor === 'input needed') {
+    let questions = null;
+    try {
+      questions = await window.api.getPendingChoice(leadId);
+    } catch { /* 아래에서 questions가 null이면 그냥 버튼을 안 보여준다 */ }
+    if (mySeq !== renderChatSeq) return; // 위와 같은 이유로 최신 호출만 화면을 쓴다
+    if (questions && questions.length) {
+      pendingChoiceHtml = questions.map(q => `
+        <div class="pending-choice">
+          <div class="pending-choice-question">${escapeHtml(q.question)}</div>
+          <div class="pending-choice-options">
+            ${q.options.map(o => `<button class="pending-choice-btn" data-answer-choice="${escapeHtml(o.label)}" data-answer-lead="${escapeHtml(leadId)}"${o.description ? ` title="${escapeHtml(o.description)}"` : ''}>${escapeHtml(o.label)}</button>`).join('')}
+          </div>
+        </div>
+      `).join('');
+    }
+  }
+
   // 3초마다 도는 폴링 갱신마다 무조건 맨 아래로 스크롤하면, 옛날 대화를 읽으려고 위로 스크롤해둔 걸
   // 계속 끌어내린다 — 이미 맨 아래 근처에 있을 때만("계속 따라가기") 다시 맨 아래로 붙인다.
   const wasNearBottom = chatTranscriptEl.scrollHeight - chatTranscriptEl.scrollTop - chatTranscriptEl.clientHeight < 40;
 
   if (!transcript || transcript.length === 0) {
-    chatTranscriptEl.innerHTML = '<p style="color:#777">아직 대화 기록이 없습니다 (첫 응답을 기다리는 중일 수 있습니다).</p>' + queuedTurnHtml + busyBanner;
+    chatTranscriptEl.innerHTML = '<p style="color:#777">아직 대화 기록이 없습니다 (첫 응답을 기다리는 중일 수 있습니다).</p>' + queuedTurnHtml + busyBanner + pendingChoiceHtml;
   } else {
     chatTranscriptEl.innerHTML = transcript.map(t => `
       <div class="chat-turn">
@@ -801,7 +829,7 @@ async function renderChat() {
         ${renderPromptLineHtml(t.prompt)}
         <div class="chat-answer">${escapeHtml(t.answer)}</div>
       </div>
-    `).join('') + queuedTurnHtml + busyBanner;
+    `).join('') + queuedTurnHtml + busyBanner + pendingChoiceHtml;
   }
   if (wasNearBottom) chatTranscriptEl.scrollTop = chatTranscriptEl.scrollHeight;
   updateBusyUI();
@@ -834,6 +862,19 @@ chatTranscriptEl.addEventListener('click', async e => {
   // 결국 지워지므로 여기서 먼저 지워도 안전하다.
   removePendingChatTurn(leadId, noticeId);
   await renderChat();
+});
+
+// AskUserQuestion 선택지 버튼 — 같은 위임 리스너 패턴. 클릭한 선택지의 label을 그대로 채팅
+// 입력창에 넣고 기존 sendChatMessage()를 그대로 태운다(실측 확인: 이렇게 --resume에 실어 보낸
+// 일반 채팅 메시지로 AskUserQuestion이 정상 해소된다 — 별도의 "답변 전용" IPC가 필요 없었다).
+// selectedLeadId가 그 사이(비동기 조회 중) 다른 팀장으로 바뀌었으면 무시한다 — 안 그러면 방금 고른
+// 선택지가 엉뚱한 팀장에게 전달될 수 있다.
+chatTranscriptEl.addEventListener('click', e => {
+  const btn = e.target.closest('[data-answer-choice]');
+  if (!btn) return;
+  if (selectedLeadId !== btn.dataset.answerLead) return;
+  chatInputEl.value = btn.dataset.answerChoice;
+  sendChatMessage();
 });
 
 // formMode('none'/'launch'/'adopt')만으로는 "팀장이 0개라 launch 폼이 기본으로 뜬 상태"를 못

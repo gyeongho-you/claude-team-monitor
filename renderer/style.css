@@ -359,6 +359,12 @@ body.modal-open { overflow: hidden; }
 /* 대기열 항목의 취소 버튼 — #restart-cancel-btn/#end-work-cancel-btn 등 다른 보조 취소 버튼과
    같은 크기(기본 button 크기 그대로)로 맞춘다. */
 .chat-turn .cancel-queued-btn { margin-left: 6px; background: var(--border-2); color: var(--text); font-style: normal; }
+/* AskUserQuestion으로 멈춘 팀장이 실제로 뭘 물었는지 채팅창에 그대로 보여주는 카드 — .stall-confirm-btn과
+   같은 경고색으로, "지금 사람이 답해야 한다"는 게 한눈에 보이게 한다. */
+.pending-choice { margin-top: 8px; padding: 8px; border: 1px solid var(--warning); border-radius: 4px; }
+.pending-choice-question { color: var(--text); margin-bottom: 6px; white-space: pre-wrap; }
+.pending-choice-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.pending-choice-btn { background: var(--warning); color: #1a1a1a; }
 .chat-input-row { display: flex; gap: 6px; }
 #chat-input { flex: 1; height: 50px; background: var(--bg); border: 1px solid var(--border-2); color: var(--text); padding: 6px; resize: vertical; }
 
