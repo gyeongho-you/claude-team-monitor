@@ -372,9 +372,9 @@ function statusLabelKo(row) {
   const s = getStatus(row);
   if (s === 'busy') return '● 작업 중';
   // waitingFor==='input needed'는 AskUserQuestion처럼 구조화된 선택지로 멈춘 경우에만 claude
-  // agents --json이 주는 값이다(실측 확인, readPendingChoiceQuestions 주석 참고) — 채팅창에 실제
-  // 선택지 버튼이 뜰 거라는 걸 라벨에서부터 구분해서 알려준다(그냥 "확인 필요"라고만 하면 자연어
-  // 질문과 구분이 안 됐다).
+  // agents --json이 주는 값이다(실측 확인, readPendingChoiceQuestions 주석 참고) — 채팅창에 질문
+  // 내용과 "터미널에서 직접 열기" 안내가 뜰 거라는 걸 라벨에서부터 구분해서 알려준다(그냥 "확인
+  // 필요"라고만 하면 자연어 질문과 구분이 안 됐다).
   if (row.waitingFor === 'input needed') return '⚠ 선택지 응답 대기';
   if (s === 'blocked' || s === 'waiting') return '⚠ 확인 필요';
   if (s === 'done') return '완료';
@@ -798,28 +798,27 @@ async function renderChat() {
   // 주석 참고). 조회 자체가 실패해도(파일 형식이 예상과 다르거나 이미 사라졌거나) 채팅창은 그대로
   // 정상 표시돼야 하므로 조용히 빈 값으로 넘어간다.
   //
-  // 선택지 버튼은 결국 stop→resume(일반 채팅과 같은 경로)이라 AskUserQuestion을 "정식으로 답변"하는
-  // 게 아니라 "취소하고 새 메시지를 잇는" 것에 가깝다(실사용 확인, 2026-09-18) — 대부분은 모델이
-  // 문맥으로 알아서 이어가지만 100% 보장은 아니다. 유일하게 100% 확실한 방법(터미널 attach는 프로세스를
-  // 안 죽이고 살아있는 채로 진짜 답을 준다)으로 바로 갈 수 있는 버튼을 항상 같이 보여준다.
+  // 답변 버튼(채팅 전송)은 없앴다 — stop→resume으로 답을 보내봤더니 실사용에서 반복적으로 "User
+  // declined to answer questions"로 잡혔다(2026-09-18, 실측 확인). 원인이 daemon의 자체 재기동
+  // 타이밍이든 stop→resume 방식 자체든, 결과적으로 이 경로로는 확실하게 답이 전달된다고 보장할 수
+  // 없다고 판단해 아예 버튼을 없애고 "터미널에서 직접 열기" 하나만 남겼다 — 세션을 죽이지 않고
+  // 살아있는 프로세스에 바로 답하는 유일한 방법이다. 질문·선택지 내용은 참고용으로 텍스트로만 보여준다.
   const terminalBtnHtml = row && !row.offline
-    ? `<button class="pending-choice-terminal-btn" data-attach="${escapeHtml(leadId)}" title="채팅 답변이 안 먹히면 이걸로 직접 답하세요 — 세션을 안 끊고 그대로 이어갑니다">터미널에서 직접 열기</button>`
+    ? `<button class="pending-choice-terminal-btn" data-attach="${escapeHtml(leadId)}">터미널에서 직접 열기</button>`
     : '';
   let pendingChoiceHtml = '';
   if (row && row.waitingFor === 'input needed') {
     let questions = null;
     try {
       questions = await window.api.getPendingChoice(leadId);
-    } catch { /* 아래에서 questions가 null이면 그냥 버튼을 안 보여준다 */ }
+    } catch { /* 아래에서 questions가 null이면 그냥 안내를 안 보여준다 */ }
     if (mySeq !== renderChatSeq) return; // 위와 같은 이유로 최신 호출만 화면을 쓴다
     if (questions && questions.length) {
       pendingChoiceHtml = questions.map(q => `
         <div class="pending-choice">
           <div class="pending-choice-question">${escapeHtml(q.question)}</div>
-          <div class="pending-choice-options">
-            ${q.options.map(o => `<button class="pending-choice-btn" data-answer-choice="${escapeHtml(o.label)}" data-answer-lead="${escapeHtml(leadId)}"${o.description ? ` title="${escapeHtml(o.description)}"` : ''}>${escapeHtml(o.label)}</button>`).join('')}
-            ${terminalBtnHtml}
-          </div>
+          <div class="pending-choice-detail">선택지: ${q.options.map(o => escapeHtml(o.label)).join(' / ')}</div>
+          <div class="pending-choice-options">${terminalBtnHtml}</div>
         </div>
       `).join('');
     }
@@ -889,19 +888,6 @@ chatTranscriptEl.addEventListener('click', async e => {
   // 결국 지워지므로 여기서 먼저 지워도 안전하다.
   removePendingChatTurn(leadId, noticeId);
   await renderChat();
-});
-
-// AskUserQuestion 선택지 버튼 — 같은 위임 리스너 패턴. 클릭한 선택지의 label을 그대로 채팅
-// 입력창에 넣고 기존 sendChatMessage()를 그대로 태운다(실측 확인: 이렇게 --resume에 실어 보낸
-// 일반 채팅 메시지로 AskUserQuestion이 정상 해소된다 — 별도의 "답변 전용" IPC가 필요 없었다).
-// selectedLeadId가 그 사이(비동기 조회 중) 다른 팀장으로 바뀌었으면 무시한다 — 안 그러면 방금 고른
-// 선택지가 엉뚱한 팀장에게 전달될 수 있다.
-chatTranscriptEl.addEventListener('click', e => {
-  const btn = e.target.closest('[data-answer-choice]');
-  if (!btn) return;
-  if (selectedLeadId !== btn.dataset.answerLead) return;
-  chatInputEl.value = btn.dataset.answerChoice;
-  sendChatMessage();
 });
 
 // formMode('none'/'launch'/'adopt')만으로는 "팀장이 0개라 launch 폼이 기본으로 뜬 상태"를 못

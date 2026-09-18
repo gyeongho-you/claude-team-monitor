@@ -2563,11 +2563,12 @@ ipcMain.handle('get-lead-transcript', (_e, leadId: string) => {
 // AskUserQuestion으로 멈춘 세션이 실제로 무엇을 물었는지(질문 문구 + 선택지)는 claude agents --json엔
 // 없고, daemon이 그 job마다 따로 관리하는 state.json에만 있다(실측 확인: 2026-09-17, block.questions
 // 필드) — 지금까지 이 정보를 볼 방법이 없어서 사용자가 매번 터미널로 가서 직접 확인해야 했다. 이걸
-// 읽어서 채팅창에 선택지 버튼으로 그대로 보여주면, "네/아니오"·"A/B/C" 같은 답을 클릭 한 번으로
-// 보낼 수 있다(실측 확인: 이렇게 --resume에 실어 보낸 일반 채팅 메시지로도 AskUserQuestion이 정상
-// 해소됨 — 터미널에 가야만 풀리는 게 아니었다). 이 파일은 daemon이 수시로 덮어쓰는 내부 상태라
-// 스키마가 안 바뀐다는 보장이 없으므로, 읽기 실패나 예상과 다른 형태는 전부 조용히 null로 넘긴다
-// (선택지 버튼을 못 보여줄 뿐, 채팅 자체는 그대로 정상 동작해야 한다).
+// 읽어서 채팅창에 질문·선택지를 텍스트로만 보여준다("터미널에서 직접 열기" 버튼과 함께) — 채팅
+// 답변 버튼은 일부러 안 만들었다: --resume에 실어 보낸 일반 채팅 메시지로 답을 흉내 내봤더니
+// 실사용에서 반복적으로 "User declined to answer questions"로 처리됐다(2026-09-18, 실측 확인) —
+// stop→resume 경로 자체가 이 tool_use를 정식으로 답변하는 방법이 아니라고 판단해 뺐다. 이 파일은
+// daemon이 수시로 덮어쓰는 내부 상태라 스키마가 안 바뀐다는 보장이 없으므로, 읽기 실패나 예상과
+// 다른 형태는 전부 조용히 null로 넘긴다(안내를 못 보여줄 뿐, 채팅 자체는 그대로 정상 동작해야 한다).
 function readPendingChoiceQuestions(shortId: string): { question: string; options: { label: string; description?: string }[] }[] | null {
   if (!isSafeId(shortId)) return null;
   try {
