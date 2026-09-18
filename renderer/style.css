@@ -378,6 +378,9 @@ mark.find-match-current { background: var(--accent-2); color: #fff; }
 /* sendChatMessage가 응답이 오기 전까지 낙관적으로 얹어두는 말풍선 — 아직 확정된 내용이 아님을
    흐릿하게/기울임으로 표시해서 실제 답변과 구분되게 한다. */
 .chat-turn .chat-answer.chat-pending { color: var(--text-dim); font-style: italic; }
+/* 큐 자동 재시도를 다 쓰고 포기한 항목 — 흐릿한 chat-pending과 달리 눈에 띄게 경고색으로 구분해서
+   "아직 대기 중"이 아니라 "수동 개입이 필요함"임을 알린다. */
+.chat-turn .chat-answer.chat-pending-exhausted { color: var(--warning); font-style: normal; border-left-color: var(--warning); }
 /* 대기열 항목의 취소 버튼 — #restart-cancel-btn/#end-work-cancel-btn 등 다른 보조 취소 버튼과
    같은 크기(기본 button 크기 그대로)로 맞춘다. */
 .chat-turn .cancel-queued-btn { margin-left: 6px; background: var(--border-2); color: var(--text); font-style: normal; }

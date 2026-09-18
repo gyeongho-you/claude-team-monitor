@@ -2880,15 +2880,22 @@ async function deleteLeadHistory(internalId: string): Promise<{ success: boolean
 
 ipcMain.handle('delete-lead-history', (_e, internalId: string) => deleteLeadHistory(internalId));
 
-// 이 팀장 앞으로 아직 서버에 남아있는(전달 안 된) 대기열 알림들의 id 목록을 돌려준다 — 렌더러는
-// 짧은 id만 알고 있으므로 여기서 internalId로 변환해서 찾는다. 두 곳에서 쓴다: (1) 재시작/작업종료
-// 확인 모달의 "몇 건 남았는지" 경고(개수만 필요), (2) deliverPendingNotices가 이제 같은 팀장 앞
-// 여러 건을 하나로 합쳐서 보낼 수 있어서, 대화창의 각 큐 항목이 실제로 전달됐는지를 더 이상
-// 원문 텍스트로 트랜스크립트와 대조할 수 없다 — 이 id 목록에 더 이상 없으면 전달된 것으로 본다.
+// 이 팀장 앞으로 아직 서버에 남아있는(전달 안 된) 대기열 알림들을 돌려준다 — 렌더러는 짧은 id만
+// 알고 있으므로 여기서 internalId로 변환해서 찾는다. 두 곳에서 쓴다: (1) 재시작/작업종료 확인
+// 모달의 "몇 건 남았는지" 경고(개수만 필요), (2) deliverPendingNotices가 이제 같은 팀장 앞 여러
+// 건을 하나로 합쳐서 보낼 수 있어서, 대화창의 각 큐 항목이 실제로 전달됐는지를 더 이상 원문
+// 텍스트로 트랜스크립트와 대조할 수 없다 — 이 목록에 더 이상 없으면 전달된 것으로 본다.
+// exhausted(시도 횟수가 MAX_NOTICE_DELIVERY_ATTEMPTS에 도달)도 함께 내려준다 — 예전엔 id
+// 존재 여부만 봤는데, 그러면 "아직 재시도 중"과 "자동 재시도를 완전히 포기하고 큐에 남아만
+// 있음"이 화면에서 똑같이 "대기열에 넣었습니다"로 보였다(실사용 재현: 다른 경로가 같은 세션을
+// 동시에 resume해서 포크가 반복되면 5회 재시도가 전부 실패하는데, 채팅창은 계속 "자동으로
+// 전달됩니다"라고만 보여줘서 사용자가 메시지가 사실상 영구히 막힌 걸 알 도리가 없었다).
 ipcMain.handle('get-pending-notice-ids', (_e, leadId: string) => {
   const lead = loadLeads().find(l => l.id === leadId);
   if (!lead) return [];
-  return loadPendingNotices().filter(n => n.leadInternalId === lead.internalId).map(n => n.id);
+  return loadPendingNotices()
+    .filter(n => n.leadInternalId === lead.internalId)
+    .map(n => ({ id: n.id, exhausted: (n.attempts ?? 0) >= MAX_NOTICE_DELIVERY_ATTEMPTS }));
 });
 
 // 정체 감시가 만들어낸, 아직 사용자 확인을 안 거친 알림 목록. 화면에 팀장 이름 등을 붙여
