@@ -19,7 +19,25 @@ import { checkDirectoryClaudeReady, claudeNotReadyMessage } from './lib/claudeRe
 import { shellSingleQuote, escapeAppleScriptString } from './lib/terminalCommand';
 
 const SESSION_EDITS_DIR = path.join(CLAUDE_HOME, 'session-edits');
-const JOURNAL_DATA_DIR = path.join(CLAUDE_HOME, 'daily-journal', 'data');
+// daily-journal은 별도로 설치하는 플러그인이라(이 앱이 번들하지 않음) 있을 수도 없을 수도 있고,
+// 있다면 기록을 저장하는 디렉토리(journal.output_dir)를 사용자가 user-config.json에서 직접
+// 바꿀 수 있다 — 기본값은 여기 DEFAULT_JOURNAL_DATA_DIR과 같지만, 사용자가 다른 곳(동기화 폴더
+// 등)으로 바꿔놓으면 이 앱이 하드코딩된 기본 경로만 보다가 "기록이 없다"고 조용히 오판할 수 있다
+// (실사용 지적, 2026-09-18). daily-journal 자신의 config.ts(getTodayDir이 정확히 이 순서로
+// 읽음)와 같은 방식으로 매번 user-config.json을 확인해서, output_dir이 설정돼 있으면 그 값을
+// 우선한다 — daily-journal이 아예 안 설치돼 있으면(파일 없음) 그냥 기본값으로 fail-open한다.
+const DEFAULT_JOURNAL_DATA_DIR = path.join(CLAUDE_HOME, 'daily-journal', 'data');
+function resolveJournalDataDir(): string {
+  try {
+    const raw = fs.readFileSync(path.join(CLAUDE_HOME, 'daily-journal', 'user-config.json'), 'utf-8');
+    const outputDir = JSON.parse(raw)?.journal?.output_dir;
+    if (typeof outputDir === 'string' && outputDir.trim()) return outputDir;
+  } catch {
+    // user-config.json이 없거나(daily-journal 미설치·기본값 사용 등) 읽기/파싱에 실패하면
+    // daily-journal 자신도 기본값을 쓰므로 이 앱도 그대로 따라간다.
+  }
+  return DEFAULT_JOURNAL_DATA_DIR;
+}
 const PROJECTS_DIR = path.join(CLAUDE_HOME, 'projects');
 const SKILL_SRC = path.join(getResourcesRoot(), 'skills', 'team-lead', 'SKILL.md');
 const SKILL_DEST_DIR = path.join(CLAUDE_HOME, 'skills', 'team-lead');
@@ -418,13 +436,14 @@ function getFileDiff(cwd: string, file: string): Promise<{ diff: string; isNew: 
 // 기록을 (오래된 순으로) 훑어서 합친다 — 그래야 어제 이전 대화도 이어하기 후 대화창에 남아있다.
 function readJournalEntries(projectName: string): any[] {
   try {
-    if (!fs.existsSync(JOURNAL_DATA_DIR)) return [];
-    const dates = fs.readdirSync(JOURNAL_DATA_DIR)
+    const journalDataDir = resolveJournalDataDir();
+    if (!fs.existsSync(journalDataDir)) return [];
+    const dates = fs.readdirSync(journalDataDir)
       .filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d))
       .sort();
     const entries: any[] = [];
     for (const date of dates) {
-      const file = path.join(JOURNAL_DATA_DIR, date, 'history', `${projectName}.jsonl`);
+      const file = path.join(journalDataDir, date, 'history', `${projectName}.jsonl`);
       if (!fs.existsSync(file)) continue;
       const content = fs.readFileSync(file, 'utf-8').trim();
       if (!content) continue;
