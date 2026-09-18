@@ -776,7 +776,7 @@ function renderQueuedTurnsHtml(leadId) {
 let renderChatSeq = 0;
 
 async function renderChat() {
-  if (isResizingChatTranscript) return; // 리사이즈 드래그 중엔 건너뛴다(아래 mousedown 리스너 참고) — 안 그러면 3초 폴링이 드래그 중인 DOM을 건드려 위치가 튄다
+  if (isInteractingWithChatTranscript) return; // 텍스트 선택/리사이즈 드래그 중엔 건너뛴다(아래 mousedown 리스너 참고) — 안 그러면 3초 폴링이 드래그 중인 DOM을 건드려 위치가 튄다
   const mySeq = ++renderChatSeq;
   renderLeadMemberChips();
   const leadId = selectedLeadId;
@@ -878,21 +878,17 @@ async function renderChat() {
   updateBusyUI();
 }
 
-// #chat-transcript는 CSS resize:vertical로 사용자가 오른쪽 아래 모서리를 드래그해 높이를 늘리고
-// 줄일 수 있는데, renderChat()이 3초 폴링마다 innerHTML을 통째로 새로 그려서(위 renderChatSeq
-// 주석 참고) 드래그가 진행 중인 동안에도 그 DOM을 건드린다 — 브라우저의 네이티브 리사이즈 드래그가
-// 진행 중일 때 같은 요소의 자식 노드를 통째로 교체하면 레이아웃이 다시 계산되면서 드래그 위치가
-// 매 폴링 틱마다 위아래로 튀는 증상으로 이어진다(실사용 확인). 리사이즈 핸들 자체는 DOM 요소가
-// 아니라 브라우저가 그리는 것이라 정확한 히트박스를 알 수 없으니, 오른쪽 아래 모서리 근처(20px
-// 이내)에서 시작한 mousedown만 리사이즈로 간주해 그동안 renderChat()을 건너뛴다.
-let isResizingChatTranscript = false;
-chatTranscriptEl.addEventListener('mousedown', e => {
-  const rect = chatTranscriptEl.getBoundingClientRect();
-  const nearRightEdge = rect.right - e.clientX <= 20;
-  const nearBottomEdge = rect.bottom - e.clientY <= 20;
-  if (nearRightEdge && nearBottomEdge) isResizingChatTranscript = true;
-});
-window.addEventListener('mouseup', () => { isResizingChatTranscript = false; });
+// #chat-transcript 안에서 마우스로 뭔가를 하는 동안(텍스트를 드래그로 선택하거나, CSS
+// resize:vertical 모서리를 드래그해 높이를 조절하거나) renderChat()의 3초 폴링이 innerHTML을
+// 통째로 새로 그리면(위 renderChatSeq 주석 참고) 그 DOM을 건드리게 된다. 텍스트 선택 중이면
+// 브라우저의 Selection이 물고 있던 옛 텍스트 노드가 통째로 사라지고 화면 같은 위치에 새 노드가
+// 들어서면서 선택 앵커가 엉뚱한 지점을 잡아 위아래로 튀고(실사용 확인), 리사이즈 드래그 중이면
+// 레이아웃 재계산 때문에 같은 증상이 난다. 정확한 원인(선택 vs 리사이즈)을 구분할 필요 없이,
+// 이 요소 안에서 mousedown~mouseup(버튼을 누르고 있는 동안) 자체를 "지금 조작 중"으로 보고 그
+// 사이엔 renderChat()을 건너뛴다 — 버튼을 떼면 다음 폴링 틱에서 자연히 다시 그려진다.
+let isInteractingWithChatTranscript = false;
+chatTranscriptEl.addEventListener('mousedown', () => { isInteractingWithChatTranscript = true; });
+window.addEventListener('mouseup', () => { isInteractingWithChatTranscript = false; });
 
 // 대기열 항목의 "취소" 버튼 — chatTranscriptEl이 폴링마다(그리고 renderChat 호출마다) innerHTML을
 // 통째로 다시 그리므로, 다른 곳(leadMembersChipsEl/fileListContentEl)과 같은 패턴으로 위임 리스너
