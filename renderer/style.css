@@ -365,6 +365,13 @@ body.modal-open { overflow: hidden; }
 .pending-choice-question { color: var(--text); margin-bottom: 6px; white-space: pre-wrap; }
 .pending-choice-options { display: flex; flex-wrap: wrap; gap: 6px; }
 .pending-choice-btn { background: var(--warning); color: #1a1a1a; }
+/* 선택지 답변은 stop→resume이라 100% 확실하진 않다 — 안 먹히면 세션을 안 끊는 유일한 확실한
+   방법(터미널 attach)으로 바로 갈 수 있게, 색을 다르게 줘서 "답변 버튼과는 다른 종류"임을 구분한다. */
+.pending-choice-terminal-btn { background: var(--border-2); color: var(--text); }
+/* AskUserQuestion이 아니라 로그인 갱신 실패 등 채팅으로 아예 못 푸는 경우 — 붉은 계열로 더 강하게
+   경고하고, 원문 에러 메시지는 작은 글씨로 참고용으로만 보여준다. */
+.pending-choice-unresolvable { border-color: #f14c4c; }
+.pending-choice-detail { color: var(--text-dim); font-size: 11px; margin-bottom: 6px; white-space: pre-wrap; }
 .chat-input-row { display: flex; gap: 6px; }
 #chat-input { flex: 1; height: 50px; background: var(--bg); border: 1px solid var(--border-2); color: var(--text); padding: 6px; resize: vertical; }
 

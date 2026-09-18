@@ -797,6 +797,14 @@ async function renderChat() {
   // 없고, 실제로 선택지 응답을 기다리는 이 팀장 하나만 필요할 때 가져온다(readPendingChoiceQuestions
   // 주석 참고). 조회 자체가 실패해도(파일 형식이 예상과 다르거나 이미 사라졌거나) 채팅창은 그대로
   // 정상 표시돼야 하므로 조용히 빈 값으로 넘어간다.
+  //
+  // 선택지 버튼은 결국 stop→resume(일반 채팅과 같은 경로)이라 AskUserQuestion을 "정식으로 답변"하는
+  // 게 아니라 "취소하고 새 메시지를 잇는" 것에 가깝다(실사용 확인, 2026-09-18) — 대부분은 모델이
+  // 문맥으로 알아서 이어가지만 100% 보장은 아니다. 유일하게 100% 확실한 방법(터미널 attach는 프로세스를
+  // 안 죽이고 살아있는 채로 진짜 답을 준다)으로 바로 갈 수 있는 버튼을 항상 같이 보여준다.
+  const terminalBtnHtml = row && !row.offline
+    ? `<button class="pending-choice-terminal-btn" data-attach="${escapeHtml(leadId)}" title="채팅 답변이 안 먹히면 이걸로 직접 답하세요 — 세션을 안 끊고 그대로 이어갑니다">터미널에서 직접 열기</button>`
+    : '';
   let pendingChoiceHtml = '';
   if (row && row.waitingFor === 'input needed') {
     let questions = null;
@@ -810,9 +818,28 @@ async function renderChat() {
           <div class="pending-choice-question">${escapeHtml(q.question)}</div>
           <div class="pending-choice-options">
             ${q.options.map(o => `<button class="pending-choice-btn" data-answer-choice="${escapeHtml(o.label)}" data-answer-lead="${escapeHtml(leadId)}"${o.description ? ` title="${escapeHtml(o.description)}"` : ''}>${escapeHtml(o.label)}</button>`).join('')}
+            ${terminalBtnHtml}
           </div>
         </div>
       `).join('');
+    }
+  } else if (row && getStatus(row) === 'blocked') {
+    // AskUserQuestion이 아니어도 채팅으로는 절대 못 푸는 blocked가 있다(예: 로그인 갱신 실패) —
+    // readChatUnresolvableBlockDetail 주석 참고. 이것도 확인되면 "왜 막혔는지" 설명 + 터미널 버튼만
+    // 보여준다(답변 버튼은 없음 — 애초에 채팅으로 답할 수 있는 종류가 아니므로).
+    let unresolvableDetail = null;
+    try {
+      unresolvableDetail = await window.api.getChatUnresolvableDetail(leadId);
+    } catch { /* 조회 실패 시 그냥 아무것도 안 보여준다 */ }
+    if (mySeq !== renderChatSeq) return;
+    if (unresolvableDetail) {
+      pendingChoiceHtml = `
+        <div class="pending-choice pending-choice-unresolvable">
+          <div class="pending-choice-question">⚠ 채팅으로는 풀 수 없는 문제입니다 — 터미널에서 직접 확인하세요.</div>
+          <div class="pending-choice-detail">${escapeHtml(unresolvableDetail)}</div>
+          <div class="pending-choice-options">${terminalBtnHtml}</div>
+        </div>
+      `;
     }
   }
 

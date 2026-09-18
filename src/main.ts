@@ -2592,6 +2592,31 @@ function readPendingChoiceQuestions(shortId: string): { question: string; option
 
 ipcMain.handle('get-pending-choice', (_e, shortId: string) => readPendingChoiceQuestions(shortId));
 
+// AskUserQuestion류의 구조화된 선택지 말고도, 채팅으로는 절대 못 풀리는 blocked가 있다(실사용 확인,
+// 2026-09-17: g1cl-mgt가 "Could not refresh your login because another Claude Code process is
+// refreshing it..." 로그인 갱신 오류로 멈춘 사례) — 이런 건 --resume에 아무 메시지를 실어 보내도
+// 의미가 없고, 사람이 터미널에서 직접 /login 등을 해야 풀린다. 여기서도 실제 문구는 daemon의
+// state.json에만 있다. claude CLI가 로그인 갱신 실패 때 남기는 문구가 이것뿐이라는 보장은 없지만
+// (버전이 바뀌면 문구가 달라질 수 있음, extractStartedCopyId와 같은 한계), 지금까지 실사용으로
+// 확인된 것만 좁게 잡는다 — 오탐(진짜 채팅으로 풀리는 질문을 "터미널 가라"고 잘못 안내)보다는
+// 미탐(놓쳐서 그냥 "확인 필요"로만 보이는 것)이 덜 위험하다고 판단했다.
+const CHAT_UNRESOLVABLE_DETAIL_PATTERNS = [/could not refresh your login/i];
+
+function readChatUnresolvableBlockDetail(shortId: string): string | null {
+  if (!isSafeId(shortId)) return null;
+  try {
+    const raw = fs.readFileSync(path.join(JOBS_DIR, shortId, 'state.json'), 'utf-8');
+    const data = JSON.parse(raw);
+    if (data?.state !== 'blocked' || typeof data?.detail !== 'string') return null;
+    if (!CHAT_UNRESOLVABLE_DETAIL_PATTERNS.some(re => re.test(data.detail))) return null;
+    return data.detail;
+  } catch {
+    return null;
+  }
+}
+
+ipcMain.handle('get-chat-unresolvable-detail', (_e, shortId: string) => readChatUnresolvableBlockDetail(shortId));
+
 // claude CLI에는 이미 생성(응답) 중인 세션에 중간에 끼어들어 입력만 추가하는 기능이 없다(claude
 // --help로 확인) — 개입할 수 있는 유일한 수단인 stop→resume은 하던 응답을 그대로 끊어버린다. 그래서
 // 팀장이 지금 busy면 곧바로 stop→resume하지 않고, 팀원 추가 알림(queueLeadNotice)과 완전히 같은
