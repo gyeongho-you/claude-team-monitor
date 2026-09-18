@@ -762,13 +762,14 @@ function renderQueuedTurnsHtml(leadId) {
   return list.map(item => {
     // exhausted(큐 자동 재시도를 MAX_NOTICE_DELIVERY_ATTEMPTS회 다 쓰고 포기한 상태)는 일반
     // 'queued'와 구분해서 보여준다 — 안 그러면 사실상 다시 안 풀리는 메시지가 "완료되면
-    // 자동으로 전달됩니다"라고 계속 표시돼서, 다른 경로(터미널 attach 등)가 같은 세션을 동시에
-    // 건드려 포크가 반복되는 상황에서 메시지가 조용히 영구 미배달되는 걸 사용자가 알 수 없었다.
-    // "팀장 복구" 같은 전용 버튼은 이 앱에 없다 — 실제로 있는 조치만 안내한다: 아래 취소 버튼으로
-    // 이 항목을 빼고 다시 보내보거나(대개 충돌은 일시적이라 재시도하면 풀린다), 그래도 계속되면
-    // 상단의 "새 작업 시작"으로 세션을 통째로 새로 띄운다.
+    // 자동으로 전달됩니다"라고 계속 표시돼서 사용자가 영구 미배달을 알 수 없었다. "터미널에서
+    // 직접 열기"로 인한 경합은 이제 attempts를 안 깎고 그냥 이번 폴링만 건너뛰므로(main.ts
+    // deliverPendingNotices의 attachOpen 분기) 더 이상 exhausted의 주된 원인이 아니다 — 그래도
+    // 다른 이유(daemon 일시적 오류 등)로 exhausted에 도달할 수 있으니, "팀장 복구" 같은 전용
+    // 버튼은 이 앱에 없다는 전제로 실제로 있는 조치만 안내한다: 아래 취소 버튼으로 이 항목을
+    // 빼고 다시 보내보거나, 계속되면 상단의 "새 작업 시작"으로 세션을 통째로 새로 띄운다.
     const statusText = item.exhausted
-      ? '자동 재시도가 모두 실패해 전달을 멈췄습니다(다른 창에서 이 팀장을 동시에 쓰고 있을 수 있습니다). 아래 취소 버튼으로 지우고 다시 보내보세요 — 계속 반복되면 "새 작업 시작"으로 세션을 새로 띄우세요.'
+      ? '자동 재시도가 모두 실패해 전달을 멈췄습니다. 아래 취소 버튼으로 지우고 다시 보내보세요 — 계속 반복되면 "새 작업 시작"으로 세션을 새로 띄우세요.'
       : item.kind === 'queued'
         ? '팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.'
         : '응답을 기다리는 중...';
@@ -1047,6 +1048,16 @@ async function sendChatMessage() {
       removePendingChatTurn(leadId, localId);
       await renderChat(); // pendingChatTurns에서 지운 in-flight 항목을 화면에서도 지운다
       chatTranscriptEl.insertAdjacentHTML('beforeend', '<p style="color:#f14c4c">이어하기에 실패했습니다 — 세션이 만료됐거나 claude CLI 실행에 문제가 있을 수 있습니다.</p>');
+      return;
+    }
+    if (result.status === 'attach-open') {
+      // main.ts의 send-to-lead가 이 팀장에 "터미널에서 직접 열기"로 띄운 attach 창이 아직
+      // 붙어있는 걸 감지하고 stop→resume 자체를 시도하지 않은 경우 — 그대로 보냈다간 attach의
+      // 독립적인 재연결과 경합해서 세션이 갈라질 수 있다(실사용 재현). 'failed'와 달리 원인을
+      // 정확히 알 수 있으니 그대로 알려준다.
+      removePendingChatTurn(leadId, localId);
+      await renderChat();
+      chatTranscriptEl.insertAdjacentHTML('beforeend', '<p style="color:#f14c4c">이 팀장에 연결된 터미널 창(터미널에서 직접 열기)이 아직 열려있어 보내지 않았습니다 — 그 터미널을 닫고 다시 시도하세요.</p>');
       return;
     }
     if (result.status === 'failed') {
