@@ -11,9 +11,13 @@
     "dist:win": "npm run build && electron-builder --win portable",
     "dist:win:msi": "npm run build && electron-builder --win msi",
     "dist:mac": "npm run build && electron-builder --mac dmg",
-    "pack:win": "npm run build && electron-packager . \"Claude Team Monitor\" --platform=win32 --arch=x64 --out=release --overwrite --ignore=\"^/src($|/)\" --ignore=\"^/tests($|/)\" --ignore=\"^/release($|/)\" --ignore=\"^/tsconfig.json$\" --ignore=\"^/package-lock.json$\" --ignore=\"^/[.]claude($|/)\" --ignore=\"^/node_modules($|/)\""
+    "pack:win": "npm run build && electron-packager . \"Claude Team Monitor\" --platform=win32 --arch=x64 --out=release --overwrite --ignore=\"^/src($|/)\" --ignore=\"^/tests($|/)\" --ignore=\"^/release($|/)\" --ignore=\"^/tsconfig.json$\" --ignore=\"^/package-lock.json$\" --ignore=\"^/[.]claude($|/)\" --ignore=\"^/node_modules($|/)\"",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^22.0.0",
     "electron": "^33.0.0",
     "electron-builder": "^25.0.0",
