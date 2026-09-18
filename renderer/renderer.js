@@ -776,7 +776,7 @@ function renderQueuedTurnsHtml(leadId) {
 let renderChatSeq = 0;
 
 async function renderChat() {
-  if (isInteractingWithChatTranscript) return; // 텍스트 선택/리사이즈 드래그 중엔 건너뛴다(아래 mousedown 리스너 참고) — 안 그러면 3초 폴링이 드래그 중인 DOM을 건드려 위치가 튄다
+  if (isInteractingWithChatTranscript || hasActiveSelectionInChatTranscript()) return; // 드래그 중이거나 선택이 아직 남아있으면 건너뛴다(위 리스너/함수 참고)
   const mySeq = ++renderChatSeq;
   renderLeadMemberChips();
   const leadId = selectedLeadId;
@@ -883,12 +883,22 @@ async function renderChat() {
 // 통째로 새로 그리면(위 renderChatSeq 주석 참고) 그 DOM을 건드리게 된다. 텍스트 선택 중이면
 // 브라우저의 Selection이 물고 있던 옛 텍스트 노드가 통째로 사라지고 화면 같은 위치에 새 노드가
 // 들어서면서 선택 앵커가 엉뚱한 지점을 잡아 위아래로 튀고(실사용 확인), 리사이즈 드래그 중이면
-// 레이아웃 재계산 때문에 같은 증상이 난다. 정확한 원인(선택 vs 리사이즈)을 구분할 필요 없이,
-// 이 요소 안에서 mousedown~mouseup(버튼을 누르고 있는 동안) 자체를 "지금 조작 중"으로 보고 그
-// 사이엔 renderChat()을 건너뛴다 — 버튼을 떼면 다음 폴링 틱에서 자연히 다시 그려진다.
+// 레이아웃 재계산 때문에 같은 증상이 난다.
+//
+// mousedown~mouseup(버튼을 누르고 있는 동안)만 막으면 부족하다 — 텍스트 선택은 마우스를 뗀
+// 뒤에도(복사하려고 Ctrl+C를 누르기 전까지) 그대로 화면에 남아있어야 하는데, mouseup 순간 바로
+// 가드를 꺼버리면 그 직후 폴링 틱이 선택을 통째로 날려버린다(실사용 확인: "드래그는 안 튀는데
+// 떼고 나면 선택이 초기화된다"). 그래서 mouseup 이후에도 실제로 살아있는 선택(non-collapsed)이
+// 이 요소 안에 있으면 계속 건너뛴다 — 사용자가 다른 곳을 클릭해 선택이 풀리면(브라우저가 알아서
+// 선택을 지운다) 자연히 다음 폴링부터 다시 그려진다.
 let isInteractingWithChatTranscript = false;
 chatTranscriptEl.addEventListener('mousedown', () => { isInteractingWithChatTranscript = true; });
 window.addEventListener('mouseup', () => { isInteractingWithChatTranscript = false; });
+
+function hasActiveSelectionInChatTranscript() {
+  const sel = window.getSelection();
+  return !!sel && !sel.isCollapsed && chatTranscriptEl.contains(sel.anchorNode);
+}
 
 // 대기열 항목의 "취소" 버튼 — chatTranscriptEl이 폴링마다(그리고 renderChat 호출마다) innerHTML을
 // 통째로 다시 그리므로, 다른 곳(leadMembersChipsEl/fileListContentEl)과 같은 패턴으로 위임 리스너
