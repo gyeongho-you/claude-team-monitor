@@ -9,6 +9,7 @@
     "build": "npm run typecheck && esbuild src/main.ts src/preload.ts --bundle --platform=node --external:electron --outdir=dist && esbuild src/mcp/teamMemberServer.ts --bundle --platform=node --outfile=dist/teamMemberServer.js",
     "start": "npm run build && electron .",
     "dist:win": "npm run build && electron-builder --win portable",
+    "dist:mac": "npm run build && electron-builder --mac dmg",
     "pack:win": "npm run build && electron-packager . \"Claude Team Monitor\" --platform=win32 --arch=x64 --out=release --overwrite --ignore=\"^/src($|/)\" --ignore=\"^/tests($|/)\" --ignore=\"^/release($|/)\" --ignore=\"^/tsconfig.json$\" --ignore=\"^/package-lock.json$\" --ignore=\"^/[.]claude($|/)\" --ignore=\"^/node_modules($|/)\""
   },
   "devDependencies": {
@@ -33,6 +34,10 @@
     ],
     "win": {
       "target": "portable"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.developer-tools"
     }
   },
   "dependencies": {

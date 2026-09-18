@@ -16,6 +16,7 @@ import { CLAUDE_HOME, MEMBERS_DIR } from './lib/teamMemberPaths';
 import { hasLiveMember } from './lib/leadPresence';
 import { execAgentsJson } from './lib/agentsJson';
 import { checkDirectoryClaudeReady, claudeNotReadyMessage } from './lib/claudeReadiness';
+import { shellSingleQuote, escapeAppleScriptString } from './lib/terminalCommand';
 
 const SESSION_EDITS_DIR = path.join(CLAUDE_HOME, 'session-edits');
 const JOURNAL_DATA_DIR = path.join(CLAUDE_HOME, 'daily-journal', 'data');
@@ -2796,19 +2797,43 @@ ipcMain.handle('end-lead-work', async (_e, leadId: string) => {
 // 넘어온 값을 그대로 shell:true 명령 문자열에 심는 것이므로 방어적으로 형식을 한 번 더 검증한다.
 const SESSION_SHORT_ID_RE = /^[A-Za-z0-9_-]+$/;
 
+// 인터랙티브 명령(claude attach, claude 최초 승인 등)은 이 앱 안에서 답할 수 없어서 항상 사람이
+// 보는 새 터미널 창을 띄워야 한다 — Windows(cmd.exe)와 macOS(Terminal.app, osascript)를 각각의
+// 방식으로 지원한다. env는 Windows에서만 의미가 있다 — spawn()의 env는 그 spawn()의 직계 자식
+// 프로세스(cmd.exe)에만 적용되는데, macOS의 Terminal.app은 osascript의 자식이 아니라 Apple Event로
+// 메시지만 받는 완전히 별개의(이미 떠있는) 앱이라 osascript의 env를 아예 물려받지 않는다 — 그래서
+// CLAUDE_CODE_* 마커 제거(open-terminal-for-approval 참고)가 macOS에서는 애초에 필요 없다.
+function openTerminalRunning(command: string, cwd?: string, winEnv?: NodeJS.ProcessEnv): void {
+  if (process.platform === 'win32') {
+    const child = spawn('cmd.exe', ['/c', 'start', 'cmd.exe', '/k', command], {
+      cwd,
+      detached: true,
+      stdio: 'ignore',
+      shell: true,
+      env: winEnv,
+    });
+    child.on('error', err => console.error('[openTerminalRunning] 터미널을 여는 데 실패했습니다:', err));
+    child.unref();
+    return;
+  }
+  if (process.platform === 'darwin') {
+    const shellCommand = cwd ? `cd ${shellSingleQuote(cwd)} && ${command}` : command;
+    const script = `tell application "Terminal" to do script "${escapeAppleScriptString(shellCommand)}"`;
+    const child = spawn('osascript', ['-e', script], { detached: true, stdio: 'ignore' });
+    child.on('error', err => console.error('[openTerminalRunning] 터미널을 여는 데 실패했습니다:', err));
+    child.unref();
+    return;
+  }
+  console.error(`[openTerminalRunning] 이 OS(${process.platform})에서는 터미널 자동 열기를 지원하지 않습니다.`);
+}
+
 ipcMain.handle('open-in-terminal', (_e, sessionShortId: string) => {
   if (typeof sessionShortId !== 'string' || !SESSION_SHORT_ID_RE.test(sessionShortId)) {
     console.error('[open-in-terminal] 유효하지 않은 세션 id라 거부합니다:', sessionShortId);
     return;
   }
   // claude attach는 인터랙티브 터미널이 필요해서, 새 콘솔 창을 띄워 그 안에서 attach를 실행한다.
-  const child = spawn('cmd.exe', ['/c', 'start', 'cmd.exe', '/k', `claude attach ${sessionShortId}`], {
-    detached: true,
-    stdio: 'ignore',
-    shell: true,
-  });
-  child.on('error', err => console.error('[open-in-terminal] 터미널을 여는 데 실패했습니다:', err));
-  child.unref();
+  openTerminalRunning(`claude attach ${sessionShortId}`);
 });
 
 // 이 앱(Claude Team Monitor.exe) 자신이 다른 claude 세션 안에서(팀장 세션의 자식 프로세스 등으로)
@@ -2842,15 +2867,7 @@ ipcMain.handle('open-terminal-for-approval', async (_e, targetDir: string) => {
     console.error('[open-terminal-for-approval] 알 수 없거나 이미 승인된 디렉토리라 거부합니다:', targetDir);
     return;
   }
-  const child = spawn('cmd.exe', ['/c', 'start', 'cmd.exe', '/k', 'claude'], {
-    cwd: targetDir,
-    detached: true,
-    stdio: 'ignore',
-    shell: true,
-    env: envWithoutClaudeCodeSessionMarkers(),
-  });
-  child.on('error', err => console.error('[open-terminal-for-approval] 터미널을 여는 데 실패했습니다:', err));
-  child.unref();
+  openTerminalRunning('claude', targetDir, envWithoutClaudeCodeSessionMarkers());
 });
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
