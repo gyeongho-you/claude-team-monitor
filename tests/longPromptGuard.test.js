@@ -24,3 +24,15 @@ test('resolveLongPrompt: 한도를 넘으면 파일로 써두고 짧은 안내�
   assert.equal(fs.readFileSync(filePath, 'utf-8'), original);
   fs.unlinkSync(filePath);
 });
+
+test('resolveLongPrompt: 긴 지시문이 "/team-lead " 같은 슬래시 커맨드로 시작하면 안내문 앞에 그 커맨드를 살려 붙인다', () => {
+  const original = `/team-lead ${'a'.repeat(MAX_INLINE_PROMPT_LENGTH)}`;
+  const result = resolveLongPrompt(original);
+  assert.ok(result.startsWith('/team-lead '), '스킬을 실제로 트리거하는 슬래시 커맨드가 안내문 맨 앞에 남아있어야 한다');
+
+  const match = result.match(/"([^"]+\.md)"/);
+  assert.ok(match);
+  const filePath = match[1];
+  assert.equal(fs.readFileSync(filePath, 'utf-8'), original);
+  fs.unlinkSync(filePath);
+});

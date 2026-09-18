@@ -22,8 +22,15 @@ function resolveLongPrompt(prompt) {
   fs.mkdirSync(PROMPTS_DIR, { recursive: true });
   const filePath = path.join(PROMPTS_DIR, `${crypto.randomUUID()}.md`);
   fs.writeFileSync(filePath, prompt, 'utf-8');
+  // prompt가 "/team-lead ..."처럼 슬래시 커맨드로 시작하면, 그 토큰 자체가 스킬을 실제로 로드시키는
+  // 신호다 — 안내문으로 통째로 갈아치우면서 이걸 놓치면(실측 확인) 스킬이 아예 로드되지 않은 맨몸
+  // 세션이 뜨고, 그 세션은 파일에 적힌 지시를 문자 그대로만 수행할 뿐 팀장 페르소나·도구 제약(팀원
+  // 스폰 방법, AskUserQuestion 금지 등)을 전혀 모른 채 움직인다. 그래서 슬래시 토큰만 따로 떼어
+  // 안내문 앞에 그대로 살려 붙인다.
+  const skillMatch = prompt.match(/^(\/\S+)\s/);
+  const skillPrefix = skillMatch ? `${skillMatch[1]} ` : '';
   return (
-    `지시문이 너무 길어 Claude Team Monitor가 대신 파일로 저장했다. 이 파일을 읽고, 그 안의 내용 ` +
+    `${skillPrefix}지시문이 너무 길어 Claude Team Monitor가 대신 파일로 저장했다. 이 파일을 읽고, 그 안의 내용 ` +
     `전체를 지시로 그대로 수행해라: "${filePath}"\n\n(다 읽었으면 이 파일은 지워도 된다.)`
   );
 }
