@@ -776,6 +776,7 @@ function renderQueuedTurnsHtml(leadId) {
 let renderChatSeq = 0;
 
 async function renderChat() {
+  if (isResizingChatTranscript) return; // 리사이즈 드래그 중엔 건너뛴다(아래 mousedown 리스너 참고) — 안 그러면 3초 폴링이 드래그 중인 DOM을 건드려 위치가 튄다
   const mySeq = ++renderChatSeq;
   renderLeadMemberChips();
   const leadId = selectedLeadId;
@@ -876,6 +877,22 @@ async function renderChat() {
   if (wasNearBottom) chatTranscriptEl.scrollTop = chatTranscriptEl.scrollHeight;
   updateBusyUI();
 }
+
+// #chat-transcript는 CSS resize:vertical로 사용자가 오른쪽 아래 모서리를 드래그해 높이를 늘리고
+// 줄일 수 있는데, renderChat()이 3초 폴링마다 innerHTML을 통째로 새로 그려서(위 renderChatSeq
+// 주석 참고) 드래그가 진행 중인 동안에도 그 DOM을 건드린다 — 브라우저의 네이티브 리사이즈 드래그가
+// 진행 중일 때 같은 요소의 자식 노드를 통째로 교체하면 레이아웃이 다시 계산되면서 드래그 위치가
+// 매 폴링 틱마다 위아래로 튀는 증상으로 이어진다(실사용 확인). 리사이즈 핸들 자체는 DOM 요소가
+// 아니라 브라우저가 그리는 것이라 정확한 히트박스를 알 수 없으니, 오른쪽 아래 모서리 근처(20px
+// 이내)에서 시작한 mousedown만 리사이즈로 간주해 그동안 renderChat()을 건너뛴다.
+let isResizingChatTranscript = false;
+chatTranscriptEl.addEventListener('mousedown', e => {
+  const rect = chatTranscriptEl.getBoundingClientRect();
+  const nearRightEdge = rect.right - e.clientX <= 20;
+  const nearBottomEdge = rect.bottom - e.clientY <= 20;
+  if (nearRightEdge && nearBottomEdge) isResizingChatTranscript = true;
+});
+window.addEventListener('mouseup', () => { isResizingChatTranscript = false; });
 
 // 대기열 항목의 "취소" 버튼 — chatTranscriptEl이 폴링마다(그리고 renderChat 호출마다) innerHTML을
 // 통째로 다시 그리므로, 다른 곳(leadMembersChipsEl/fileListContentEl)과 같은 패턴으로 위임 리스너
