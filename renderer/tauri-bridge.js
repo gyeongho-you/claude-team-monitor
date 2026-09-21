@@ -2,10 +2,14 @@
 // 없으므로, window.__TAURI__가 있을 때(=Tauri 런타임)만 이 파일이 그 역할을 대신한다 — Electron으로
 // 띄우면 window.__TAURI__가 없어서 아무 것도 하지 않고 그대로 preload.ts에게 맡긴다.
 //
-// IPC 핸들러는 기능 단위로 하나씩 Rust로 옮기는 중이다(TAURI_HANDOFF.md 참고). 아직 옮기지 않은
-// 채널을 호출하면(renderer.js는 거의 모든 window.api.* 호출을 try/catch로 감싸므로) 콘솔에 경고만
-// 남기고 빈 배열([])을 돌려준다 — []는 .length/.map은 물론 구조분해할당(`const {a} = []`)에도
-// 안전해서, 아직 안 옮긴 기능 때문에 나머지 화면까지 죽지 않게 하는 최소한의 완충 장치다.
+// src-tauri/src/lib.rs의 generate_handler! 목록(45개 커맨드)이 이제 preload.ts의 window.api 함수
+// 43개(onAgentsUpdate 포함)를 전부 커버한다 — 이 파일은 src/preload.ts와 정확히 같은 window.api
+// 표면을 invoke()로 다시 구현한다.
+// 함수명(camelCase)·인자 순서는 preload.ts와 동일하게 맞췄다(renderer.js가 그 계약에 의존한다).
+//
+// Tauri v2 invoke(cmd, args)는 두 번째 인자가 객체이고, 그 키는 Rust 파라미터 이름의 camelCase
+// 버전으로 자동 변환된다(예: Rust `fn confirm_stall_alert(alert_id: String)` → JS
+// `invoke('confirm_stall_alert', { alertId })`) — 커맨드 이름 자체는 snake_case 그대로 둔다.
 (function () {
   if (!window.__TAURI__) return;
 
@@ -15,54 +19,196 @@
     return function () {
       if (!warned.has(name)) {
         warned.add(name);
-        console.warn(`[tauri-bridge] '${name}'은 아직 Rust로 포팅되지 않았습니다.`);
+        console.warn(`[tauri-bridge] '${name}'에 대응하는 Rust 커맨드를 찾지 못했습니다(빠진 IPC 포팅일 수 있음).`);
       }
       return Promise.resolve([]);
     };
   }
 
-  // ---- 여기까지 포팅됨: 세션 목록 조회 ----
-  // main.ts의 getAllBackgroundSessions()/getAdoptableSessions()를 Rust 쪽(session_registry.rs)으로
-  // 그대로 옮겼다 — claude agents --json 실행 + leads.json/members 등록 정보 대조(tag: lead/member/
-  // untracked, probableLeadId, registeredDir)까지 전부 Rust에서 계산해서 내려준다.
+  // ---- 세션 목록/정리 ----
   async function getAllBackgroundSessions() {
-    return invoke('get_all_background_sessions').catch(() => []);
+    return invoke('get_all_background_sessions');
   }
 
   async function getAdoptableSessions() {
-    return invoke('get_adoptable_sessions').catch(() => []);
+    return invoke('get_adoptable_sessions');
   }
 
-  // ---- 여기까지 포팅됨: 작업 탭 보드의 "라이브" rows ----
-  // main.ts의 computeLiveRows()를 Rust 쪽(live_rows.rs)으로 옮겼다 — 지금 떠있고 leads.json/
-  // members에 등록된(팀장이거나 팀원인) 세션만 SessionRow로 만들어 돌려준다. 오프라인 히스토리
-  // (offline/그레이스 판정), 알림 큐(notifyLeadsOfFinishedMembers/deliverPendingNotices)는 아직
-  // 안 옮겼다 — 다음 기능 단위. 그래서 이 함수가 돌려주는 rows에는 오프라인 팀장 카드가 없고
-  // (늘 offline:false), requests/unapprovedDirs는 항상 빈 배열이다 — renderRequests/
-  // renderUnapprovedDirs는 빈 배열을 안전하게 다룬다.
-  //
-  // ---- 여기까지 포팅됨: 정체 감시 알림 목록(get-stall-alerts) ----
-  // get_live_session_rows 호출 안에서 정체 감시(runStallWatchdog, stall_watchdog.rs)가 이미
-  // fire-and-forget으로 같이 돌면서 stallAlerts.json을 채운다(4호 포팅) — 이번엔 그 목록을 읽어
-  // 화면에 내려주는 조회(get_stall_alerts)만 이어붙인다.
-  async function fetchBoardSnapshot() {
-    const [rows, stallAlerts] = await Promise.all([
-      invoke('get_live_session_rows').catch(() => []),
-      invoke('get_stall_alerts').catch(() => []),
-    ]);
-    return { rows, requests: [], stallAlerts, unapprovedDirs: [] };
+  async function stopBackgroundSession(shortId) {
+    return invoke('stop_background_session_command', { shortId });
   }
 
+  async function registerProbableMember(agentId, leadId) {
+    return invoke('register_probable_member_command', { agentId, leadId });
+  }
+
+  async function getInteractiveSessions() {
+    return invoke('get_interactive_sessions_command');
+  }
+
+  // ---- 작업 탭 보드 새로고침 ----
+  // refresh_board_command 하나로 rows/requests/unapprovedDirs/stallAlerts 네 필드를 한 번에
+  // 받아온다(main.ts의 `{...(await buildSessionRows()), stallAlerts: listStallAlertsForUi()}`와
+  // 동일한 응답 모양 — 필드명도 이미 camelCase로 직렬화된다).
   async function refreshBoard() {
-    return fetchBoardSnapshot();
+    return invoke('refresh_board_command');
   }
 
-  // confirm-stall-alert/dismiss-stall-alert(main.ts)의 포팅. main.ts의 confirm은 alert을 지우는
-  // 것 외에 queueLeadNotice로 팀장에게 실제 메시지까지 전달하지만, 알림 큐는 이번 포팅 범위 밖이라
-  // (팀장/팀원에게 실제로 메시지를 찔러 넣는 코드라 더 신중한 리뷰가 필요해서 명시적으로 제외됨)
-  // Rust 쪽은 목록에서 제거만 한다 — "이어서 진행 지시"를 눌러도 알림 카드는 사라지지만 팀장에게
-  // 실제 메시지가 가지는 않는다(알림 큐가 포팅되는 다음 청크에서 이어붙일 예정, Rust 쪽 eprintln
-  // 로그 참고).
+  // main.ts의 3초 폴링(POLL_INTERVAL_MS)과 같은 주기로 직접 폴링해서 'agents-update' push를
+  // 흉내낸다 — Rust 쪽에 아직 이 이벤트를 실제로 emit하는 백그라운드 타이머가 없어서(리뷰 예정),
+  // 폴링이 부르는 스냅샷도 refresh_board_command 기반으로 통일한다(get_live_session_rows/
+  // get_stall_alerts를 따로 합치던 이전 방식 대신).
+  const AGENTS_UPDATE_POLL_MS = 3000;
+  function onAgentsUpdate(callback) {
+    const tick = () => {
+      refreshBoard()
+        .then(callback)
+        .catch(err => console.error('[tauri-bridge] refresh_board_command 폴링 실패:', err));
+    };
+    tick();
+    setInterval(tick, AGENTS_UPDATE_POLL_MS);
+  }
+
+  // ---- 즐겨찾기(팀장 디렉토리) ----
+  async function pickDirectory() {
+    return invoke('pick_directory_command');
+  }
+
+  async function getFavorites() {
+    return invoke('get_favorites_command');
+  }
+
+  async function addFavorite(dir) {
+    return invoke('add_favorite_command', { dir });
+  }
+
+  async function removeFavorite(dir) {
+    return invoke('remove_favorite_command', { dir });
+  }
+
+  async function updateFavoriteName(dir, name) {
+    return invoke('update_favorite_name_command', { dir, name });
+  }
+
+  // ---- 팀장/팀원 라이프사이클 ----
+  async function adoptLead(shortId) {
+    return invoke('adopt_lead_command', { shortId });
+  }
+
+  async function forkSessionAsLead(sessionId, cwd) {
+    return invoke('fork_session_as_lead_command', { sessionId, cwd });
+  }
+
+  async function launchTeamLead(targetDir, instruction, secret) {
+    return invoke('launch_team_lead_command', { targetDir, instruction, secret });
+  }
+
+  async function launchMember(leadId, targetDir, instruction, role, label, model) {
+    return invoke('launch_member_command', { leadId, targetDir, instruction, role, label, model });
+  }
+
+  async function restartLead(leadId, instruction) {
+    return invoke('restart_lead_command', { leadId, instruction });
+  }
+
+  async function endLeadWork(leadId) {
+    return invoke('end_lead_work_command', { leadId });
+  }
+
+  // ---- 팀원 템플릿 ----
+  async function getMemberTemplates() {
+    return invoke('get_member_templates_command');
+  }
+
+  async function addMemberTemplate(scope, dir, name, role, instruction, model) {
+    // add_member_template_command의 dir/model은 Rust 쪽에서 Option<String>이다 — 빈 문자열을
+    // 그대로 보내면 Some("")로 역직렬화돼(main.ts의 `dir || undefined`와 다르게) path:""가 저장될
+    // 수 있으므로, 여기서 falsy를 null로 정규화해 None과 동일하게 맞춘다.
+    return invoke('add_member_template_command', {
+      scope,
+      dir: dir || null,
+      name,
+      role,
+      instruction,
+      model: model || null,
+    });
+  }
+
+  async function updateMemberTemplate(id, fields) {
+    return invoke('update_member_template_command', { id, fields });
+  }
+
+  async function toggleMemberTemplateApproved(id) {
+    return invoke('toggle_member_template_approved_command', { id });
+  }
+
+  async function deleteMemberTemplate(id) {
+    return invoke('delete_member_template_command', { id });
+  }
+
+  // ---- 팀원 요청 승인/거부 ----
+  async function approveRequest(requestId) {
+    return invoke('approve_request_command', { requestId });
+  }
+
+  async function denyRequest(requestId) {
+    return invoke('deny_request_command', { requestId });
+  }
+
+  // ---- 터미널 열기 ----
+  async function openInTerminal(id) {
+    return invoke('open_in_terminal_command', { sessionShortId: id });
+  }
+
+  async function openTerminalForApproval(targetDir) {
+    return invoke('open_terminal_for_approval_command', { targetDir });
+  }
+
+  // ---- 대화/트랜스크립트 ----
+  async function getLeadTranscript(leadId) {
+    return invoke('get_lead_transcript_command', { leadId });
+  }
+
+  async function getPendingChoice(shortId) {
+    return invoke('get_pending_choice_command', { shortId });
+  }
+
+  async function getChatUnresolvableDetail(shortId) {
+    return invoke('get_chat_unresolvable_detail_command', { shortId });
+  }
+
+  // ---- 변경 파일 diff ----
+  async function getChangedFiles(cwd) {
+    return invoke('get_changed_files_command', { cwd });
+  }
+
+  async function getFileDiff(cwd, file) {
+    return invoke('get_file_diff_command', { cwd, file });
+  }
+
+  // ---- 채팅(알림 큐) ----
+  async function sendToLead(leadId, message) {
+    return invoke('send_to_lead_command', { leadId, message });
+  }
+
+  async function cancelQueuedMessage(leadId, noticeId) {
+    return invoke('cancel_queued_message_command', { leadId, noticeId });
+  }
+
+  async function getPendingNoticeIds(leadId) {
+    return invoke('get_pending_notice_ids_command', { leadId });
+  }
+
+  // ---- 히스토리 삭제 ----
+  async function deleteLeadHistory(internalId) {
+    return invoke('delete_lead_history_command', { internalId });
+  }
+
+  // ---- 정체 감시 알림 ----
+  async function getStallAlerts() {
+    return invoke('get_stall_alerts');
+  }
+
   async function confirmStallAlert(alertId) {
     return invoke('confirm_stall_alert', { alertId });
   }
@@ -71,29 +217,71 @@
     return invoke('dismiss_stall_alert', { alertId });
   }
 
-  // main.ts의 3초 폴링(POLL_INTERVAL_MS)과 같은 주기로 직접 폴링해서 'agents-update' push를
-  // 흉내낸다 — Tauri 쪽엔 아직 이 이벤트를 실제로 emit하는 백그라운드 타이머가 없다(다음 기능
-  // 단위: 정체 감시·알림 큐가 붙는 시점에 Rust 쪽 상시 타이머로 대체 예정).
-  const AGENTS_UPDATE_POLL_MS = 3000;
-  function onAgentsUpdate(callback) {
-    const tick = () => {
-      fetchBoardSnapshot()
-        .then(callback)
-        .catch(err => console.error('[tauri-bridge] get_live_session_rows 폴링 실패:', err));
-    };
-    tick();
-    setInterval(tick, AGENTS_UPDATE_POLL_MS);
+  // ---- 설정 ----
+  async function getSettings() {
+    return invoke('get_settings_command');
+  }
+
+  async function updateSettings(partial) {
+    return invoke('update_settings_command', { partial });
+  }
+
+  async function setLeadAutoStallNudge(leadId, value) {
+    return invoke('set_lead_auto_stall_nudge_command', { leadId, value });
+  }
+
+  async function updateLeadLabel(leadId, label) {
+    return invoke('update_lead_label_command', { leadId, label });
   }
 
   const implemented = {
-    getAllBackgroundSessions,
-    getAdoptableSessions,
-    refreshBoard,
     onAgentsUpdate,
+    pickDirectory,
+    getFavorites,
+    addFavorite,
+    removeFavorite,
+    updateFavoriteName,
+    getAdoptableSessions,
+    getAllBackgroundSessions,
+    stopBackgroundSession,
+    registerProbableMember,
+    refreshBoard,
+    adoptLead,
+    getInteractiveSessions,
+    forkSessionAsLead,
+    launchTeamLead,
+    launchMember,
+    getMemberTemplates,
+    addMemberTemplate,
+    updateMemberTemplate,
+    toggleMemberTemplateApproved,
+    deleteMemberTemplate,
+    approveRequest,
+    denyRequest,
+    openInTerminal,
+    openTerminalForApproval,
+    getLeadTranscript,
+    getPendingChoice,
+    getChatUnresolvableDetail,
+    getChangedFiles,
+    getFileDiff,
+    sendToLead,
+    cancelQueuedMessage,
+    deleteLeadHistory,
+    getPendingNoticeIds,
+    getStallAlerts,
     confirmStallAlert,
     dismissStallAlert,
+    getSettings,
+    updateSettings,
+    setLeadAutoStallNudge,
+    updateLeadLabel,
+    restartLead,
+    endLeadWork,
   };
 
+  // preload.ts의 43개 함수를 전부 위에서 구현했다 — 이 Proxy의 stub 폴백은 "혹시 이후에 preload.ts에
+  // 함수가 추가됐는데 여기 안 옮겨진" 경우를 위한 안전망일 뿐, 지금은 어떤 호출도 stub을 타지 않는다.
   window.api = new Proxy(implemented, {
     get(target, prop) {
       if (prop in target) return target[prop];
