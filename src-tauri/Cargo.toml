@@ -25,3 +25,7 @@ tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 # claude agents --json 실행에 타임아웃을 걸기 위함 — std::process::Child::wait에는 타임아웃이 없다.
 wait-timeout = "0.2"
+# stallGuard.js의 APPROVAL_PATTERN(승인/확인 요청 정규식)과 Haiku 응답의 ```json 코드펜스 추출을
+# main.ts와 정확히 같은 방식으로 옮기기 위함 — 손으로 문자열 매칭을 흉내내면 놓치는 패턴이 생기기
+# 쉬운, 안전장치(정체 감시가 실수로 재촉하면 안 되는 상황) 관련 로직이라 검증된 크레이트를 쓴다.
+regex = "1"

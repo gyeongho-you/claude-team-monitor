@@ -42,6 +42,16 @@ pub fn leads_path() -> PathBuf {
     app_data_dir().join("leads.json")
 }
 
+// main.ts의 STALL_ALERTS_PATH — 정체 감시가 만들어낸, 사용자 확인을 기다리는 StallAlert 목록.
+pub fn stall_alerts_path() -> PathBuf {
+    app_data_dir().join("stallAlerts.json")
+}
+
+// main.ts의 SETTINGS_PATH — stallIdleThresholdMin/stallCooldownMin 등 사용자가 바꿀 수 있는 값.
+pub fn settings_path() -> PathBuf {
+    app_data_dir().join("settings.json")
+}
+
 // daily-journal 자신의 config.ts(getTodayDir)와 같은 순서로 읽는다 — main.ts의
 // resolveJournalDataDir과 동일. daily-journal은 별도 설치 플러그인이라 없을 수도 있다(fail-open).
 pub fn daily_journal_dir() -> PathBuf {

@@ -1,8 +1,10 @@
 mod agents_json;
 mod board_state;
+mod json_file;
 mod live_rows;
 mod paths;
 mod session_registry;
+mod stall_watchdog;
 mod timing;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

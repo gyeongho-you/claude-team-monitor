@@ -30,6 +30,15 @@ pub const MEMBER_EXTERNAL_LEAD_ORCHESTRATION_BUFFER_MS: i64 = 30_000;
 pub const MEMBER_MISS_GRACE_MS: i64 =
     STOP_AND_RELAUNCH_WORST_CASE_MS + OFFLINE_GRACE_BUFFER_MS + MEMBER_EXTERNAL_LEAD_ORCHESTRATION_BUFFER_MS;
 
+/// 정체 감시(stall watchdog)가 쓰는 기본값 — 사용자가 settings.json으로 바꿀 수 있는 값의
+/// "아직 아무것도 저장 안 됐을 때" 기본값이다. main.ts의 STALL_IDLE_THRESHOLD_MS_DEFAULT/
+/// STALL_RECHECK_COOLDOWN_MS_DEFAULT와 동일.
+pub const STALL_IDLE_THRESHOLD_MS_DEFAULT: i64 = 10 * 60 * 1000;
+pub const STALL_RECHECK_COOLDOWN_MS_DEFAULT: i64 = 20 * 60 * 1000;
+/// Haiku 서브 에이전트 한 번 호출에 걸리는 실측 시간(콜드 스타트 포함 최대 수십 초)을 감안한
+/// 타임아웃 — main.ts의 STALL_CLASSIFIER_TIMEOUT_MS와 동일.
+pub const STALL_CLASSIFIER_TIMEOUT_MS: u64 = 45_000;
+
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

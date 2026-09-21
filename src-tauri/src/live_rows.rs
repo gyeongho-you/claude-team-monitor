@@ -35,23 +35,25 @@ fn is_date_dir_name(name: &str) -> bool {
         && name[8..10].bytes().all(|b| b.is_ascii_digit())
 }
 
+// pub(crate)로 열어 stall_watchdog.rs의 getTranscript 포팅(daily-journal 기반, 원본 세션 파일
+// 병합은 이번 포팅 범위 밖)이 이 파싱 로직을 그대로 재사용하게 한다.
 #[derive(Debug, Clone, Deserialize)]
-struct JournalEntry {
+pub(crate) struct JournalEntry {
     #[serde(rename = "sessionId", default)]
-    session_id: String,
+    pub(crate) session_id: String,
     #[serde(default)]
-    time: String,
+    pub(crate) time: String,
     #[serde(default)]
-    prompt: String,
+    pub(crate) prompt: String,
     #[serde(default)]
-    answer: String,
+    pub(crate) answer: String,
     #[serde(default)]
-    summary: Option<String>,
+    pub(crate) summary: Option<String>,
 }
 
 // readJournalEntries(main.ts)와 동일 — 팀장을 하루 넘겨 이어가는 경우가 있어서 daily-journal에
 // 쌓인 모든 날짜(오래된 순)를 훑어서 합친다.
-fn read_journal_entries(project_name: &str) -> Vec<JournalEntry> {
+pub(crate) fn read_journal_entries(project_name: &str) -> Vec<JournalEntry> {
     let journal_dir = resolve_journal_data_dir();
     let mut dates: Vec<String> = match fs::read_dir(&journal_dir) {
         Ok(entries) => entries
@@ -110,7 +112,8 @@ fn get_latest_preview(project_name: &str, session_id: &str) -> Option<Preview> {
 
 // resolveProjectName(main.ts)와 동일 — daily-journal이 세션당 캐시해둔 프로젝트명을 재사용하고,
 // 캐시가 없으면(그 세션에서 Edit/Write가 한 번도 없었으면) cwd의 basename으로 근사한다.
-fn resolve_project_name(session_id: &str, cwd: &str) -> String {
+// pub(crate): stall_watchdog.rs가 팀장의 projectName을 알아내는 데도 그대로 재사용한다.
+pub(crate) fn resolve_project_name(session_id: &str, cwd: &str) -> String {
     let cache_file = session_edits_dir().join(format!("{session_id}.project.json"));
     if let Ok(raw) = fs::read_to_string(&cache_file) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
@@ -351,6 +354,12 @@ pub fn get_live_session_rows() -> Vec<SessionRow> {
             }
         }
     }
+
+    // runStallWatchdog(main.ts)와 동일하게 fire-and-forget으로 건다 — Haiku 호출이 몇 초~몇십 초
+    // 걸릴 수 있어서 이 함수(3초 폴링마다 불림)의 반환을 막으면 안 된다. 내부적으로 원자적
+    // in-flight 플래그로 중복 실행만 막는다(stall_watchdog.rs 참고). notifyLeadsOfFinishedMembers/
+    // deliverPendingNotices는 이번 청크 범위 밖이라 여기 없다 — 다음 청크.
+    crate::stall_watchdog::spawn_stall_watchdog_if_idle(live_rows.clone(), leads.clone(), members.clone());
 
     // hasCompletedFirstPoll 게이트 — 앱을 막 시작한 첫 폴링에는 "재기동 중일 수도 있다"고 봐줄
     // 근거가 없으므로 grace_ms=0을 줘서 이미 죽어있던 팀장이 바로 다음 폴링에 오프라인으로

@@ -11,6 +11,12 @@ pub struct BoardState {
     pub lead_first_miss_at: HashMap<String, i64>,
     pub last_known_live_lead_row: HashMap<String, SessionRow>,
     pub has_completed_first_poll: bool,
+    // 정체 감시(runStallWatchdog) 전용 — main.ts 주석대로 반드시 짧은 id가 아니라 sessionId로
+    // 키를 잡는다. 짧은 id로 잡으면 stop→resume 등으로 짧은 id만 바뀌어도(세션 자체는 그대로)
+    // "처음 보는 키"가 돼서 조용히 리셋되고, 정체 감지가 무기한 미뤄질 수 있다.
+    pub member_idle_since: HashMap<String, i64>, // 팀원 sessionId -> idle/done으로 바뀐 시각
+    pub lead_idle_since: HashMap<String, i64>,   // 팀장 sessionId -> idle/done으로 바뀐 시각
+    pub stall_last_checked_at: HashMap<String, i64>, // 팀원 sessionId -> 마지막으로 실제 Haiku를 호출한 시각
 }
 
 impl BoardState {
@@ -19,6 +25,9 @@ impl BoardState {
             lead_first_miss_at: HashMap::new(),
             last_known_live_lead_row: HashMap::new(),
             has_completed_first_poll: false,
+            member_idle_since: HashMap::new(),
+            lead_idle_since: HashMap::new(),
+            stall_last_checked_at: HashMap::new(),
         }
     }
 }
