@@ -1,85 +1,49 @@
 use crate::agents_json::{fetch_agents_typed, AgentEntry};
+use crate::paths::{is_safe_id, leads_path, members_dir};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
 
-// src/lib/teamMemberPaths.js와 정확히 같은 경로여야 한다 — 팀원 생성 MCP 서버(외부 claude 세션)도
-// 이 디렉토리에 직접 등록 파일을 쓰므로, 한쪽만 경로를 바꾸면 "분명 등록했는데 안 보인다" 사고로
-// 이어진다.
-fn claude_home() -> PathBuf {
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_default();
-    PathBuf::from(home).join(".claude")
-}
-
-fn members_dir() -> PathBuf {
-    claude_home().join("claude-team-monitor").join("members")
-}
-
-// Electron의 app.getPath('userData') 기본값은 path.join(appData, app.getName())이고, app.getName()은
-// package.json의 "name"(=claude-team-monitor)을 그대로 쓴다(main.ts에 app.setName 호출 없음을
-// 확인함) — 실제로 %APPDATA%\claude-team-monitor\leads.json에 데이터가 있는 것도 확인했다. 이
-// 앱(Tauri)도 같은 경로를 읽어야 Electron 시절에 등록된 팀장/팀원이 그대로 보인다.
-fn app_data_dir() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        let appdata = std::env::var("APPDATA").unwrap_or_default();
-        PathBuf::from(appdata).join("claude-team-monitor")
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-            .join("claude-team-monitor")
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(home).join(".config").join("claude-team-monitor")
-    }
-}
-
-fn leads_path() -> PathBuf {
-    app_data_dir().join("leads.json")
-}
-
-// pathGuard.js의 isSafeId와 동일한 규칙. 팀원 등록 파일(~/.claude/claude-team-monitor/members/*.json)은
-// 이 앱이 아니라 외부(팀장) claude 세션이 SKILL.md 안내에 따라 직접 파일로 써서 남긴다 — memberId
-// 필드값을 검증 없이 신뢰하면 안 된다(팀원 코드리뷰에서 지적된 경로 조작 위험. 이번 포팅 범위는
-// 읽기 전용 조회라 삭제/쓰기 경로에 직접 이어붙이진 않지만, 화면에 잘못된 값이 그대로 노출되는 것도
-// 막기 위해 원본과 동일하게 걸러낸다).
-fn is_safe_id(id: &str) -> bool {
-    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-// main.ts의 LeadRecord에서 이번 조회(태깅·정렬)에 필요한 필드만 가져온다 — 쓰기 경로가 없으므로
-// internalId 백필 같은 마이그레이션도 이번 포팅 범위에 없다(다음 기능 단위: 보드 rows 포팅에서 다룸).
+// main.ts의 LeadRecord 중 지금까지 포팅한 조회(세션 정리 탭 태깅 + 보드 라이브 rows)에 필요한
+// 필드만 가져온다 — 쓰기 경로가 없으므로 internalId 백필 같은 마이그레이션도 이번 포팅 범위에
+// 없다(다음 기능 단위: 오프라인 히스토리/정체 감시/알림 큐에서 다룸). pub(crate)로 열어 다른 조회
+// 모듈(live_rows.rs 등)이 파일을 다시 읽지 않고 재사용할 수 있게 한다.
 #[derive(Debug, Clone, Deserialize)]
-struct LeadRecord {
-    id: String,
+pub struct LeadRecord {
+    pub id: String,
     #[serde(rename = "targetDir", default)]
-    target_dir: String,
+    pub target_dir: String,
     #[serde(rename = "launchedAt", default)]
-    launched_at: i64,
+    pub launched_at: i64,
     #[serde(rename = "approvedMembers", default)]
-    approved_members: Vec<String>,
+    pub approved_members: Vec<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(rename = "internalId", default)]
+    pub internal_id: Option<String>,
+    #[serde(rename = "autoStallNudge", default)]
+    pub auto_stall_nudge: Option<bool>,
+    #[serde(default)]
+    pub secret: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct MemberRecord {
+pub struct MemberRecord {
     #[serde(rename = "memberId")]
-    member_id: String,
+    pub member_id: String,
     #[serde(rename = "leadId")]
-    lead_id: String,
+    pub lead_id: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub secret: Option<bool>,
 }
 
 // readJsonArraySafe(main.ts)와 동일 — 파일이 없거나 배열이 아니거나 파싱에 실패하면 빈 배열로
 // fail-open한다(보드/목록 표시는 "일시적으로 못 읽으면 빈 걸로 보이는" 쪽이 낫다).
-fn load_leads() -> Vec<LeadRecord> {
+pub fn load_leads() -> Vec<LeadRecord> {
     let raw = match fs::read_to_string(leads_path()) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -88,7 +52,7 @@ fn load_leads() -> Vec<LeadRecord> {
 }
 
 // loadMembers(main.ts)와 동일 — 팀원별로 파일 하나(memberId.json)씩 흩어져 있다.
-fn load_members() -> Vec<MemberRecord> {
+pub fn load_members() -> Vec<MemberRecord> {
     let dir = members_dir();
     let entries = match fs::read_dir(&dir) {
         Ok(e) => e,
