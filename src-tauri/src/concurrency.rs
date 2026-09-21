@@ -59,10 +59,8 @@ fn spawn_lead_actor() -> mpsc::UnboundedSender<Job> {
 /// 성립한다). 서로 다른 internalId는 완전히 독립적으로 동시 진행된다(Node 원본도 internalId별로
 /// 별개의 Promise 체인이라 마찬가지).
 ///
-/// 이번 서브청크(α)는 이 primitive 자체만 만든다 — 실제로 이걸로 감싸야 하는 resumeLead류
-/// 호출(서브청크 β)이 아직 이관되지 않아서 지금은 어디서도 호출되지 않는다(#[allow(dead_code)]는
-/// 그래서 임시로 붙였다 — β가 첫 호출부를 추가하는 즉시 지워야 한다).
-#[allow(dead_code)]
+/// 서브청크 β(resume.rs)가 resume_lead_command에서 이 함수의 첫 실제 호출부를 추가했다 — α가
+/// 남겨둔 #[allow(dead_code)]는 그래서 여기서 뗀다.
 pub async fn queue_lead_operation<T, F, Fut>(internal_id: &str, f: F) -> T
 where
     F: FnOnce() -> Fut + Send + 'static,

@@ -28,21 +28,14 @@ pub struct BoardState {
     pub lead_idle_since: HashMap<String, i64>,   // 팀장 sessionId -> idle/done으로 바뀐 시각
     pub stall_last_checked_at: HashMap<String, i64>, // 팀원 sessionId -> 마지막으로 실제 Haiku를 호출한 시각
 
-    // 아래 세 개는 이번 서브청크(α)에서 새로 추가 — TAURI_NOTICE_QUEUE_DESIGN.md §2가 지정한
-    // "모듈 스코프 Map들의 Rust 동치물 설계" 대상 중 lead_first_miss_at/last_known_live_lead_row/
-    // has_completed_first_poll을 뺀 나머지. 실제로 채우고 읽는 로직(resumeRetryFrom/
-    // trackAttachTerminal/cleanupStaleMembers 상당)은 β/δ 범위라 여기서는 저장소만 준비한다.
-    // §3-4(폴링 루프를 단일 소유자로) 원칙은 "폴링 태스크만 mutate"가 아니라 "모든 접근이 항상
-    // 이 BoardState 하나의 Mutex를 짧게 잠그고 원자적으로 끝난다"는 형태로 지킨다 — 이미 있던
-    // lead_first_miss_at/last_known_live_lead_row도 같은 패턴이고(get_live_session_rows가
-    // await 없이 짧게 lock()만 잡았다 푼다), attach_terminal_pids처럼 폴링 루프가 아닌 IPC
-    // 핸들러(open-in-terminal)가 쓰는 맵도 이 규칙만 지키면(다단계 갱신 중간에 .await를 끼우지
-    // 않으면) 별도의 "단일 소유 태스크"가 없어도 B-3/B-4류의 TOCTOU 경합이 재발하지 않는다.
-    // 이 셋은 β/δ가 쓰기 시작하기 전까지는 프로덕션 코드에서 읽는 곳이 없어(테스트에서만 읽음)
-    // `cargo build`(테스트 제외 빌드)가 dead_code 경고를 낸다 — β/δ가 실제 읽기/쓰기 호출부를
-    // 추가하는 즉시 이 allow는 지워야 한다.
-    #[allow(dead_code)]
-    /// resumeRetryStatus(main.ts:95) 동치.
+    // 아래 두 개는 서브청크 α에서 저장소만 마련해뒀던 것 — 실제로 채우고 읽는 로직은 δ 범위라
+    // 아직 여기서는 저장소만 준비한다. §3-4(폴링 루프를 단일 소유자로) 원칙은 "폴링 태스크만
+    // mutate"가 아니라 "모든 접근이 항상 이 BoardState 하나의 Mutex를 짧게 잠그고 원자적으로
+    // 끝난다"는 형태로 지킨다 — attach_terminal_pids처럼 폴링 루프가 아닌 IPC 핸들러(open-in-terminal)가
+    // 쓰는 맵도 이 규칙만 지키면(다단계 갱신 중간에 .await를 끼우지 않으면) 별도의 "단일 소유
+    // 태스크"가 없어도 B-3/B-4류의 TOCTOU 경합이 재발하지 않는다.
+    /// resumeRetryStatus(main.ts:95) 동치 — 서브청크 β(resume.rs)가 resume_retry_from에서
+    /// 실제로 채우고/지우기 시작했다(α의 #[allow(dead_code)]는 여기서 뗀다).
     pub resume_retry_status: HashMap<String, ResumeRetryStatus>,
     #[allow(dead_code)]
     /// attachTerminalPids(main.ts:2895) 동치 — key: 세션 짧은 id, value: WMI로 찾은 PID 목록.

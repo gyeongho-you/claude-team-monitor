@@ -1,14 +1,14 @@
 use crate::agents_json::{fetch_agents_typed, AgentEntry};
+use crate::json_file::write_json_file_atomic;
 use crate::paths::{is_safe_id, leads_path, members_dir};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 
-// main.ts의 LeadRecord 중 지금까지 포팅한 조회(세션 정리 탭 태깅 + 보드 라이브 rows)에 필요한
-// 필드만 가져온다 — 쓰기 경로가 없으므로 internalId 백필 같은 마이그레이션도 이번 포팅 범위에
-// 없다(다음 기능 단위: 오프라인 히스토리/정체 감시/알림 큐에서 다룸). pub(crate)로 열어 다른 조회
-// 모듈(live_rows.rs 등)이 파일을 다시 읽지 않고 재사용할 수 있게 한다.
-#[derive(Debug, Clone, Deserialize)]
+// main.ts의 LeadRecord — 이번 청크(서브청크 β, resume 경로)부터 leads.json 쓰기(save_leads)가
+// 생겨서 Serialize도 함께 derive한다. pub(crate)로 열어 다른 조회 모듈(live_rows.rs 등)이 파일을
+// 다시 읽지 않고 재사용할 수 있게 한다.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LeadRecord {
     pub id: String,
     #[serde(rename = "sessionId", default)]
@@ -19,20 +19,25 @@ pub struct LeadRecord {
     pub launched_at: i64,
     #[serde(rename = "approvedMembers", default)]
     pub approved_members: Vec<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     // claude가 자동 생성한 세션 주제 — main.ts는 한 번 찾으면 leads.json에 캐싱해서 다음부터는
     // 세션 파일을 다시 안 읽는다. 이번 포팅은 읽기 전용이라(leads.json 쓰기 경로 없음) 그 캐싱
     // 백필은 아직 안 하고, 폴링마다 get_session_ai_title로 다시 찾는다(작은 jsonl 한 번 훑는 정도라
     // 비용은 낮다) — leads.json에 이미 캐싱돼 있으면(Electron 시절 등) 그 값을 우선 쓴다.
-    #[serde(rename = "aiTitle", default)]
+    #[serde(rename = "aiTitle", default, skip_serializing_if = "Option::is_none")]
     pub ai_title: Option<String>,
     #[serde(rename = "internalId", default)]
     pub internal_id: Option<String>,
-    #[serde(rename = "autoStallNudge", default)]
+    #[serde(rename = "autoStallNudge", default, skip_serializing_if = "Option::is_none")]
     pub auto_stall_nudge: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<bool>,
+    // 팀원 생성 MCP 서버가 "이 프로세스가 어느 팀장인지"를 알아내는 상관값 — issue_mcp_token이
+    // 발급/저장한다(spawn_resume.rs). resumeLead는 --resume에 이 값을 다시 실어 보내지 않으므로
+    // (A-1 방어, resume_spawn_with_retry 주석 참고) resume 경로 자체는 이 필드를 안 건드린다.
+    #[serde(rename = "mcpToken", default, skip_serializing_if = "Option::is_none")]
+    pub mcp_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -51,12 +56,36 @@ pub struct MemberRecord {
 
 // readJsonArraySafe(main.ts)와 동일 — 파일이 없거나 배열이 아니거나 파싱에 실패하면 빈 배열로
 // fail-open한다(보드/목록 표시는 "일시적으로 못 읽으면 빈 걸로 보이는" 쪽이 낫다).
+//
+// loadLeads(main.ts)와 마찬가지로 internalId가 없는(이 필드를 추가하기 전에 만들어진) 레코드는
+// 여기서 한 번 발급해서 즉시 저장해둔다 — queueLeadOperation/resumeLead(spawn_resume.rs)가 internalId를
+// 큐 키·조회 키로 쓰므로, 이게 없으면 그 레코드를 향한 resume 자체가 불가능하다(서브청크 α 시점엔
+// leads.json 쓰기 경로가 아예 없어서 이 백필을 못 했다 — 이번 β가 save_leads를 처음 추가하면서
+// 함께 챙긴다).
 pub fn load_leads() -> Vec<LeadRecord> {
     let raw = match fs::read_to_string(leads_path()) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
-    serde_json::from_str::<Vec<LeadRecord>>(&raw).unwrap_or_default()
+    let mut leads = serde_json::from_str::<Vec<LeadRecord>>(&raw).unwrap_or_default();
+    let mut dirty = false;
+    for lead in leads.iter_mut() {
+        if lead.internal_id.is_none() {
+            lead.internal_id = Some(uuid::Uuid::new_v4().to_string());
+            dirty = true;
+        }
+    }
+    if dirty {
+        save_leads(&leads);
+    }
+    leads
+}
+
+/// saveLeads(main.ts)와 동일.
+pub fn save_leads(leads: &[LeadRecord]) {
+    if let Err(e) = write_json_file_atomic(&leads_path(), &leads) {
+        eprintln!("[save_leads] leads.json 저장 실패: {e}");
+    }
 }
 
 // loadMembers(main.ts)와 동일 — 팀원별로 파일 하나(memberId.json)씩 흩어져 있다.

@@ -1,9 +1,14 @@
 mod agents_json;
 mod board_state;
+mod claude_bg_output;
+mod claude_readiness;
 mod concurrency;
 mod json_file;
 mod live_rows;
+mod logging;
+mod long_prompt_guard;
 mod paths;
+mod resume;
 mod session_registry;
 mod stall_watchdog;
 mod timing;
@@ -19,6 +24,7 @@ pub fn run() {
       stall_watchdog::get_stall_alerts,
       stall_watchdog::confirm_stall_alert,
       stall_watchdog::dismiss_stall_alert,
+      resume::resume_lead_command,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

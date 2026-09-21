@@ -13,6 +13,12 @@ pub fn members_dir() -> PathBuf {
     claude_home().join("claude-team-monitor").join("members")
 }
 
+// src/lib/teamMemberPaths.js의 PROMPTS_DIR과 정확히 같은 경로여야 한다 — long_prompt_guard.rs가
+// argv 길이 한도를 넘는 지시문을 파일로 대신 써두는 곳(resolveLongPrompt와 동일한 이유).
+pub fn prompts_dir() -> PathBuf {
+    claude_home().join("claude-team-monitor").join("prompts")
+}
+
 // Electron의 app.getPath('userData') 기본값은 path.join(appData, app.getName())이고, app.getName()은
 // package.json의 "name"(=claude-team-monitor)을 그대로 쓴다(main.ts에 app.setName 호출 없음을
 // 확인함) — 실제로 %APPDATA%\claude-team-monitor\leads.json에 데이터가 있는 것도 확인했다. 이
@@ -50,6 +56,12 @@ pub fn stall_alerts_path() -> PathBuf {
 // main.ts의 SETTINGS_PATH — stallIdleThresholdMin/stallCooldownMin 등 사용자가 바꿀 수 있는 값.
 pub fn settings_path() -> PathBuf {
     app_data_dir().join("settings.json")
+}
+
+// main.ts의 APP_LOG_PATH — logCritical(logging.rs)이 원인을 알 수 없이 겪는 실패의 핵심 실패
+// 지점만 콘솔과 별개로 남기는 곳.
+pub fn app_log_path() -> PathBuf {
+    app_data_dir().join("app.log")
 }
 
 // daily-journal 자신의 config.ts(getTodayDir)와 같은 순서로 읽는다 — main.ts의

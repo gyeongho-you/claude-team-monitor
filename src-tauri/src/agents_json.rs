@@ -110,6 +110,28 @@ pub fn fetch_agents_typed() -> Vec<AgentEntry> {
     }
 }
 
+/// async 컨텍스트(queue_lead_operation의 job 등)에서 fetch_agents_typed()를 쓸 때 전용 —
+/// 이 안의 claude 실행/대기는 최대 AGENTS_JSON_TIMEOUT(10s)까지 블로킹이라, tokio worker 스레드를
+/// 그대로 막지 않도록 spawn_blocking으로 감싼다(TAURI_NOTICE_QUEUE_DESIGN.md §2-β 리뷰 지침 1번).
+/// fetch_agents_typed()와 마찬가지로 fail-open(실패 시 빈 배열)이다.
+pub async fn fetch_agents_typed_async() -> Vec<AgentEntry> {
+    tokio::task::spawn_blocking(fetch_agents_typed).await.unwrap_or_default()
+}
+
+/// src/main.ts의 fetchAgentsStrict()와 같은 설계 — exec/파싱 실패 시 빈 배열로 fail-open하지
+/// 않고 에러를 그대로 전달한다. stopSession의 생존 확인, resumeLead의 "지금 실제로 떠있는지"
+/// 판정처럼 "확인 안 됨"을 "안 살아있음"으로 잘못 해석하면 안 되는 fail-closed 호출부 전용이다
+/// (TAURI_NOTICE_QUEUE_DESIGN.md §1 A-2/B-1 — fail-open으로 잘못 판정하면 아직 살아있는 세션에
+/// resume을 걸어 복사본이 생기는 사고로 이어진다).
+pub async fn fetch_agents_typed_strict() -> Result<Vec<AgentEntry>, String> {
+    tokio::task::spawn_blocking(|| {
+        let raw = run_claude_agents_json()?;
+        serde_json::from_str::<Vec<AgentEntry>>(&raw).map_err(|e| format!("JSON 파싱 실패: {e}"))
+    })
+    .await
+    .map_err(|e| format!("agents --json 조회 태스크가 panic했습니다: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
