@@ -23,3 +23,5 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
+# claude agents --json 실행에 타임아웃을 걸기 위함 — std::process::Child::wait에는 타임아웃이 없다.
+wait-timeout = "0.2"
