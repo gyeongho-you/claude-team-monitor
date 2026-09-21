@@ -714,6 +714,18 @@ pub async fn issue_mcp_token(internal_id: &str) -> String {
     token
 }
 
+// ---------------------------------------------------------------------------------------------
+// stop-background-session(main.ts:2507-2510) IPC — 서브청크 δ가 소비하는 IPC 목록에 포함돼
+// 있지만, 알림 큐와는 무관하고 이 파일의 stop_session/session_registry.rs의
+// get_all_background_sessions를 그대로 호출만 하는 얇은 IPC 껍데기다.
+// ---------------------------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn stop_background_session_command(short_id: String) -> Vec<crate::session_registry::BackgroundSessionRow> {
+    stop_session(short_id).await;
+    crate::session_registry::get_all_background_sessions()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

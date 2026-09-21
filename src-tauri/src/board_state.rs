@@ -37,13 +37,21 @@ pub struct BoardState {
     /// resumeRetryStatus(main.ts:95) 동치 — 서브청크 β(resume.rs)가 resume_retry_from에서
     /// 실제로 채우고/지우기 시작했다(α의 #[allow(dead_code)]는 여기서 뗀다).
     pub resume_retry_status: HashMap<String, ResumeRetryStatus>,
-    #[allow(dead_code)]
     /// attachTerminalPids(main.ts:2895) 동치 — key: 세션 짧은 id, value: WMI로 찾은 PID 목록.
+    /// 서브청크 δ부터 is_attach_terminal_open_for(아래)가 실제로 읽는다 — 이 맵을 채우는
+    /// open-in-terminal IPC(별도 트랙, TAURI_NOTICE_QUEUE_DESIGN.md §2)는 아직 미포팅이라 지금은
+    /// 항상 비어있고, is_attach_terminal_open_for는 그래서 지금은 항상 false를 반환한다(안전한
+    /// 기본값 — "attach 터미널 없음"과 같은 뜻). 그 트랙이 채워지는 순간부터 자동으로 올바르게
+    /// 동작한다(설계 문서의 "구현은 병렬이어도 인터페이스 합의는 먼저" 요구사항).
     pub attach_terminal_pids: HashMap<String, Vec<i64>>,
     #[allow(dead_code)]
     /// memberFirstMissAt(main.ts:879) 동치 — cleanupStaleMembers(팀원용 first-miss 유예 판정)가
     /// 쓴다. lead_first_miss_at과 값 타입은 같지만 키 공간이 다르므로(팀원 memberId) 별도 필드.
     pub member_first_miss_at: HashMap<String, i64>,
+    /// lastMemberStatus(main.ts:853) 동치 — key: 팀원의 짧은 id(main.ts와 동일하게 sessionId가
+    /// 아니라 짧은 id다). notifyLeadsOfFinishedMembers(notice_queue.rs)가 폴링마다 busy→idle/done
+    /// 전이를 감지하는 데 쓴다.
+    pub last_member_status: HashMap<String, String>,
 }
 
 impl BoardState {
@@ -58,6 +66,7 @@ impl BoardState {
             resume_retry_status: HashMap::new(),
             attach_terminal_pids: HashMap::new(),
             member_first_miss_at: HashMap::new(),
+            last_member_status: HashMap::new(),
         }
     }
 }
@@ -65,6 +74,56 @@ impl BoardState {
 pub fn state() -> &'static Mutex<BoardState> {
     static STATE: OnceLock<Mutex<BoardState>> = OnceLock::new();
     STATE.get_or_init(|| Mutex::new(BoardState::new()))
+}
+
+// ---------------------------------------------------------------------------------------------
+// isAttachTerminalOpenFor(main.ts) — resumeLead/deliverPendingNotices가 stop→resume을 걸기 전에
+// 확인한다(D-3/H-2). 살아있는 PID가 하나도 없으면(창을 닫았거나 애초에 못 찾았으면) false를
+// 돌려주면서 지도도 정리한다. Windows에서 프로세스 생존을 확인하는 표준 API가 std에 없어서
+// tasklist를 그대로 spawn한다(main.ts의 WMI 조회와 같은 "외부 명령으로 확인" 방식 — 새 crate
+// 의존성을 추가하지 않는다).
+// ---------------------------------------------------------------------------------------------
+
+#[cfg(windows)]
+fn is_process_alive(pid: i64) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    match output {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()),
+        Err(_) => false,
+    }
+}
+#[cfg(not(windows))]
+fn is_process_alive(_pid: i64) -> bool {
+    false
+}
+
+/// isAttachTerminalOpenFor(main.ts:2908)와 동일. 맵 접근은 state()의 Mutex로 짧게 잠그고,
+/// 블로킹 프로세스 조회(is_process_alive)는 그 락을 놓은 뒤에 한다 — 락을 쥔 채로 자식 프로세스를
+/// spawn하면 다른 board_state 접근자가 그동안(짧지만) 기다려야 한다.
+pub fn is_attach_terminal_open_for(session_short_id: &str) -> bool {
+    let pids = {
+        let guard = state().lock().unwrap();
+        match guard.attach_terminal_pids.get(session_short_id) {
+            Some(p) if !p.is_empty() => p.clone(),
+            _ => return false,
+        }
+    };
+    let alive: Vec<i64> = pids.iter().copied().filter(|&pid| is_process_alive(pid)).collect();
+    let mut guard = state().lock().unwrap();
+    if alive.is_empty() {
+        guard.attach_terminal_pids.remove(session_short_id);
+        false
+    } else {
+        if alive.len() != pids.len() {
+            guard.attach_terminal_pids.insert(session_short_id.to_string(), alive);
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,5 +234,38 @@ mod tests {
         assert_eq!(guard.resume_retry_status.get(key), Some(&ResumeRetryStatus { attempt: 1, max: 3 }));
         assert_eq!(guard.attach_terminal_pids.get(key), Some(&vec![1234, 5678]));
         assert_eq!(guard.member_first_miss_at.get(key), Some(&1_000));
+    }
+
+    // is_attach_terminal_open_for(δ) — 맵에 아예 없거나 빈 목록이면 false, 죽은 PID만 있으면
+    // false로 정리(맵에서 제거), 하나라도 살아있으면 true + 죽은 것만 걸러서 갱신.
+    #[test]
+    fn is_attach_terminal_open_for_reports_liveness_and_prunes_dead_pids() {
+        let key = "board-state-attach-terminal-test-key";
+        struct Cleanup(&'static str);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                state().lock().unwrap().attach_terminal_pids.remove(self.0);
+            }
+        }
+        let _cleanup = Cleanup(key);
+
+        // 맵에 아예 없으면 false.
+        assert!(!is_attach_terminal_open_for(key));
+
+        // 절대 살아있을 수 없는 PID(0은 System Idle Process라 tasklist가 실제 프로세스로 안 잡음,
+        // 아주 큰 값도 마찬가지)만 있으면 false로 정리되고, 맵에서도 지워져야 한다.
+        state().lock().unwrap().attach_terminal_pids.insert(key.to_string(), vec![999_999_999]);
+        assert!(!is_attach_terminal_open_for(key));
+        assert!(state().lock().unwrap().attach_terminal_pids.get(key).is_none(), "죽은 PID만 있었으면 맵에서 지워져야 한다");
+
+        // 지금 이 테스트 프로세스 자신의 PID는 항상 살아있다 — true를 반환해야 한다.
+        let my_pid = std::process::id() as i64;
+        state().lock().unwrap().attach_terminal_pids.insert(key.to_string(), vec![my_pid, 999_999_999]);
+        assert!(is_attach_terminal_open_for(key), "살아있는 PID가 하나라도 있으면 true여야 한다");
+        assert_eq!(
+            state().lock().unwrap().attach_terminal_pids.get(key),
+            Some(&vec![my_pid]),
+            "죽은 PID는 걸러지고 살아있는 것만 남아야 한다"
+        );
     }
 }

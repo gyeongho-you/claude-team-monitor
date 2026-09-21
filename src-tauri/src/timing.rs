@@ -39,6 +39,11 @@ pub const STALL_RECHECK_COOLDOWN_MS_DEFAULT: i64 = 20 * 60 * 1000;
 /// 타임아웃 — main.ts의 STALL_CLASSIFIER_TIMEOUT_MS와 동일.
 pub const STALL_CLASSIFIER_TIMEOUT_MS: u64 = 45_000;
 
+/// deliverPendingNotices(main.ts:78)의 회로차단기 상한 — D-9. 영원히 stop이 안 되는 팀장(좀비
+/// 프로세스 등)에게 무기한 재시도하며 프로세스 스폰과 에러 로그를 낭비하지 않도록, 이 횟수만큼
+/// 연속 실패하면 자동 재시도를 멈추되 큐에서 제거하지는 않는다(notice_queue.rs 참고).
+pub const MAX_NOTICE_DELIVERY_ATTEMPTS: i64 = 5;
+
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

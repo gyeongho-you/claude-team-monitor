@@ -132,9 +132,36 @@ pub async fn fetch_agents_typed_strict() -> Result<Vec<AgentEntry>, String> {
     .map_err(|e| format!("agents --json 조회 태스크가 panic했습니다: {e}"))?
 }
 
+// renderer/lib/status.js의 getStatus 핵심 로직 — main.ts(Node)/renderer.js(브라우저) 양쪽이
+// 공유하는 그 파일과 동일한 규칙이다: state가 'done'/'blocked'면 status가 못 따라온 낡은 값이어도
+// 최우선 취급하고, 그 외에는 status를 우선하고 state로 폴백한다. AgentEntry가 이 모듈 소유라 여기
+// 두고, stall_watchdog.rs(get_status_row/get_status_agent)와 notice_queue.rs(isLeadTooBusyToInterrupt/
+// notifyLeadsOfFinishedMembers)가 함께 재사용한다 — 상태 판정 규칙이 두 곳에서 따로 갈라지는 걸
+// 막기 위해 반드시 이 함수 하나만 거치게 한다.
+pub(crate) fn get_status(status: Option<&str>, state: Option<&str>) -> String {
+    if state == Some("done") {
+        return "done".to_string();
+    }
+    if state == Some("blocked") {
+        return "blocked".to_string();
+    }
+    let s = status.filter(|v| !v.is_empty());
+    let st = state.filter(|v| !v.is_empty());
+    s.or(st).unwrap_or("").to_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn get_status_prioritizes_done_and_blocked_state_over_status() {
+        assert_eq!(get_status(Some("idle"), Some("done")), "done");
+        assert_eq!(get_status(Some("busy"), Some("blocked")), "blocked");
+        assert_eq!(get_status(Some("Busy"), None), "busy");
+        assert_eq!(get_status(None, Some("Working")), "working");
+        assert_eq!(get_status(None, None), "");
+    }
 
     #[test]
     fn parses_real_claude_agents_output() {

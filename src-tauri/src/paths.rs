@@ -129,6 +129,12 @@ pub fn settings_path() -> PathBuf {
     app_data_dir().join("settings.json")
 }
 
+// main.ts의 PENDING_NOTICES_PATH(서브청크 δ, TAURI_NOTICE_QUEUE_DESIGN.md §2) — 팀장에게
+// 아직 전달 안 된 대기열 알림(PendingNotice) 목록.
+pub fn pending_notices_path() -> PathBuf {
+    app_data_dir().join("pendingNotices.json")
+}
+
 // main.ts의 APP_LOG_PATH — logCritical(logging.rs)이 원인을 알 수 없이 겪는 실패의 핵심 실패
 // 지점만 콘솔과 별개로 남기는 곳.
 pub fn app_log_path() -> PathBuf {

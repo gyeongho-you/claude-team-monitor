@@ -320,22 +320,16 @@ fn remove_stall_alert(alerts: Vec<StallAlert>, alert_id: &str) -> (Vec<StallAler
     (remaining, removed)
 }
 
-/// confirmStallAlert(main.ts)의 포팅 — 단, main.ts는 여기서 queueLeadNotice로 실제 팀장에게
-/// suggestedMessage를 전달까지 한다. 알림 큐(queueLeadNotice/deliverPendingNotices)는 이번
-/// 청크 범위 밖(팀장/팀원에게 실제로 메시지를 찔러 넣는 코드라 더 신중한 별도 리뷰가 필요하다고
-/// 명시적으로 제외됨)이라, 여기서는 alert을 목록에서 제거하는 파일 조작까지만 한다 — 실제 전달은
-/// 알림 큐가 포팅되는 다음 청크에서 이어붙일 예정이다. 그때까지는 "이어서 진행 지시" 버튼을 눌러도
-/// 목록에서만 사라질 뿐, 팀장에게 실제로 메시지가 가지 않는다(의도된 임시 상태 — 아래 eprintln 참고).
+/// confirmStallAlert(main.ts)의 포팅 — 서브청크 δ부터 queue_lead_notice로 실제 팀장에게
+/// suggestedMessage를 큐잉까지 한다(사용자가 "이어서 진행 지시"를 눌러야만 실제로 팀장에게
+/// 전달된다는 반자동 원칙은 그대로 — 여기서 큐잉된 알림은 폴링의 deliverPendingNotices가 그
+/// 팀장이 idle/blocked일 때 배달한다).
 #[tauri::command]
-pub fn confirm_stall_alert(alert_id: String) -> bool {
+pub async fn confirm_stall_alert(alert_id: String) -> bool {
     let (remaining, removed) = remove_stall_alert(load_stall_alerts(), &alert_id);
     let Some(alert) = removed else { return false };
-    eprintln!(
-        "[confirm_stall_alert] alert {}를 목록에서 제거했지만, 알림 큐(queueLeadNotice)가 아직 \
-         Rust로 포팅되지 않아 팀장({})에게 실제 메시지 전달은 하지 않았습니다 — 다음 청크에서 이어붙여야 합니다.",
-        alert.id, alert.lead_internal_id
-    );
     save_stall_alerts(&remaining);
+    crate::notice_queue::queue_lead_notice(&alert.lead_internal_id, &alert.suggested_message, crate::notice_queue::NoticeOrigin::System).await;
     true
 }
 
@@ -396,26 +390,15 @@ fn load_stall_settings() -> StallSettings {
     }
 }
 
-fn get_status_core(status: Option<&str>, state: Option<&str>) -> String {
-    if state == Some("done") {
-        return "done".to_string();
-    }
-    if state == Some("blocked") {
-        return "blocked".to_string();
-    }
-    let s = status.filter(|v| !v.is_empty());
-    let st = state.filter(|v| !v.is_empty());
-    s.or(st).unwrap_or("").to_lowercase()
-}
-
-/// renderer/lib/status.js의 getStatus와 동일(SessionRow 버전).
-fn get_status_row(row: &SessionRow) -> String {
-    get_status_core(row.agent.status.as_deref(), row.agent.state.as_deref())
+/// renderer/lib/status.js의 getStatus와 동일(SessionRow 버전) — 서브청크 δ부터 핵심 판정
+/// 로직은 agents_json::get_status 하나로 공유한다(notice_queue.rs도 같은 함수를 쓴다).
+pub(crate) fn get_status_row(row: &SessionRow) -> String {
+    crate::agents_json::get_status(row.agent.status.as_deref(), row.agent.state.as_deref())
 }
 
 /// getStatus(AgentEntry 버전) — freshAgents 재확인 단계에서 쓴다.
-fn get_status_agent(agent: &AgentEntry) -> String {
-    get_status_core(agent.status.as_deref(), agent.state.as_deref())
+pub(crate) fn get_status_agent(agent: &AgentEntry) -> String {
+    crate::agents_json::get_status(agent.status.as_deref(), agent.state.as_deref())
 }
 
 fn get_transcript_tail(project_name: &str, session_id: &str) -> Vec<crate::live_rows::JournalEntry> {
@@ -443,10 +426,9 @@ pub fn spawn_stall_watchdog_if_idle(live_rows: Vec<SessionRow>, leads: Vec<LeadR
     });
 }
 
-/// runStallWatchdog(main.ts)의 포팅 — 방치된 팀원을 감지해 StallAlert를 만들어 파일에 기록하는
-/// 것까지가 이번 청크의 목표다. 팀장에게 실제로 메시지를 보내는 알림 큐(queueLeadNotice/
-/// deliverPendingNotices)는 이번 범위 밖이라, autoStallNudge가 켜진 팀장은 자동 재촉을 아직
-/// 실행하지 않고 건너뛴다(다음 청크에서 알림 큐를 포팅하면서 이어붙일 예정).
+/// runStallWatchdog(main.ts)의 포팅 — 방치된 팀원을 감지해 StallAlert를 만들어 파일에 기록한다.
+/// 서브청크 δ부터 autoStallNudge가 켜진 팀장은 확인 알림 없이 곧장 알림 큐(queue_lead_notice)로
+/// 재촉 메시지를 큐잉한다(아래 auto_stall_nudge 분기 참고).
 fn run_stall_watchdog(live_rows: &[SessionRow], leads: &[LeadRecord], members: &[MemberRecord]) {
     let now = now_ms();
     let settings = load_stall_settings();
@@ -593,14 +575,18 @@ fn run_stall_watchdog(live_rows: &[SessionRow], leads: &[LeadRecord], members: &
         let Some(lead_internal_id) = lead.internal_id.clone() else { continue }; // internalId 없는 낡은 레코드는 알림 큐가 못 찾으므로 스킵
 
         if lead.auto_stall_nudge == Some(true) {
-            // queueLeadNotice(알림 큐)는 이번 청크 범위 밖이다("팀장 조작" 계열이라 다음 청크로
-            // 미루기로 함) — 자동 재촉 모드 팀장은 원래 확인 알림(StallAlert) 자체를 만들지 않고
-            // 곧장 메시지를 보내므로, 여기서 대신 StallAlert를 만들면 원래 동작(확인 없이 자동
-            // 진행)과 달라진다. 그래서 이 경우엔 아무것도 만들지 않고 건너뛴다 — 다음 폴링에
-            // 다시 후보로 잡히고, 알림 큐가 포팅되면 그때부터 정상적으로 자동 재촉된다.
-            eprintln!(
-                "[run_stall_watchdog] 팀장 {lead_internal_id}은 autoStallNudge가 켜져 있지만, 알림 큐가 아직 포팅되지 않아 자동 재촉을 건너뜁니다."
-            );
+            // 자동 재촉 모드 팀장은 확인 알림(StallAlert)을 만들지 않고 곧장 큐에 넣는다(main.ts와
+            // 동일). run_stall_watchdog은 std::thread::spawn 위에서 도는 동기 함수라(Haiku 서브
+            // 프로세스 호출 등 블로킹 작업이 많아 α/β가 tokio worker 풀을 막지 않으려고 일부러
+            // raw thread를 골랐다) queue_lead_notice(async, tokio::sync::Mutex 기반)를 직접
+            // `.await`할 수 없다 — tauri::async_runtime::block_on으로 현재 스레드에서 그 future를
+            // 끝까지 돌린다(Tauri의 전역 tokio 런타임 핸들을 통해 실행되므로 이 raw thread에서도
+            // 안전하다).
+            tauri::async_runtime::block_on(crate::notice_queue::queue_lead_notice(
+                &lead_internal_id,
+                &suggested_message,
+                crate::notice_queue::NoticeOrigin::System,
+            ));
             continue;
         }
 

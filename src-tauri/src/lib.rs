@@ -8,6 +8,8 @@ mod lead_lifecycle;
 mod live_rows;
 mod logging;
 mod long_prompt_guard;
+mod member_requests;
+mod notice_queue;
 mod paths;
 mod resume;
 mod session_registry;
@@ -32,6 +34,12 @@ pub fn run() {
       lead_lifecycle::adopt_lead_command,
       lead_lifecycle::fork_session_as_lead_command,
       lead_lifecycle::launch_member_command,
+      resume::stop_background_session_command,
+      notice_queue::send_to_lead_command,
+      notice_queue::cancel_queued_message_command,
+      notice_queue::get_pending_notice_ids_command,
+      notice_queue::approve_request_command,
+      notice_queue::deny_request_command,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

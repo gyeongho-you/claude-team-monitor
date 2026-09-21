@@ -588,6 +588,16 @@ pub async fn launch_member(
     let Some(id) = run_claude_bg(flags, resolve_long_prompt(&prompt), target_dir.clone()).await else {
         return Ok(None);
     };
+
+    // 알림 메시지는 register_member가 role을 소비(move)하기 전에 먼저 조립한다 — main.ts의
+    // launchMember(main.ts:2432)와 동일한 문구.
+    let role_suffix = if role.is_empty() { String::new() } else { format!(", 역할: {role}") };
+    let notice_message = format!(
+        "[알림] 사용자가 직접 팀원을 추가했습니다 — 이름: {label}, 디렉토리: {target_dir}{role_suffix}, 사전 지시(참고용): \"{instruction}\", 세션 id: {id}. \
+이 팀원은 이미 팀원 공통 브리핑(백그라운드 세션 유의사항)을 전달받은 상태이며, 지금 준비 완료 응답만 남기고 대기 중이니, 필요하면 관리 대상에 추가하고 실제 \
+작업을 시작하라는 메시지를 직접 보내라(stop→resume). 완료되면 확인해서 최종 보고에 포함시켜라."
+    );
+
     register_member(&MemberRecord {
         member_id: id.clone(),
         lead_id: lead_id.clone(),
@@ -598,17 +608,17 @@ pub async fn launch_member(
         secret: None,
     });
 
-    // δ(알림 큐, TAURI_NOTICE_QUEUE_DESIGN.md §2 서브청크 δ) 미포팅 — queueLeadNotice/PendingNotice가
-    // 아직 Rust 어디에도 없어서(session_registry.rs/board_state.rs 확인함), 팀장에게 "사용자가 직접
-    // 팀원을 추가했다"는 알림을 큐잉하는 부분은 이번 청크에서 구현하지 않는다. δ가 알림 큐를
-    // 포팅하면 main.ts와 동일하게 이 자리에 queue_lead_notice(lead_internal_id, ...) 호출을 추가해야
-    // 한다 — 지금은 콘솔에만 남겨서 완전히 조용히 사라지지는 않게 한다(리뷰에서 놓치기 쉬운 지점이라
-    // 명시적으로 TODO를 남긴다).
+    // 팀장이 스스로 띄운 게 아니라서 알려주지 않으면 이 팀원의 존재도 결과도 영원히 모른다 — 다만
+    // 팀장이 지금 다른 작업으로 busy일 수 있어서 즉시 stop→resume으로 끼어들지 않고 큐에 쌓아둔다
+    // (δ의 deliverPendingNotices가 폴링마다 이 큐를 보고, 팀장이 idle/blocked가 됐을 때만 실제로
+    // 전달한다). queueLeadNotice는 internalId를 받으므로, IPC로 넘어온 짧은 id(leadId)를 여기서
+    // 변환한다.
     if let Some(lead_rec) = load_leads().into_iter().find(|l| l.id == lead_id) {
-        eprintln!(
-            "[launch_member] TODO(δ): 팀장 {}에게 팀원 추가 알림을 큐잉해야 합니다(알림 큐가 아직 이관되지 않음) — 팀원: {id}",
-            lead_rec.internal_id.as_deref().unwrap_or(&lead_id)
-        );
+        if let Some(internal_id) = lead_rec.internal_id {
+            crate::notice_queue::queue_lead_notice(&internal_id, &notice_message, crate::notice_queue::NoticeOrigin::System).await;
+        } else {
+            eprintln!("[launch_member] 팀장 {lead_id} 레코드에 internalId가 없어 알림을 큐잉하지 못했습니다.");
+        }
     } else {
         eprintln!("[launch_member] 팀원 {id}을 등록했지만 소속 팀장({lead_id}) 레코드를 찾지 못해 알림 대상도 특정할 수 없습니다.");
     }

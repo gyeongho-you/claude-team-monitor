@@ -367,10 +367,42 @@ fn get_live_session_rows_inner() -> Vec<SessionRow> {
         }
     }
 
+    // notifyLeadsOfFinishedMembers/deliverPendingNotices(main.ts:1498-1499, 서브청크 δ) — 팀원
+    // 완료 알림 큐잉과 대기열 배달 시도. deliverPendingNotices의 실제 배달(resumeLead)은 최악의
+    // 경우 STOP_AND_RELAUNCH_WORST_CASE_MS(~199초)까지 걸릴 수 있어 이 함수(3초 폴링마다 불림)의
+    // 반환을 막으면 안 된다(main.ts도 이 두 호출을 await하지 않는다) — 둘 다 I/O 바운드 async
+    // 작업(tokio::sync::Mutex 큐 락, claude 프로세스 spawn)이라 tokio::spawn으로 fire-and-forget
+    // 한다(아래 stall watchdog은 CPU/blocking 성격이 강한 Haiku 서브프로세스 호출이라 반대로
+    // std::thread를 쓴다).
+    //
+    // #[cfg(not(test))]: 바로 아래 테스트(builds_rows_for_this_running_lead_and_member)가 이
+    // 함수를 실제 프로덕션 leads.json/board_state로 호출한다 — 이 저장소 자신이 지금 실제 팀장
+    // (1d285d20)/팀원(846ee1cb, 이 세션) 세션으로 운영 중이라, cargo test 중에 이 경로가 실제로
+    // queue_lead_notice/resume_lead까지 타면 살아있는 실제 세션에 알림을 찔러 넣거나 stop→resume을
+    // 걸어버릴 위험이 있다(resume.rs 테스트 주석이 같은 이유로 실제 claude 프로세스 통합 테스트를
+    // 의도적으로 뺀 것과 동일한 판단). 그래서 테스트 빌드에서는 이 두 fire-and-forget 호출 자체를
+    // 아예 컴파일하지 않는다 — notice_queue.rs 자신의 단위/통합 테스트는 전부 임시 파일 경로
+    // (temp_pending_notices_path)로 격리돼 있어 이 가드와 무관하게 안전하게 실행된다.
+    #[cfg(not(test))]
+    {
+        let live_rows_for_notify = live_rows.clone();
+        let leads_for_notify = leads.clone();
+        tokio::spawn(async move {
+            crate::notice_queue::notify_leads_of_finished_members(&live_rows_for_notify, &leads_for_notify).await;
+        });
+    }
+    #[cfg(not(test))]
+    {
+        let agents_for_deliver = agents.clone();
+        let leads_for_deliver = leads.clone();
+        tokio::spawn(async move {
+            crate::notice_queue::deliver_pending_notices(&agents_for_deliver, &leads_for_deliver).await;
+        });
+    }
+
     // runStallWatchdog(main.ts)와 동일하게 fire-and-forget으로 건다 — Haiku 호출이 몇 초~몇십 초
     // 걸릴 수 있어서 이 함수(3초 폴링마다 불림)의 반환을 막으면 안 된다. 내부적으로 원자적
-    // in-flight 플래그로 중복 실행만 막는다(stall_watchdog.rs 참고). notifyLeadsOfFinishedMembers/
-    // deliverPendingNotices는 이번 청크 범위 밖이라 여기 없다 — 다음 청크.
+    // in-flight 플래그로 중복 실행만 막는다(stall_watchdog.rs 참고).
     crate::stall_watchdog::spawn_stall_watchdog_if_idle(live_rows.clone(), leads.clone(), members.clone());
 
     // hasCompletedFirstPoll 게이트 — 앱을 막 시작한 첫 폴링에는 "재기동 중일 수도 있다"고 봐줄
