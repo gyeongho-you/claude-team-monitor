@@ -1,4 +1,5 @@
 mod agents_json;
+mod attach_terminal;
 mod board_state;
 mod claude_bg_output;
 mod claude_readiness;
@@ -74,6 +75,8 @@ pub fn run() {
       settings::update_settings_command,
       live_rows::refresh_board_command,
       native_dialog::pick_directory_command,
+      attach_terminal::open_in_terminal_command,
+      attach_terminal::open_terminal_for_approval_command,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

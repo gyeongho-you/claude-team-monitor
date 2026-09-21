@@ -448,7 +448,7 @@ pub struct UnapprovedDir {
 // 디렉토리(팀장 자신의 targetDir + 사전승인된 팀원 디렉토리)만 모아서, claude 최초 실행 승인
 // (checkDirectoryClaudeReady)이 안 된 곳을 화면에 알림으로 띄우는 데 쓴다. main.ts의 Set과 동일하게
 // 삽입 순서를 보존한 채 중복을 제거한다(순서가 결과에 영향을 주진 않지만 원본 동작을 그대로 옮긴다).
-fn compute_unapproved_dirs(leads: &[LeadRecord]) -> Vec<UnapprovedDir> {
+pub(crate) fn compute_unapproved_dirs(leads: &[LeadRecord]) -> Vec<UnapprovedDir> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut dirs: Vec<String> = Vec::new();
     for lead in leads {

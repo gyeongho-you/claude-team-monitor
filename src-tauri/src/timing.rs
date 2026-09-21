@@ -44,6 +44,11 @@ pub const STALL_CLASSIFIER_TIMEOUT_MS: u64 = 45_000;
 /// 연속 실패하면 자동 재시도를 멈추되 큐에서 제거하지는 않는다(notice_queue.rs 참고).
 pub const MAX_NOTICE_DELIVERY_ATTEMPTS: i64 = 5;
 
+/// trackAttachTerminal(main.ts:2927-2945)의 WMI 조회 전 지연 — H-2(attach_terminal.rs). `start`
+/// 명령이 실제로 새 콘솔 창을 띄우기까지 걸리는 시간을 감안한 실측 대응이니 임의로 줄이면 안 된다
+/// (TAURI_NOTICE_QUEUE_DESIGN.md §1 H-2 "타이밍 상수" 참고).
+pub const TRACK_ATTACH_TERMINAL_DELAY_MS: i64 = 800;
+
 pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
