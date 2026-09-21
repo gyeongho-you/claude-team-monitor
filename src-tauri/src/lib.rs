@@ -1,4 +1,5 @@
 mod agents_json;
+mod attach_terminal;
 mod board_state;
 mod claude_bg_output;
 mod claude_readiness;
@@ -40,6 +41,8 @@ pub fn run() {
       notice_queue::get_pending_notice_ids_command,
       notice_queue::approve_request_command,
       notice_queue::deny_request_command,
+      attach_terminal::open_in_terminal_command,
+      attach_terminal::open_terminal_for_approval_command,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {
