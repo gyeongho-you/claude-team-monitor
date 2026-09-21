@@ -396,7 +396,7 @@ body.modal-open { overflow: hidden; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-#member-role-select, #member-role-custom, #manual-session-id, #member-name {
+#member-role-select, #member-role-custom, #manual-session-id, #member-name, #lead-name {
   flex: 1;
   min-width: 0;
   background: var(--bg);
