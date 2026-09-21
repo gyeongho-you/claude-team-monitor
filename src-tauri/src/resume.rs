@@ -11,6 +11,15 @@
 //    실패를 표현한다(.unwrap()/.expect()를 프로덕션 경로에 쓰지 않는다) — queue_lead_operation을
 //    호출하는 지점(resume_lead_command)에서도 tokio::spawn + JoinError로 한 번 더 방어해서, 혹시
 //    이 불변식이 깨지더라도(버그) 후속 로직이 조용히 사라지는 대신 app.log에 흔적을 남긴다.
+//
+// β 리뷰에서 나온 치명적 버그 수정: queue_lead_operation은 같은 internalId끼리만 직렬화하므로,
+// 서로 다른 팀장을 향한 resume이 거의 동시에 leads.json의 "쓰기 직전 재조회"(E-1 패턴) 지점에
+// 도달하면 한쪽의 저장이 다른 쪽에 덮어써지는 lost update가 실측 재현됐다(5회 중 4회,
+// TAURI_NOTICE_QUEUE_DESIGN.md §3-1이 예견한 문제). resume_lead/background_resume_healing_job/
+// issue_mcp_token 전부 leads.json 쓰기를 session_registry::with_leads_lock(전역
+// tokio::sync::Mutex 하나로 load+mutate+save를 원자화)으로 옮겨서 고쳤다 — leads.json에 쓰는
+// 지점을 새로 추가할 때는 반드시 이 헬퍼를 거쳐야 하고, load_leads()/save_leads()를 직접 짝지어
+// 쓰면 안 된다.
 
 use crate::agents_json::{fetch_agents_typed_async, fetch_agents_typed_strict};
 use crate::board_state::{state, ResumeRetryStatus};
@@ -19,7 +28,7 @@ use crate::claude_readiness::{check_directory_claude_ready, claude_not_ready_mes
 use crate::concurrency::queue_lead_operation;
 use crate::logging::log_critical;
 use crate::long_prompt_guard::resolve_long_prompt;
-use crate::session_registry::{load_leads, save_leads, LeadRecord};
+use crate::session_registry::{load_leads, with_leads_lock, LeadRecord};
 use crate::timing::{
     MAX_RESUME_ATTEMPTS, RESUME_RETRY_GAP_MS, RESUME_SETTLE_CHECK_MS, RUN_CLAUDE_TIMEOUT_MS, STOP_SESSION_TIMEOUT_MS,
 };
@@ -513,22 +522,28 @@ async fn background_resume_healing_job(internal_id: String, current: LeadRecord,
     };
 
     let new_session_id = find_session_id_by_short_id_retrying(&healed_id).await;
-    let mut latest_leads = load_leads();
-    let still_current = latest_leads
-        .iter()
-        .any(|l| l.internal_id.as_deref() == Some(internal_id.as_str()) && l.id == expected_id);
-    if still_current
-        && apply_resume_session_update(
-            &mut latest_leads,
+    // 치명적 버그 수정(β 리뷰): 여기서 "재조회→판정"과 "저장"을 분리하면 그 사이(락 밖)에 다른
+    // 팀장의 resume이 leads.json을 저장해 lost update가 재현된다(TAURI_NOTICE_QUEUE_DESIGN.md
+    // §3-1) — still_current 판정 자체도 with_leads_lock 안에서 최신 상태로 다시 해야 한다(락 밖에서
+    // 미리 판정해두면 그 판정과 실제 쓰기 사이에도 같은 lost update 창이 남는다).
+    with_leads_lock(|latest_leads| {
+        let still_current = latest_leads
+            .iter()
+            .any(|l| l.internal_id.as_deref() == Some(internal_id.as_str()) && l.id == expected_id);
+        if !still_current {
+            return (false, ());
+        }
+        let updated = apply_resume_session_update(
+            latest_leads,
             &internal_id,
             &expected_id,
             &current.session_id,
             &healed_id,
             new_session_id.as_deref(),
-        )
-    {
-        save_leads(&latest_leads);
-    }
+        );
+        (updated, ())
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -640,10 +655,16 @@ pub async fn resume_lead(internal_id: String, message: String) -> Option<String>
     let new_id = resume_spawn_with_retry(&internal_id, &current, &message).await?;
 
     let new_session_id = find_session_id_by_short_id_retrying(&new_id).await;
-    let mut leads = load_leads();
-    if apply_resume_session_update(&mut leads, &internal_id, &current.id, &current.session_id, &new_id, new_session_id.as_deref()) {
-        save_leads(&leads);
-    }
+    // 치명적 버그 수정(β 리뷰, TAURI_NOTICE_QUEUE_DESIGN.md §3-1): queue_lead_operation은 같은
+    // internalId끼리만 직렬화하므로, 서로 다른 팀장을 향한 resume이 거의 동시에 이 지점에 도달하면
+    // 둘 다 load_leads()로 최신 배열을 각자 읽어와 자기 레코드만 고친 뒤 저장한다 — 그 사이 다른
+    // 쪽의 저장이 통째로 덮어써질 수 있다(실측 재현, 5회 중 4회). with_leads_lock으로 이
+    // read-modify-write 전체를 원자적으로 만든다.
+    with_leads_lock(|leads| {
+        let updated = apply_resume_session_update(leads, &internal_id, &current.id, &current.session_id, &new_id, new_session_id.as_deref());
+        (updated, ())
+    })
+    .await;
     Some(new_id)
 }
 
@@ -688,13 +709,12 @@ fn apply_mcp_token(leads: &mut [LeadRecord], internal_id: &str, token: &str) -> 
 }
 
 /// issueMcpToken(main.ts)과 동일 — 첫 실제 호출부는 서브청크 γ(restartLead)가 추가한다.
+/// 치명적 버그 수정(β 리뷰)으로 leads.json 쓰기를 with_leads_lock 안에서 하게 되면서 async fn으로
+/// 바뀌었다 — 아직 프로덕션 호출부가 없어(dead_code) 시그니처를 자유롭게 바꿀 수 있었다.
 #[allow(dead_code)]
-pub fn issue_mcp_token(internal_id: &str) -> String {
+pub async fn issue_mcp_token(internal_id: &str) -> String {
     let token = uuid::Uuid::new_v4().to_string();
-    let mut leads = load_leads();
-    if apply_mcp_token(&mut leads, internal_id, &token) {
-        save_leads(&leads);
-    }
+    with_leads_lock(|leads| (apply_mcp_token(leads, internal_id, &token), ())).await;
     token
 }
 
@@ -916,7 +936,12 @@ mod tests {
     // concurrency.rs의 queued_operations_on_same_key_run_strictly_in_order가 큐 자체의 직렬화를
     // 이미 검증하고, 위 apply_resume_session_update/apply_mcp_token 테스트가 leads.json 쓰기
     // 판정 로직을 디스크 I/O 없이 검증하므로 이 둘을 합치는 실제 파일 기반 통합 테스트는 중복이라
-    // 생략한다(설계 문서 §2-β "독립적 검증 가능성" — 계층별로 이미 커버됨).
+    // 생략한다(설계 문서 §2-β "독립적 검증 가능성" — 계층별로 이미 커버됨). 다만 "서로 다른
+    // internalId끼리(=서로 다른 큐 액터끼리) leads.json에 동시에 쓰면 어떻게 되는지"는 큐 직렬화
+    // 테스트가 전혀 커버하지 못하는 별개의 축이다 — 이건 session_registry.rs의
+    // leads_json_lost_update_is_reproducible_without_the_lock/
+    // with_leads_lock_prevents_lost_update_under_concurrent_writes_to_different_leads가
+    // 실제 파일 I/O로 검증한다(β 리뷰가 지적한 치명적 버그의 재현/수정 확인).
     //
     // 실제 claude 프로세스를 spawn하는 통합 테스트에 대한 판단: check_claude_binary_once(아래)는
     // `where claude`만 실행하는 읽기 전용 조회라 안전하지만, run_claude_bg/stop_session/
