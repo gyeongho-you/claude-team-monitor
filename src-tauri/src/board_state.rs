@@ -7,6 +7,16 @@ use std::sync::{Mutex, OnceLock};
 /// 같은 수명) 폴링 사이에 유지돼야 하는 상태다. 앱을 재시작하면 그대로 비워진다(원본과 동일한
 /// 동작 — LEAD_OFFLINE_GRACE_MS 계산 시 hasCompletedFirstPoll로 첫 폴링만 예외 처리하는 이유도
 /// 바로 이 재시작 시 초기화 때문이다).
+/// resumeRetryStatus(main.ts:95)의 값 타입 — `{ attempt, max }`. resumeRetryFrom(서브청크 β)이
+/// 재시도 중 채우고, buildSessionRowsInternal(main.ts:1512-1517)이 매 폴링 이 맵을 읽어
+/// SessionRow.resumeRetrying으로 렌더러에 실어 보낸다(그 필드 자체는 β/δ 범위 — 여기선 상태
+/// 저장소만 마련해둔다).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResumeRetryStatus {
+    pub attempt: i32,
+    pub max: i32,
+}
+
 pub struct BoardState {
     pub lead_first_miss_at: HashMap<String, i64>,
     pub last_known_live_lead_row: HashMap<String, SessionRow>,
@@ -17,6 +27,30 @@ pub struct BoardState {
     pub member_idle_since: HashMap<String, i64>, // 팀원 sessionId -> idle/done으로 바뀐 시각
     pub lead_idle_since: HashMap<String, i64>,   // 팀장 sessionId -> idle/done으로 바뀐 시각
     pub stall_last_checked_at: HashMap<String, i64>, // 팀원 sessionId -> 마지막으로 실제 Haiku를 호출한 시각
+
+    // 아래 세 개는 이번 서브청크(α)에서 새로 추가 — TAURI_NOTICE_QUEUE_DESIGN.md §2가 지정한
+    // "모듈 스코프 Map들의 Rust 동치물 설계" 대상 중 lead_first_miss_at/last_known_live_lead_row/
+    // has_completed_first_poll을 뺀 나머지. 실제로 채우고 읽는 로직(resumeRetryFrom/
+    // trackAttachTerminal/cleanupStaleMembers 상당)은 β/δ 범위라 여기서는 저장소만 준비한다.
+    // §3-4(폴링 루프를 단일 소유자로) 원칙은 "폴링 태스크만 mutate"가 아니라 "모든 접근이 항상
+    // 이 BoardState 하나의 Mutex를 짧게 잠그고 원자적으로 끝난다"는 형태로 지킨다 — 이미 있던
+    // lead_first_miss_at/last_known_live_lead_row도 같은 패턴이고(get_live_session_rows가
+    // await 없이 짧게 lock()만 잡았다 푼다), attach_terminal_pids처럼 폴링 루프가 아닌 IPC
+    // 핸들러(open-in-terminal)가 쓰는 맵도 이 규칙만 지키면(다단계 갱신 중간에 .await를 끼우지
+    // 않으면) 별도의 "단일 소유 태스크"가 없어도 B-3/B-4류의 TOCTOU 경합이 재발하지 않는다.
+    // 이 셋은 β/δ가 쓰기 시작하기 전까지는 프로덕션 코드에서 읽는 곳이 없어(테스트에서만 읽음)
+    // `cargo build`(테스트 제외 빌드)가 dead_code 경고를 낸다 — β/δ가 실제 읽기/쓰기 호출부를
+    // 추가하는 즉시 이 allow는 지워야 한다.
+    #[allow(dead_code)]
+    /// resumeRetryStatus(main.ts:95) 동치.
+    pub resume_retry_status: HashMap<String, ResumeRetryStatus>,
+    #[allow(dead_code)]
+    /// attachTerminalPids(main.ts:2895) 동치 — key: 세션 짧은 id, value: WMI로 찾은 PID 목록.
+    pub attach_terminal_pids: HashMap<String, Vec<i64>>,
+    #[allow(dead_code)]
+    /// memberFirstMissAt(main.ts:879) 동치 — cleanupStaleMembers(팀원용 first-miss 유예 판정)가
+    /// 쓴다. lead_first_miss_at과 값 타입은 같지만 키 공간이 다르므로(팀원 memberId) 별도 필드.
+    pub member_first_miss_at: HashMap<String, i64>,
 }
 
 impl BoardState {
@@ -28,6 +62,9 @@ impl BoardState {
             member_idle_since: HashMap::new(),
             lead_idle_since: HashMap::new(),
             stall_last_checked_at: HashMap::new(),
+            resume_retry_status: HashMap::new(),
+            attach_terminal_pids: HashMap::new(),
+            member_first_miss_at: HashMap::new(),
         }
     }
 }
@@ -113,5 +150,37 @@ mod tests {
         prune_missing_keys(&mut map, &current);
         assert!(map.contains_key("a"));
         assert!(!map.contains_key("b"));
+    }
+
+    // 이번 서브청크(α)에서 새로 추가한 세 필드가 BoardState 하나의 Mutex 밑에서 정상적으로
+    // 읽고 쓰이는지 — β/δ가 채울 실제 로직은 없지만, 저장소 자체는 동작해야 한다.
+    #[test]
+    fn new_alpha_fields_are_reachable_through_the_shared_mutex() {
+        let key = "board-state-alpha-fields-test-key";
+        struct Cleanup(&'static str);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let mut guard = state().lock().unwrap();
+                guard.resume_retry_status.remove(self.0);
+                guard.attach_terminal_pids.remove(self.0);
+                guard.member_first_miss_at.remove(self.0);
+            }
+        }
+        let _cleanup = Cleanup(key);
+
+        {
+            let mut guard = state().lock().unwrap();
+            guard.resume_retry_status.insert(key.to_string(), ResumeRetryStatus { attempt: 1, max: 3 });
+            guard.attach_terminal_pids.insert(key.to_string(), vec![1234, 5678]);
+            // member_first_miss_at는 lead_first_miss_at과 값 타입이 같으므로 같은 track_first_miss
+            // 함수를 그대로 재사용할 수 있어야 한다(키 공간만 다를 뿐 동작은 동일해야 함).
+            let result = track_first_miss(&mut guard.member_first_miss_at, false, key, 1_000, 5_000);
+            assert_eq!(result, FirstMissResult::FirstMiss);
+        }
+
+        let guard = state().lock().unwrap();
+        assert_eq!(guard.resume_retry_status.get(key), Some(&ResumeRetryStatus { attempt: 1, max: 3 }));
+        assert_eq!(guard.attach_terminal_pids.get(key), Some(&vec![1234, 5678]));
+        assert_eq!(guard.member_first_miss_at.get(key), Some(&1_000));
     }
 }

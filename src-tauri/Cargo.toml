@@ -29,3 +29,7 @@ wait-timeout = "0.2"
 # main.ts와 정확히 같은 방식으로 옮기기 위함 — 손으로 문자열 매칭을 흉내내면 놓치는 패턴이 생기기
 # 쉬운, 안전장치(정체 감시가 실수로 재촉하면 안 되는 상황) 관련 로직이라 검증된 크레이트를 쓴다.
 regex = "1"
+# leadOperationQueues/queueLeadOperation·buildSessionRowsChain(concurrency.rs)의 동시성
+# primitive용 — tauri 2가 내부적으로 이미 tokio 런타임 위에서 도므로 버전 충돌 없이 얹힌다.
+# "macros"는 #[tokio::test], "time"은 concurrency.rs 테스트의 sleep 기반 경합 검증에 쓴다.
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }

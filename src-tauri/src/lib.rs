@@ -1,5 +1,6 @@
 mod agents_json;
 mod board_state;
+mod concurrency;
 mod json_file;
 mod live_rows;
 mod paths;

@@ -331,8 +331,20 @@ fn build_offline_rows(offline_leads: &[LeadRecord]) -> Vec<SessionRow> {
 /// 정체 감시(runStallWatchdog), 알림 큐(notifyLeadsOfFinishedMembers/deliverPendingNotices),
 /// 팀원 쪽 그레이스 만료 시 등록 파일 삭제(cleanupStaleMembers), 팀원/팀장 짧은 id 드리프트 보정
 /// (reconcileLeadIds/reconcileMemberIds)은 이번 포팅 범위 밖이다 — 전부 다음 청크로 남겨뒀다.
+///
+/// buildSessionRowsChain(main.ts:1535-1540)의 포팅 — 이 커맨드는 진입 시 전역
+/// `concurrency::session_rows_lock()`을 잡아, 3초 정기 폴링과 refresh-board류 즉시 호출이 겹쳐도
+/// "완료 순서가 항상 시작 순서와 같다"는 Node 원본의 성질을 그대로 재현한다(§3-3 트레이드오프 결정은
+/// concurrency.rs의 session_rows_lock 문서 참고 — 지연 특성까지 그대로 유지하기로 함). 실제 로직은
+/// get_live_session_rows_inner에 그대로 두고, 이 async 래퍼만 새로 추가했다(순수 로직 함수는 동기
+/// 유닛 테스트에서 계속 락 없이 직접 호출한다).
 #[tauri::command]
-pub fn get_live_session_rows() -> Vec<SessionRow> {
+pub async fn get_live_session_rows() -> Vec<SessionRow> {
+    let _guard = crate::concurrency::session_rows_lock().lock().await;
+    get_live_session_rows_inner()
+}
+
+fn get_live_session_rows_inner() -> Vec<SessionRow> {
     let now = now_ms();
     let agents = fetch_agents_typed();
     let agent_id_set: HashSet<String> = agents.iter().filter_map(|a| a.id.clone()).collect();
@@ -392,11 +404,21 @@ pub fn get_live_session_rows() -> Vec<SessionRow> {
 mod tests {
     use super::*;
 
+    // get_live_session_rows(비동기 tauri 커맨드)가 session_rows_lock을 실제로 잡고
+    // get_live_session_rows_inner에 위임하는지 — 두 번 연달아(직렬로) 호출해도 정상적으로 매번
+    // 반환되는지 확인한다(락을 잡은 채로 반환을 깜빡해 다음 호출이 영구히 멈추는 회귀를 잡는다).
+    #[tokio::test]
+    async fn async_command_wrapper_delegates_through_the_global_lock() {
+        let first = get_live_session_rows().await;
+        let second = get_live_session_rows().await;
+        assert_eq!(first.len(), second.len(), "연속 호출 모두 정상적으로 반환돼야 한다(락이 안 풀리는 회귀 방지)");
+    }
+
     // session_registry.rs의 tags_this_running_session_as_member와 같은 전제 — 실제 등록 상태
     // 기준으로 검증한다(1d285d20=팀장, 846ee1cb=바로 이 세션인 팀원).
     #[test]
     fn builds_rows_for_this_running_lead_and_member() {
-        let rows = get_live_session_rows();
+        let rows = get_live_session_rows_inner();
         let member_row = rows.iter().find(|r| r.agent.id.as_deref() == Some("846ee1cb"));
         if let Some(row) = member_row {
             assert!(!row.is_lead);
