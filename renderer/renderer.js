@@ -1051,12 +1051,19 @@ async function sendChatMessage() {
       return;
     }
     // resumeLead가 다른 짧은 id로 깨어날 수 있다(main.ts resumeLead 주석 참고) — 반영하지 않으면
-    // 대화창 선택이 풀려서 방금 보낸 대화가 사라진 것처럼 보인다. pendingChatTurns도 새 id 밑으로
-    // 옮겨야 renderChat()이 selectedLeadId 기준으로 계속 찾는다.
+    // 대화창 선택이 풀려서 방금 보낸 대화가 사라진 것처럼 보인다. pendingChatTurns는 사용자가 그
+    // 사이 어디로 이동했든 항상 새 id 밑으로 옮긴다(대기 중이던 메시지 자체는 새 id로 계속
+    // 추적돼야 renderChat()이 나중에 그 팀장으로 돌아왔을 때 찾을 수 있다).
     movePendingChatTurns(leadId, result.id);
-    selectedLeadId = result.id;
+    // 그런데 화면 전환(selectedLeadId 갱신)은 사용자가 이 응답을 기다리는 동안 다른 팀장으로
+    // 이미 옮겨갔으면 하면 안 된다 — autoStallNudgeToggle 핸들러가 이미 쓰는 것과 같은 가드
+    // (요청 시작 시점의 leadId와 지금 selectedLeadId가 같을 때만 갱신). 안 그러면 사용자가
+    // B로 이동해 있는데 응답이 늦게 온 A의 결과가 selectedLeadId를 다시 A로 덮어써서, 화면이
+    // 사용자가 보고 있던 B에서 A로 튕겨나가는 사고가 난다(실사용 재현).
+    if (selectedLeadId === leadId) selectedLeadId = result.id;
     // renderChat()만 부르면 대화 내용만 갱신되고, 카드의 busy 표시 등은 다음 3초 폴링까지 그대로다 —
     // refreshBoardNow()가 renderBoard()를 거쳐 renderChat()까지 알아서 호출해주므로 이걸로 대체한다.
+    // 이건 selectedLeadId가 바뀌었든 아니든 항상 호출해야 한다(카드 목록 자체는 항상 최신이어야 함).
     await refreshBoardNow();
   } catch (err) {
     removePendingChatTurn(leadId, localId);
