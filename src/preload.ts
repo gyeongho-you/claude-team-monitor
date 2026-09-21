@@ -17,8 +17,8 @@ contextBridge.exposeInMainWorld('api', {
   adoptLead: (shortId: string) => ipcRenderer.invoke('adopt-lead', shortId),
   getInteractiveSessions: () => ipcRenderer.invoke('get-interactive-sessions'),
   forkSessionAsLead: (sessionId: string, cwd: string) => ipcRenderer.invoke('fork-session-as-lead', sessionId, cwd),
-  launchTeamLead: (targetDir: string, instruction: string, secret?: boolean) =>
-    ipcRenderer.invoke('launch-team-lead', targetDir, instruction, secret),
+  launchTeamLead: (targetDir: string, instruction: string, label?: string, secret?: boolean) =>
+    ipcRenderer.invoke('launch-team-lead', targetDir, instruction, label, secret),
   launchMember: (leadId: string, targetDir: string, instruction: string, role: string, label: string, model?: string) =>
     ipcRenderer.invoke('launch-member', leadId, targetDir, instruction, role, label, model),
   getMemberTemplates: () => ipcRenderer.invoke('get-member-templates'),
