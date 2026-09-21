@@ -15,6 +15,9 @@ pub fn run() {
       session_registry::get_all_background_sessions,
       session_registry::get_adoptable_sessions,
       live_rows::get_live_session_rows,
+      stall_watchdog::get_stall_alerts,
+      stall_watchdog::confirm_stall_alert,
+      stall_watchdog::dismiss_stall_alert,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

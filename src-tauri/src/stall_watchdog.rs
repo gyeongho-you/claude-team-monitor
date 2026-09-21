@@ -3,7 +3,7 @@ use crate::board_state::{prune_missing_keys, state};
 use crate::json_file::write_json_file_atomic;
 use crate::live_rows::{read_journal_entries, resolve_project_name, SessionRow};
 use crate::paths::{settings_path, stall_alerts_path};
-use crate::session_registry::{LeadRecord, MemberRecord};
+use crate::session_registry::{load_leads, LeadRecord, MemberRecord};
 use crate::timing::{
     now_ms, STALL_CLASSIFIER_TIMEOUT_MS, STALL_IDLE_THRESHOLD_MS_DEFAULT, STALL_RECHECK_COOLDOWN_MS_DEFAULT,
 };
@@ -267,6 +267,87 @@ pub fn save_stall_alerts(alerts: &[StallAlert]) {
     if let Err(e) = write_json_file_atomic(&stall_alerts_path(), &alerts) {
         eprintln!("[save_stall_alerts] stallAlerts.json 저장 실패: {e}");
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StallAlertForUi {
+    #[serde(flatten)]
+    pub alert: StallAlert,
+    #[serde(rename = "leadId", skip_serializing_if = "Option::is_none")]
+    pub lead_id: Option<String>,
+}
+
+// listStallAlertsForUi(main.ts)의 순수 매핑 부분만 뽑았다 — 디스크 I/O 없이 테스트하려고
+// load_stall_alerts()/load_leads() 호출과 분리한다.
+fn attach_lead_ids(alerts: Vec<StallAlert>, leads: &[LeadRecord]) -> Vec<StallAlertForUi> {
+    alerts
+        .into_iter()
+        .map(|alert| {
+            let lead_id = leads
+                .iter()
+                .find(|l| l.internal_id.as_deref() == Some(alert.lead_internal_id.as_str()))
+                .map(|l| l.id.clone());
+            StallAlertForUi { alert, lead_id }
+        })
+        .collect()
+}
+
+/// listStallAlertsForUi(main.ts)와 동일 — 렌더러는 internalId를 모르니 화면 표시용 짧은
+/// leadId를 붙여서 내려준다. poll()의 agents-update 푸시(fetchBoardSnapshot)와 get_stall_alerts
+/// 양쪽에서 재사용한다.
+pub fn list_stall_alerts_for_ui() -> Vec<StallAlertForUi> {
+    attach_lead_ids(load_stall_alerts(), &load_leads())
+}
+
+#[tauri::command]
+pub fn get_stall_alerts() -> Vec<StallAlertForUi> {
+    list_stall_alerts_for_ui()
+}
+
+// confirmStallAlert/dismissStallAlert(main.ts) 둘 다 "id로 하나 찾아서 목록에서 뺀다"는 같은
+// 순수 로직을 쓴다 — 디스크 I/O 없이 테스트하려고 따로 뽑았다. id가 여러 개 있을 리 없지만
+// (STALL_ALERT_SEQ로 유일성 보장) 혹시 몰라 첫 매치 하나만 뗀다.
+fn remove_stall_alert(alerts: Vec<StallAlert>, alert_id: &str) -> (Vec<StallAlert>, Option<StallAlert>) {
+    let mut removed = None;
+    let mut remaining = Vec::with_capacity(alerts.len());
+    for a in alerts {
+        if removed.is_none() && a.id == alert_id {
+            removed = Some(a);
+        } else {
+            remaining.push(a);
+        }
+    }
+    (remaining, removed)
+}
+
+/// confirmStallAlert(main.ts)의 포팅 — 단, main.ts는 여기서 queueLeadNotice로 실제 팀장에게
+/// suggestedMessage를 전달까지 한다. 알림 큐(queueLeadNotice/deliverPendingNotices)는 이번
+/// 청크 범위 밖(팀장/팀원에게 실제로 메시지를 찔러 넣는 코드라 더 신중한 별도 리뷰가 필요하다고
+/// 명시적으로 제외됨)이라, 여기서는 alert을 목록에서 제거하는 파일 조작까지만 한다 — 실제 전달은
+/// 알림 큐가 포팅되는 다음 청크에서 이어붙일 예정이다. 그때까지는 "이어서 진행 지시" 버튼을 눌러도
+/// 목록에서만 사라질 뿐, 팀장에게 실제로 메시지가 가지 않는다(의도된 임시 상태 — 아래 eprintln 참고).
+#[tauri::command]
+pub fn confirm_stall_alert(alert_id: String) -> bool {
+    let (remaining, removed) = remove_stall_alert(load_stall_alerts(), &alert_id);
+    let Some(alert) = removed else { return false };
+    eprintln!(
+        "[confirm_stall_alert] alert {}를 목록에서 제거했지만, 알림 큐(queueLeadNotice)가 아직 \
+         Rust로 포팅되지 않아 팀장({})에게 실제 메시지 전달은 하지 않았습니다 — 다음 청크에서 이어붙여야 합니다.",
+        alert.id, alert.lead_internal_id
+    );
+    save_stall_alerts(&remaining);
+    true
+}
+
+/// dismissStallAlert(main.ts)와 동일 — 전달 없이 목록에서만 조용히 제거한다.
+#[tauri::command]
+pub fn dismiss_stall_alert(alert_id: String) -> bool {
+    let (remaining, removed) = remove_stall_alert(load_stall_alerts(), &alert_id);
+    if removed.is_none() {
+        return false;
+    }
+    save_stall_alerts(&remaining);
+    true
 }
 
 // clampMinutes(lib/appSettings.js)와 동일 — 손상된 값/범위 밖 값을 안전하게 정리한다.
@@ -635,6 +716,55 @@ mod tests {
         assert_eq!(clamp_minutes(Some(0.0), 10, 1, 1440), 1); // 최소값으로 클램프
         assert_eq!(clamp_minutes(Some(99999.0), 10, 1, 1440), 1440); // 최대값으로 클램프
         assert_eq!(clamp_minutes(Some(15.4), 10, 1, 1440), 15); // 반올림
+    }
+
+    fn sample_alert(id: &str, lead_internal_id: &str) -> StallAlert {
+        StallAlert {
+            id: id.to_string(),
+            lead_internal_id: lead_internal_id.to_string(),
+            member_id: "member-a".to_string(),
+            member_session_id: "sess-a".to_string(),
+            reason: "테스트 사유".to_string(),
+            suggested_message: "이어서 진행해주세요".to_string(),
+            created_at: 1_000,
+        }
+    }
+
+    #[test]
+    fn remove_stall_alert_extracts_only_matching_id() {
+        let alerts = vec![sample_alert("a", "lead-1"), sample_alert("b", "lead-2")];
+        let (remaining, removed) = remove_stall_alert(alerts, "a");
+        assert_eq!(removed.map(|a| a.id), Some("a".to_string()));
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "b");
+    }
+
+    #[test]
+    fn remove_stall_alert_returns_none_when_id_not_found() {
+        let alerts = vec![sample_alert("a", "lead-1")];
+        let (remaining, removed) = remove_stall_alert(alerts, "missing");
+        assert!(removed.is_none());
+        assert_eq!(remaining.len(), 1);
+    }
+
+    #[test]
+    fn attach_lead_ids_matches_by_internal_id_and_leaves_unmatched_none() {
+        let leads = vec![LeadRecord {
+            id: "lead-short".to_string(),
+            session_id: String::new(),
+            target_dir: String::new(),
+            launched_at: 0,
+            approved_members: vec![],
+            label: None,
+            ai_title: None,
+            internal_id: Some("internal-1".to_string()),
+            auto_stall_nudge: None,
+            secret: None,
+        }];
+        let alerts = vec![sample_alert("a", "internal-1"), sample_alert("b", "internal-unknown")];
+        let result = attach_lead_ids(alerts, &leads);
+        assert_eq!(result[0].lead_id.as_deref(), Some("lead-short"));
+        assert_eq!(result[1].lead_id, None);
     }
 
     #[test]
