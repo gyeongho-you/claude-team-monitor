@@ -2090,15 +2090,18 @@ launchBtn.addEventListener('click', async () => {
   launchBtn.disabled = true;
   launchStatusEl.textContent = '띄우는 중...';
   try {
-    const id = await window.api.launchTeamLead(targetDirSelect.value, instructionEl.value, launchSecretToggle.checked);
-    if (id) {
-      launchStatusEl.textContent = `팀장 세션(${id})을 시작했습니다.`;
+    // launchTeamLead가 이제 실패 시에도 그냥 null이 아니라 구체적 사유({ error })를 돌려준다 —
+    // 예전엔 readiness 실패든 runClaudeBg 타임아웃이든 항상 이 하드코딩된 범용 메시지만 봤는데,
+    // 이제는 실제 원인(예: "워크스페이스 신뢐 승인이 안 돼 있습니다")이 그대로 화면에 보인다.
+    const result = await window.api.launchTeamLead(targetDirSelect.value, instructionEl.value, launchSecretToggle.checked);
+    if (result && result.id) {
+      launchStatusEl.textContent = `팀장 세션(${result.id})을 시작했습니다.`;
       formMode = 'none';
-      selectedLeadId = id;
+      selectedLeadId = result.id;
       launchSecretToggle.checked = false; // 다음 팀장은 기본값(일반 모드)에서 다시 시작 — 매번 실수로 켜져 있으면 안 됨
       renderMemberRow(); // 새 팀장이라 소속 팀원이 없을 테니, 폴링 안 기다리고 바로 비워서 보여준다
     } else {
-      launchStatusEl.textContent = '팀장 세션 시작에 실패했습니다 — 터미널을 직접 열어 claude --version, claude --bg가 정상 동작하는지 확인해보세요(CLI 미설치·PATH 문제·로그인 만료가 흔한 원인입니다).';
+      launchStatusEl.textContent = (result && result.error) || '팀장 세션 시작에 실패했습니다 — 터미널을 직접 열어 claude --version, claude --bg가 정상 동작하는지 확인해보세요(CLI 미설치·PATH 문제·로그인 만료가 흔한 원인입니다).';
     }
   } catch (err) {
     launchStatusEl.textContent = `팀장 세션 시작 중 오류가 발생했습니다: ${errMsg(err)}`;
