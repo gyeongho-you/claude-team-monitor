@@ -83,6 +83,9 @@
             <select id="target-dir-select"><option value="">-- 등록된 디렉토리에서 선택 --</option></select>
             <button id="pick-dir-btn" title="등록 안 된 폴더 선택">…</button>
           </div>
+          <div class="row">
+            <input id="lead-name" type="text" placeholder="이 팀장을 구분할 이름 (선택 - 같은 디렉토리에 여러 팀장을 띄울 때 구분용, 나중에 카드에서도 바꿀 수 있음)" />
+          </div>
           <textarea id="instruction" placeholder="팀장에게 초기 지시 (비우면 기본 지시로 시작)"></textarea>
           <label title="이 팀장과, 이 팀장이 spawn_team_member로 만드는 팀원 전부 daily-journal(파일 편집 기록·세션 요약)에 안 남습니다. 재시작해도 계속 시크릿으로 유지됩니다.">
             <input type="checkbox" id="launch-secret-toggle" /> 🔒 시크릿 모드로 띄우기

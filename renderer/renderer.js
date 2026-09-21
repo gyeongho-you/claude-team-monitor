@@ -253,6 +253,7 @@ const addMemberStatusEl = document.getElementById('add-member-status');
 
 const targetDirSelect = document.getElementById('target-dir-select');
 const pickDirBtn = document.getElementById('pick-dir-btn');
+const leadNameEl = document.getElementById('lead-name');
 const instructionEl = document.getElementById('instruction');
 const launchSecretToggle = document.getElementById('launch-secret-toggle');
 const launchBtn = document.getElementById('launch-btn');
@@ -2090,12 +2091,13 @@ launchBtn.addEventListener('click', async () => {
   launchBtn.disabled = true;
   launchStatusEl.textContent = '띄우는 중...';
   try {
-    const id = await window.api.launchTeamLead(targetDirSelect.value, instructionEl.value, launchSecretToggle.checked);
+    const id = await window.api.launchTeamLead(targetDirSelect.value, instructionEl.value, leadNameEl.value.trim(), launchSecretToggle.checked);
     if (id) {
       launchStatusEl.textContent = `팀장 세션(${id})을 시작했습니다.`;
       formMode = 'none';
       selectedLeadId = id;
       launchSecretToggle.checked = false; // 다음 팀장은 기본값(일반 모드)에서 다시 시작 — 매번 실수로 켜져 있으면 안 됨
+      leadNameEl.value = ''; // 다음 팀장 띄울 때 이전 이름이 남아있지 않게 초기화
       renderMemberRow(); // 새 팀장이라 소속 팀원이 없을 테니, 폴링 안 기다리고 바로 비워서 보여준다
     } else {
       launchStatusEl.textContent = '팀장 세션 시작에 실패했습니다 — 터미널을 직접 열어 claude --version, claude --bg가 정상 동작하는지 확인해보세요(CLI 미설치·PATH 문제·로그인 만료가 흔한 원인입니다).';

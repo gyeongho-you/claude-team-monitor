@@ -2196,7 +2196,7 @@ async function findSessionIdByShortIdRetrying(shortId: string): Promise<string |
   return null;
 }
 
-async function launchTeamLead(targetDir: string, instruction: string, secret?: boolean): Promise<string | null> {
+async function launchTeamLead(targetDir: string, instruction: string, label?: string, secret?: boolean): Promise<string | null> {
   const readiness = checkDirectoryClaudeReady(targetDir);
   if (!readiness.ready) {
     logCritical(claudeNotReadyMessage(targetDir, readiness.reason!));
@@ -2221,7 +2221,7 @@ async function launchTeamLead(targetDir: string, instruction: string, secret?: b
   const sessionId = (await findSessionIdByShortId(id)) ?? id;
 
   const leads = loadLeads();
-  leads.push({ id, sessionId, targetDir, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID(), mcpToken, secret });
+  leads.push({ id, sessionId, targetDir, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID(), mcpToken, secret, label: label?.trim() || undefined });
   saveLeads(leads);
 
   return id;
@@ -2469,9 +2469,9 @@ ipcMain.handle('update-favorite-name', (_e, dir: string, name: string) => {
   return favs;
 });
 
-ipcMain.handle('launch-team-lead', async (_e, targetDir: string, instruction: string, secret?: boolean) => {
+ipcMain.handle('launch-team-lead', async (_e, targetDir: string, instruction: string, label?: string, secret?: boolean) => {
   const finalInstruction = instruction || '지금 상황을 파악하고 다음 작업을 시작해줘.';
-  return launchTeamLead(targetDir, finalInstruction, secret);
+  return launchTeamLead(targetDir, finalInstruction, label, secret);
 });
 
 ipcMain.handle('get-adoptable-sessions', () => getAdoptableSessions());
