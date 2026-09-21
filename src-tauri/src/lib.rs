@@ -4,6 +4,7 @@ mod claude_bg_output;
 mod claude_readiness;
 mod concurrency;
 mod json_file;
+mod lead_lifecycle;
 mod live_rows;
 mod logging;
 mod long_prompt_guard;
@@ -25,6 +26,12 @@ pub fn run() {
       stall_watchdog::confirm_stall_alert,
       stall_watchdog::dismiss_stall_alert,
       resume::resume_lead_command,
+      lead_lifecycle::restart_lead_command,
+      lead_lifecycle::end_lead_work_command,
+      lead_lifecycle::launch_team_lead_command,
+      lead_lifecycle::adopt_lead_command,
+      lead_lifecycle::fork_session_as_lead_command,
+      lead_lifecycle::launch_member_command,
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {

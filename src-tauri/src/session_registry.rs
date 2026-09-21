@@ -43,17 +43,27 @@ pub struct LeadRecord {
     pub mcp_token: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+// 서브청크 γ(TAURI_NOTICE_QUEUE_DESIGN.md §2)부터 이 앱이 직접 팀원 등록 파일을 쓰기 시작해서
+// (launchMember/restartLead의 F-1 전파) Serialize도 함께 derive한다 — β가 LeadRecord에 Serialize를
+// 추가했던 것과 같은 이유. createdAt/sessionId를 main.ts의 MemberRecord 타입 그대로 추가했다
+// (지금까지는 읽기 전용이라 이 두 필드가 필요 없었다).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemberRecord {
     #[serde(rename = "memberId")]
     pub member_id: String,
     #[serde(rename = "leadId")]
     pub lead_id: String,
-    #[serde(default)]
+    #[serde(rename = "createdAt", default)]
+    pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-    #[serde(default)]
+    // reconcileMemberIds(main.ts)가 짧은 id 드리프트를 되찾는 데 쓰는 안정적인 식별자 — 이 필드를
+    // 추가하기 전에 등록된 레코드에는 없을 수 있어 optional이다(main.ts 주석과 동일).
+    #[serde(rename = "sessionId", default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<bool>,
 }
 
@@ -69,7 +79,10 @@ pub fn load_leads() -> Vec<LeadRecord> {
     load_leads_from(&leads_path())
 }
 
-fn load_leads_from(path: &Path) -> Vec<LeadRecord> {
+// pub(crate) — γ의 E-2 재검증 테스트(lead_lifecycle.rs)가 production leads.json을 건드리지 않고
+// 같은 read-modify-write 코드 경로를 임시 파일에 대해 그대로 재현하는 데 쓴다(session_registry.rs
+// 자신의 β 시절 테스트와 동일한 이유).
+pub(crate) fn load_leads_from(path: &Path) -> Vec<LeadRecord> {
     let raw = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -93,7 +106,7 @@ fn load_leads_from(path: &Path) -> Vec<LeadRecord> {
 // §3-1) — 이 함수를 직접 pub으로 열어두면 "락을 깜빡하고 load_leads()/save_leads()를 직접
 // 짝지어 쓰는" 실수가 컴파일은 되면서 조용히 재발할 수 있다. 그래서 이 모듈 밖에서는 애초에 호출할
 // 방법이 없게 막아둔다(A-1의 "타입 시스템으로 강제" 정신을 이 범위에 적용한 것).
-fn save_leads_to(path: &Path, leads: &[LeadRecord]) {
+pub(crate) fn save_leads_to(path: &Path, leads: &[LeadRecord]) {
     if let Err(e) = write_json_file_atomic(path, &leads) {
         eprintln!("[save_leads] leads.json 저장 실패: {e}");
     }
@@ -132,7 +145,7 @@ where
     with_leads_lock_at(&leads_path(), leads_lock(), mutate).await
 }
 
-async fn with_leads_lock_at<F, R>(path: &Path, lock: &AsyncMutex<()>, mutate: F) -> R
+pub(crate) async fn with_leads_lock_at<F, R>(path: &Path, lock: &AsyncMutex<()>, mutate: F) -> R
 where
     F: FnOnce(&mut Vec<LeadRecord>) -> (bool, R),
 {
@@ -145,10 +158,16 @@ where
     result
 }
 
-// loadMembers(main.ts)와 동일 — 팀원별로 파일 하나(memberId.json)씩 흩어져 있다.
+// loadMembers(main.ts)와 동일 — 팀원별로 파일 하나(memberId.json)씩 흩어져 있다. 실제 경로를
+// 받는 형태(load_members_from)로 분리해뒀다 — lead_lifecycle.rs의 F-1 테스트가 실제
+// ~/.claude/claude-team-monitor/members(지금 이 저장소를 작업 중인 실제 팀장/팀원의 등록 파일이
+// 있는 곳)를 건드리지 않고 임시 디렉토리로 등록→갱신 왕복을 검증할 수 있게 하기 위함이다.
 pub fn load_members() -> Vec<MemberRecord> {
-    let dir = members_dir();
-    let entries = match fs::read_dir(&dir) {
+    load_members_from(&members_dir())
+}
+
+pub fn load_members_from(dir: &Path) -> Vec<MemberRecord> {
+    let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return Vec::new(),
     };
@@ -176,6 +195,26 @@ pub fn load_members() -> Vec<MemberRecord> {
         out.push(member);
     }
     out
+}
+
+// registerMember(main.ts)와 동일 — memberId.json 파일 하나로 팀원 하나를 등록/갱신한다. memberId가
+// 파일 경로에 직접 쓰이므로 is_safe_id로 한 번 더 막는다(main.ts 주석과 동일한 이중 방어 이유 —
+// 지금 있는 호출부는 전부 이미 안전한 memberId만 넘기지만, 이 함수 자체도 방어선을 이중화해둔다).
+pub fn register_member(member: &MemberRecord) {
+    register_member_in(&members_dir(), member);
+}
+
+pub fn register_member_in(dir: &Path, member: &MemberRecord) {
+    if !is_safe_id(&member.member_id) {
+        eprintln!(
+            "[register_member] memberId 형식이 안전하지 않아 등록을 거부합니다: {:?}",
+            member.member_id
+        );
+        return;
+    }
+    if let Err(e) = write_json_file_atomic(&dir.join(format!("{}.json", member.member_id)), member) {
+        eprintln!("[register_member] 팀원 등록 파일 저장 실패: {e}");
+    }
 }
 
 // guessProbableLeadId(main.ts)와 동일 — 등록은 안 됐지만 그 팀장의 승인된 디렉토리에서 그 팀장이

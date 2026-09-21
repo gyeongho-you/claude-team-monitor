@@ -694,12 +694,10 @@ pub async fn resume_lead_command(internal_id: String, message: String) -> Option
 // 새 토큰을 즉시 발급해 저장한다. resumeLead는 이 함수를 쓰지 않는다 — --resume에 mcp-config를
 // 다시 싣지 않으므로(A-1) 새 토큰을 만들어도 전달할 방법이 없고, 마지막으로 실제 --mcp-config를
 // 실어 떴을 때(launchTeamLead/restartLead) 발급된 값이 세션 자신의 저장된 옵션으로 계속 유효하다
-// (resume_lead 위 주석 참고). 즉 이 함수의 유일한 실제 호출부는 restartLead(서브청크 γ, 이번
-// 청크 범위 밖)라 지금은 프로덕션 코드에서 부르는 곳이 없다 — α의 queue_lead_operation이 β를
-// 기다렸던 것과 같은 패턴이다.
+// (resume_lead 위 주석 참고). 서브청크 γ(lead_lifecycle.rs)의 restart_lead가 이 함수의 첫 실제
+// 호출부다 — α의 queue_lead_operation이 β를 기다렸던 것과 같은 패턴이라 β 시점엔 dead_code였다.
 // ---------------------------------------------------------------------------------------------
 
-#[allow(dead_code)]
 fn apply_mcp_token(leads: &mut [LeadRecord], internal_id: &str, token: &str) -> bool {
     let Some(rec) = leads.iter_mut().find(|l| l.internal_id.as_deref() == Some(internal_id)) else {
         return false;
@@ -708,10 +706,8 @@ fn apply_mcp_token(leads: &mut [LeadRecord], internal_id: &str, token: &str) -> 
     true
 }
 
-/// issueMcpToken(main.ts)과 동일 — 첫 실제 호출부는 서브청크 γ(restartLead)가 추가한다.
-/// 치명적 버그 수정(β 리뷰)으로 leads.json 쓰기를 with_leads_lock 안에서 하게 되면서 async fn으로
-/// 바뀌었다 — 아직 프로덕션 호출부가 없어(dead_code) 시그니처를 자유롭게 바꿀 수 있었다.
-#[allow(dead_code)]
+/// issueMcpToken(main.ts)과 동일 — 치명적 버그 수정(β 리뷰)으로 leads.json 쓰기를
+/// with_leads_lock 안에서 하게 되면서 async fn이 됐다.
 pub async fn issue_mcp_token(internal_id: &str) -> String {
     let token = uuid::Uuid::new_v4().to_string();
     with_leads_lock(|leads| (apply_mcp_token(leads, internal_id, &token), ())).await;
