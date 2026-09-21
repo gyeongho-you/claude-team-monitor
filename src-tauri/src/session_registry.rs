@@ -11,6 +11,8 @@ use std::fs;
 #[derive(Debug, Clone, Deserialize)]
 pub struct LeadRecord {
     pub id: String,
+    #[serde(rename = "sessionId", default)]
+    pub session_id: String,
     #[serde(rename = "targetDir", default)]
     pub target_dir: String,
     #[serde(rename = "launchedAt", default)]
@@ -19,6 +21,12 @@ pub struct LeadRecord {
     pub approved_members: Vec<String>,
     #[serde(default)]
     pub label: Option<String>,
+    // claude가 자동 생성한 세션 주제 — main.ts는 한 번 찾으면 leads.json에 캐싱해서 다음부터는
+    // 세션 파일을 다시 안 읽는다. 이번 포팅은 읽기 전용이라(leads.json 쓰기 경로 없음) 그 캐싱
+    // 백필은 아직 안 하고, 폴링마다 get_session_ai_title로 다시 찾는다(작은 jsonl 한 번 훑는 정도라
+    // 비용은 낮다) — leads.json에 이미 캐싱돼 있으면(Electron 시절 등) 그 값을 우선 쓴다.
+    #[serde(rename = "aiTitle", default)]
+    pub ai_title: Option<String>,
     #[serde(rename = "internalId", default)]
     pub internal_id: Option<String>,
     #[serde(rename = "autoStallNudge", default)]

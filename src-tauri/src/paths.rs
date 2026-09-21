@@ -54,6 +54,12 @@ pub fn session_edits_dir() -> PathBuf {
     claude_home().join("session-edits")
 }
 
+// main.ts의 PROJECTS_DIR — claude CLI 자신이 세션마다 남기는 원본 트랜스크립트(jsonl) 위치.
+// getSessionAiTitle(자동 생성된 세션 주제 찾기)가 여기서 읽는다.
+pub fn projects_dir() -> PathBuf {
+    claude_home().join("projects")
+}
+
 // pathGuard.js의 isSafeId와 동일한 규칙. 팀원 등록 파일(~/.claude/claude-team-monitor/members/*.json)은
 // 이 앱이 아니라 외부(팀장) claude 세션이 SKILL.md 안내에 따라 직접 파일로 써서 남긴다 — memberId
 // 필드값을 검증 없이 신뢰하면 안 된다(팀원 코드리뷰에서 지적된 경로 조작 위험. 이번 포팅 범위는

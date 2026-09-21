@@ -1,7 +1,9 @@
 mod agents_json;
+mod board_state;
 mod live_rows;
 mod paths;
 mod session_registry;
+mod timing;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
