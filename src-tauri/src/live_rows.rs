@@ -1,7 +1,10 @@
 use crate::agents_json::{fetch_agents_typed, AgentEntry};
 use crate::board_state::{prune_missing_keys, state, track_first_miss, FirstMissResult};
+use crate::claude_readiness::check_directory_claude_ready;
+use crate::member_requests::{load_pending_requests, MemberRequest};
 use crate::paths::{daily_journal_dir, projects_dir, session_edits_dir};
 use crate::session_registry::{load_leads, load_members, LeadRecord, MemberRecord};
+use crate::stall_watchdog::{list_stall_alerts_for_ui, StallAlertForUi};
 use crate::timing::{now_ms, LEAD_OFFLINE_GRACE_MS};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -202,7 +205,9 @@ fn compute_live_rows(agents: &[AgentEntry], lead_by_id: &HashMap<String, &LeadRe
 
 // encodeProjectDirName(main.ts)와 동일 — 영문/숫자가 아닌 문자를 전부 '-'로 바꿔 cwd를 디렉토리
 // 이름으로 쓸 수 있게 한다(claude CLI 자신이 ~/.claude/projects 밑에 쓰는 것과 같은 인코딩).
-fn encode_project_dir_name(cwd: &str) -> String {
+// pub(crate): transcript.rs의 readRawSessionTranscript 포팅이 원본 세션 파일 경로를 찾는 데 그대로
+// 재사용한다.
+pub(crate) fn encode_project_dir_name(cwd: &str) -> String {
     cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect()
 }
 
@@ -232,8 +237,9 @@ fn get_session_ai_title(session_id: &str, cwd: &str) -> Option<String> {
 }
 
 // hasLiveMember(lib/leadPresence.js)와 동일 — 팀장 자신은 안 떠있어도 그 팀장이 등록한 팀원 중
-// 하나라도 살아있으면 "이 팀장의 일이 아직 끝나지 않았다"고 본다.
-fn has_live_member(lead_id: &str, members: &[MemberRecord], agent_ids: &HashSet<String>) -> bool {
+// 하나라도 살아있으면 "이 팀장의 일이 아직 끝나지 않았다"고 본다. pub(crate): lead_admin.rs의
+// deleteLeadHistory 포팅이 "살아있는 팀장(또는 그 소속 팀원)"을 판정하는 데 그대로 재사용한다.
+pub(crate) fn has_live_member(lead_id: &str, members: &[MemberRecord], agent_ids: &HashSet<String>) -> bool {
     members.iter().any(|m| m.lead_id == lead_id && agent_ids.contains(&m.member_id))
 }
 
@@ -432,6 +438,70 @@ fn get_live_session_rows_inner() -> Vec<SessionRow> {
     rows
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct UnapprovedDir {
+    pub dir: String,
+    pub reason: String,
+}
+
+// computeUnapprovedDirs(main.ts:1463-1475) — 이 앱이 실제로 claude --bg를 새로 스폰할 수 있는
+// 디렉토리(팀장 자신의 targetDir + 사전승인된 팀원 디렉토리)만 모아서, claude 최초 실행 승인
+// (checkDirectoryClaudeReady)이 안 된 곳을 화면에 알림으로 띄우는 데 쓴다. main.ts의 Set과 동일하게
+// 삽입 순서를 보존한 채 중복을 제거한다(순서가 결과에 영향을 주진 않지만 원본 동작을 그대로 옮긴다).
+fn compute_unapproved_dirs(leads: &[LeadRecord]) -> Vec<UnapprovedDir> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut dirs: Vec<String> = Vec::new();
+    for lead in leads {
+        if seen.insert(lead.target_dir.clone()) {
+            dirs.push(lead.target_dir.clone());
+        }
+        for d in &lead.approved_members {
+            if seen.insert(d.clone()) {
+                dirs.push(d.clone());
+            }
+        }
+    }
+    dirs.into_iter()
+        .filter_map(|dir| {
+            let readiness = check_directory_claude_ready(&dir);
+            if readiness.ready {
+                None
+            } else {
+                Some(UnapprovedDir { reason: readiness.reason.unwrap_or_default(), dir })
+            }
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RefreshBoardResult {
+    pub rows: Vec<SessionRow>,
+    pub requests: Vec<MemberRequest>,
+    #[serde(rename = "unapprovedDirs")]
+    pub unapproved_dirs: Vec<UnapprovedDir>,
+    #[serde(rename = "stallAlerts")]
+    pub stall_alerts: Vec<StallAlertForUi>,
+}
+
+/// refresh-board(main.ts:2513, `{...(await buildSessionRows()), stallAlerts: listStallAlertsForUi()}`)
+/// 상당 — 작업 탭 카드에서 "새로고침"/"삭제"를 눌렀을 때 3초 폴링을 기다리지 않고 바로 최신 보드를
+/// 준다. rows는 get_live_session_rows_inner를 그대로 재사용하고 session_rows_lock으로 감싸(3초
+/// 폴링·다른 refresh-board 호출과 겹쳐도 완료 순서가 시작 순서와 같게 유지, get_live_session_rows
+/// 커맨드와 동일한 이유) requests/unapprovedDirs/stallAlerts까지 채워서 main.ts와 동일한 필드
+/// 전체를 반환한다.
+#[tauri::command]
+pub async fn refresh_board_command() -> RefreshBoardResult {
+    let _guard = crate::concurrency::session_rows_lock().lock().await;
+    let rows = get_live_session_rows_inner();
+    let leads = load_leads();
+    RefreshBoardResult {
+        rows,
+        requests: load_pending_requests(),
+        unapproved_dirs: compute_unapproved_dirs(&leads),
+        stall_alerts: list_stall_alerts_for_ui(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,5 +636,36 @@ mod tests {
         assert_eq!(grace_rows.len(), 1);
         assert!(!grace_rows[0].offline, "그레이스 카드는 offline:false로 보여야 한다");
         assert_eq!(grace_rows[0].agent.id, cached_row.agent.id);
+    }
+
+    // compute_unapproved_dirs — claude 최초 실행 승인이 안 된(실제로 ~/.claude.json에 등록됐을 리
+    // 없는 가짜 경로) targetDir/approvedMembers를 걸러내는지, 같은 경로가 여러 번 나와도 중복
+    // 없이 한 번만 잡히는지.
+    #[test]
+    fn compute_unapproved_dirs_flags_never_trusted_dirs_without_duplicates() {
+        let mut lead = fake_lead("test-fake-lead-unapproved-dirs-xyz");
+        lead.target_dir = "C:\\definitely-not-trusted-dir-xyz".to_string();
+        lead.approved_members = vec!["C:\\definitely-not-trusted-dir-xyz".to_string(), "C:\\another-untrusted-dir-xyz".to_string()];
+        let leads = vec![lead];
+
+        let result = compute_unapproved_dirs(&leads);
+        assert_eq!(result.len(), 2, "targetDir과 겹치는 approvedMembers 항목은 중복 없이 한 번만 잡혀야 한다: {result:?}");
+        assert!(result.iter().any(|r| r.dir == "C:\\definitely-not-trusted-dir-xyz"));
+        assert!(result.iter().any(|r| r.dir == "C:\\another-untrusted-dir-xyz"));
+        assert!(result.iter().all(|r| !r.reason.is_empty()));
+    }
+
+    #[test]
+    fn compute_unapproved_dirs_empty_for_no_leads() {
+        assert!(compute_unapproved_dirs(&[]).is_empty());
+    }
+
+    // refresh_board_command — 죽지 않고 main.ts와 같은 네 필드(rows/requests/unapprovedDirs/
+    // stallAlerts)를 채워 돌려주는지만 스모크 테스트한다(실제 값 내용은 이미 각 필드를 만드는
+    // 함수들의 개별 테스트가 검증한다).
+    #[tokio::test]
+    async fn refresh_board_command_returns_without_hanging() {
+        let result = refresh_board_command().await;
+        let _ = (result.rows.len(), result.requests.len(), result.unapproved_dirs.len(), result.stall_alerts.len());
     }
 }

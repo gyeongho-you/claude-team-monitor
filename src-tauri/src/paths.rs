@@ -119,6 +119,17 @@ pub fn leads_path() -> PathBuf {
     app_data_dir().join("leads.json")
 }
 
+// main.ts의 FAVORITES_PATH — "팀장 디렉토리" 즐겨찾기(Favorite) 목록.
+pub fn favorites_path() -> PathBuf {
+    app_data_dir().join("favorites.json")
+}
+
+// main.ts의 JOBS_DIR — claude CLI 자신의 daemon job 상태 파일(state.json)이 있는 곳.
+// get-pending-choice/get-chat-unresolvable-detail이 여기서 읽는다.
+pub fn jobs_dir() -> PathBuf {
+    claude_home().join("jobs")
+}
+
 // main.ts의 STALL_ALERTS_PATH — 정체 감시가 만들어낸, 사용자 확인을 기다리는 StallAlert 목록.
 pub fn stall_alerts_path() -> PathBuf {
     app_data_dir().join("stallAlerts.json")

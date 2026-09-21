@@ -1,4 +1,4 @@
-use crate::agents_json::{fetch_agents_typed, AgentEntry};
+use crate::agents_json::{fetch_agents_typed, fetch_agents_typed_async, AgentEntry};
 use crate::json_file::write_json_file_atomic;
 use crate::paths::{is_safe_id, leads_path, members_dir};
 use serde::{Deserialize, Serialize};
@@ -314,6 +314,46 @@ pub fn get_adoptable_sessions() -> Vec<AgentEntry> {
     result
 }
 
+// ---------------------------------------------------------------------------------------------
+// registerProbableMember(main.ts:2311-2318) — 세션 정리 탭에서 "이 팀장 소속일 수 있음" 추정
+// 세션을 사람이 확인하고 누르는 "팀원으로 등록" 버튼용. agentId는 실제로 지금 떠있어야 하고(가짜
+// 등록 방지), leadId도 실제 등록된 팀장이어야 한다 — 둘 다 아니면 아무 일도 안 하고 false를
+// 반환한다.
+// ---------------------------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn register_probable_member_command(agent_id: String, lead_id: String) -> bool {
+    let agents = fetch_agents_typed_async().await;
+    let Some(agent) = agents.iter().find(|a| a.id.as_deref() == Some(agent_id.as_str()) && a.kind == "background") else {
+        return false;
+    };
+    if !load_leads().iter().any(|l| l.id == lead_id) {
+        return false;
+    }
+    register_member(&MemberRecord {
+        member_id: agent_id,
+        lead_id,
+        created_at: crate::timing::now_ms(),
+        role: None,
+        label: None,
+        session_id: Some(agent.session_id.clone()),
+        secret: None,
+    });
+    true
+}
+
+// ---------------------------------------------------------------------------------------------
+// getInteractiveSessions(main.ts:2345-2350) — interactive 세션(사용자가 지금 타이핑 중일 수도
+// 있는 진짜 터미널) 목록. "기존 세션 연결" 화면의 forkSessionAsLead 대상 후보용.
+// ---------------------------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn get_interactive_sessions_command() -> Vec<AgentEntry> {
+    let mut agents: Vec<AgentEntry> = fetch_agents_typed_async().await.into_iter().filter(|a| a.kind == "interactive").collect();
+    agents.sort_by(|a, b| b.started_at.unwrap_or(0).cmp(&a.started_at.unwrap_or(0)));
+    agents
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,5 +519,22 @@ mod tests {
                 "slow_a={slow_a_ms}ms/slow_b={slow_b_ms}ms 조합에서 race-b의 갱신이 사라지면 안 된다(final={final_leads:?})"
             );
         }
+    }
+
+    // register_probable_member_command — 존재하지 않는 agentId/leadId는 항상 false여야 한다(가짜
+    // 등록 방지). 실제 떠있는 세션으로 성공 경로까지 재현하려면 실제 claude 프로세스가 필요해서
+    // (실사용 상태에 의존) 실패 경로만 결정적으로 검증한다.
+    #[tokio::test]
+    async fn register_probable_member_rejects_unknown_agent_or_lead() {
+        assert!(!register_probable_member_command("definitely-not-a-live-agent-xyz".to_string(), "1d285d20".to_string()).await);
+        assert!(!register_probable_member_command("846ee1cb".to_string(), "definitely-not-a-real-lead-xyz".to_string()).await);
+    }
+
+    // get_interactive_sessions_command — kind가 항상 interactive인지, 실제 세션이 하나도 없어도
+    // (headless 환경 등) 빈 배열로 안전하게 돌아오는지.
+    #[tokio::test]
+    async fn get_interactive_sessions_only_returns_interactive_kind() {
+        let sessions = get_interactive_sessions_command().await;
+        assert!(sessions.iter().all(|a| a.kind == "interactive"));
     }
 }

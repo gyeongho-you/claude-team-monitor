@@ -40,6 +40,7 @@ uuid = { version = "1", features = ["v4"] }
 # 이미 chrono를 transitive dependency로 끌어와 있어(Cargo.lock 확인) 새 버전을 추가하는 게 아니라
 # 직접 dependency로 승격만 한다.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+tauri-plugin-dialog = "2"
 
 [dev-dependencies]
 # resume.rs의 재시도/백그라운드 치유 상태 기계 테스트가 RESUME_SETTLE_CHECK_MS(13s)/

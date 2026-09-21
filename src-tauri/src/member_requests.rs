@@ -1,11 +1,13 @@
 // 서브청크 δ(TAURI_NOTICE_QUEUE_DESIGN.md §2)가 소비하는 IPC 중 approve-request/deny-request가
-// 필요로 하는 MemberRequest 최소 포팅. main.ts의 MemberRequest 타입/writeRequestDecision만
-// 옮긴다 — loadPendingRequests(요청 목록 전체 조회, "승인 대기" 탭 렌더링용)는 이번 청크의 소비
-// IPC 목록에 없어서 범위 밖이다(approve-request/deny-request는 렌더러가 이미 알고 있는 requestId를
-// 그대로 IPC 인자로 넘기므로 목록 조회가 필요 없다).
+// 필요로 하는 MemberRequest 최소 포팅. main.ts의 MemberRequest 타입/writeRequestDecision을 옮겼다.
+//
+// 이번 청크(남은 단순 CRUD IPC)에서 loadPendingRequests(main.ts:1542-1558)를 추가로 포팅한다 —
+// refresh-board 상당 커맨드(live_rows.rs의 refresh_board_command)가 반환하는 requests 필드가
+// 이 함수를 재사용한다.
 
 use crate::paths::{is_safe_id, requests_dir};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// main.ts의 MemberRequest와 동일. `type`은 러스트 예약어라 `request_type`으로 옮기고
 /// `#[serde(rename = "type")]`로 JSON 필드명을 맞춘다. 구버전 요청(type 필드 자체가 없음)은
@@ -59,6 +61,39 @@ pub fn write_request_decision(request_id: &str, status: &str) -> Option<MemberRe
         return None;
     }
     Some(decided)
+}
+
+/// loadPendingRequests(main.ts:1542-1558)와 동일 — REQUESTS_DIR 안의 *.json을 전부 읽어 status가
+/// 'pending'인 것만, createdAt 오름차순으로 돌려준다. id가 안전한 형식이 아니면 걸러서(외부 세션이
+/// 직접 쓰는 파일이라 값을 신뢰할 수 없다 — memberId와 같은 이유) writeRequestDecision이 이 값을
+/// 파일 경로에 그대로 쓰는 경로로 절대 넘어가지 않게 한다.
+pub(crate) fn load_pending_requests_from(dir: &Path) -> Vec<MemberRequest> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<MemberRequest> = entries
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .filter_map(|raw| serde_json::from_str::<MemberRequest>(&raw).ok())
+        .filter(|r| r.status == "pending")
+        .filter(|r| {
+            if is_safe_id(&r.id) {
+                true
+            } else {
+                eprintln!("[load_pending_requests] 요청 id 형식이 안전하지 않아 무시합니다: {:?}", r.id);
+                false
+            }
+        })
+        .collect();
+    out.sort_by_key(|r| r.created_at);
+    out
+}
+
+/// loadPendingRequests(main.ts)와 동일 — 실제 REQUESTS_DIR을 읽는다.
+pub fn load_pending_requests() -> Vec<MemberRequest> {
+    load_pending_requests_from(&requests_dir())
 }
 
 #[cfg(test)]
@@ -125,5 +160,57 @@ mod tests {
     #[test]
     fn write_request_decision_rejects_unsafe_request_id() {
         assert!(write_request_decision("../escape", "approved").is_none());
+    }
+
+    fn temp_requests_dir(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("claude_team_monitor_test_requests_{tag}_{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn load_pending_requests_only_returns_pending_sorted_by_created_at() {
+        let dir = temp_requests_dir("load");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut newer = pending_request("req-newer", None);
+        newer.created_at = 2_000;
+        let mut older = pending_request("req-older", None);
+        older.created_at = 1_000;
+        let mut decided = pending_request("req-decided", None);
+        decided.status = "approved".to_string();
+        decided.created_at = 500;
+
+        for (name, req) in [("req-newer.json", &newer), ("req-older.json", &older), ("req-decided.json", &decided)] {
+            crate::json_file::write_json_file_atomic(&dir.join(name), req).unwrap();
+        }
+        // json이 아닌 파일은 무시돼야 한다.
+        std::fs::write(dir.join("not-json.txt"), "무시돼야 함").unwrap();
+
+        let result = load_pending_requests_from(&dir);
+        assert_eq!(result.len(), 2, "pending이 아닌 요청은 빠져야 한다");
+        assert_eq!(result[0].id, "req-older", "createdAt 오름차순이어야 한다");
+        assert_eq!(result[1].id, "req-newer");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_pending_requests_returns_empty_for_missing_directory() {
+        let dir = temp_requests_dir("missing").join("does-not-exist");
+        assert!(load_pending_requests_from(&dir).is_empty());
+    }
+
+    #[test]
+    fn load_pending_requests_filters_out_unsafe_ids() {
+        let dir = temp_requests_dir("unsafe-id");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut req = pending_request("../escape", None);
+        req.created_at = 1_000;
+        // is_safe_id 검사는 req.id 필드 값을 보는 것이지 파일명을 보는 게 아니므로, 파일명은
+        // 안전하게 쓰고 내용만 조작된 id를 담는다(실제 위협 모델과 동일 — 외부 세션이 파일 내용을
+        // 직접 쓴다).
+        crate::json_file::write_json_file_atomic(&dir.join("weird.json"), &req).unwrap();
+
+        assert!(load_pending_requests_from(&dir).is_empty(), "id 필드가 안전하지 않으면 걸러져야 한다");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
