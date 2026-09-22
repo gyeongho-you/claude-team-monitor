@@ -2013,6 +2013,23 @@ function resumeOnce(internalId: string, current: LeadRecord, message: string, at
   });
 }
 
+// claude agents --json 스냅샷 한 번만으로 "이 세션이 없어졌다"고 단정하면, 팀장이 실제로는
+// 도구를 많이 실행하느라 바쁘게 작업 중인데 daemon이 부하로 그 스냅샷 한 번에만 이 세션을
+// 빠뜨린 경우까지 "크래시"로 오판한다 — 그러면 정상적으로 잘 돌아가는 팀장에게 눈에 띄는
+// "🔄 재연결 재시도 중" 배너가 불필요하게 뜬다(실사용 지적: "작업하고 있는데도 좀만 오래
+// 걸리면 재시도가 떠버린다"). findSessionIdByShortIdRetrying(위, B-2)이 정반대 방향(막
+// spawn된 id가 아직 반영 안 됨)에 대해 이미 재시도를 쓰고 있는 것과 근본 원인이 같다(세션
+// 수가 많거나 부하가 있을 때 claude agents --json 한 번의 결과를 완전히 못 믿는다) — 다만
+// 여기는 "한참 전부터 이미 있었던 세션이 잠깐 안 잡힘"이라 새 세션 반영 지연만큼 오래 기다릴
+// 필요는 없어서 짧게 한 번만 더 확인한다.
+async function isSessionStillPresent(shortId: string): Promise<boolean> {
+  const agents = await fetchAgentsStrict();
+  if (agents.some(a => a.id === shortId)) return true;
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  const retryAgents = await fetchAgentsStrict();
+  return retryAgents.some(a => a.id === shortId);
+}
+
 // 실제로 실패가 확인된 뒤(동기 재시도든, 아래 scheduleBackgroundResumeHealing의 뒤늦은 발견이든)에만
 // 호출된다 — 간격을 두고 startAttempt부터 MAX_RESUME_ATTEMPTS까지 재시도하고, 이번엔(이미 한 번
 // 실패한 뒤라) 매 시도마다 RESUME_SETTLE_CHECK_MS만큼 기다렸다가 여전히 살아있는지 확인하고서야
@@ -2027,8 +2044,7 @@ async function resumeRetryFrom(internalId: string, current: LeadRecord, message:
         await new Promise(resolve => setTimeout(resolve, RESUME_SETTLE_CHECK_MS));
         let survived: boolean;
         try {
-          const agents = await fetchAgentsStrict();
-          survived = agents.some(a => a.id === candidateId);
+          survived = await isSessionStillPresent(candidateId);
         } catch {
           survived = true; // 확인 자체가 실패하면 fail-closed(성공으로 간주) — 불필요한 재시도를 피한다.
         }
@@ -2059,8 +2075,7 @@ function scheduleBackgroundResumeHealing(internalId: string, current: LeadRecord
       if (!rec || rec.id !== expectedId) return; // 이미 다른 작업으로 대체됨 — 간섭하지 않는다.
       let survived: boolean;
       try {
-        const agents = await fetchAgentsStrict();
-        survived = agents.some(a => a.id === expectedId);
+        survived = await isSessionStillPresent(expectedId);
       } catch {
         return; // 생존 확인 자체가 실패하면, 정말 죽었는지도 모르는 채로 또 stop/resume을 거는 게
                 // 더 위험하다 — 다음 폴링이나 사용자 조작 때 다시 기회가 있으니 여기서는 그냥 넘어간다.
