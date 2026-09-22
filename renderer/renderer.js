@@ -1049,6 +1049,8 @@ function openChatFindBar() {
 
 function closeChatFindBar() {
   chatFindBarEl.hidden = true;
+  chatFindInputEl.value = ''; // 내부 상태(chatFindState.query)만 비우고 이 입력창 값은 안 지우면,
+  // 다시 Ctrl+F로 열었을 때 옛 검색어가 그대로 보이는 채로 남아있었다(실사용 지적).
   chatFindState.query = '';
   chatFindState.currentIndex = 0;
   clearChatFindHighlights();
