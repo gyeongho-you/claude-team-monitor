@@ -983,6 +983,24 @@ let hasCompletedFirstPoll = false;
 // 즉시 전송할 때마다 화면이 잠깐 지워졌다 돌아옴 — pendingChatTurns 통합 수정과는 별개의 원인).
 const lastKnownLiveLeadRow = new Map<string, SessionRow>();
 
+// resumeLead/restartLead가 짧은 id를 바꾼 그 순간부터, buildSessionRowsInternal이 다음 폴링에서
+// claude agents --json으로 그 새 id를 실제 살아있다고 확인할 때까지는 위 lastKnownLiveLeadRow가
+// 여전히 "옛 id" 밑에만 캐시돼있다 — 그 사이에 도는 폴링은 옛 id로도(agents 스냅샷에 없음) 새
+// id로도(캐시에 없음, hasLiveMember도 없으면) 이 팀장을 못 찾아 rows에서 통째로 빠뜨린다. 그
+// 결과 위 주석의 "순간적으로 숨겨지는" 것과 똑같은 경로로, renderer.js가 selectedLeadId를 null로
+// 리셋했다가 "온라인인 아무 팀장(첫 번째)"으로 자동 전환해버려 사용자 모르게 화면이 다른 팀장으로
+// 튀는 사고로 이어진다(실사용 재현) — internalId로 따라가는 renderer.js의 가드는 애초에 이 팀장이
+// rows 배열에 하나도 안 잡히는 이 경우를 못 막는다(찾을 대상 자체가 없음). resumeLead/restartLead가
+// leads.json의 id를 바꾸는 바로 그 자리에서 캐시도 같이 새 id로 옮겨 두면, agents 스냅샷이 따라잡을
+// 때까지의 그 짧은 틈에도 buildGraceRows가 옛 스냅숏을 새 id로 계속 보여줄 수 있다.
+function migrateLastKnownLiveLeadRow(oldId: string, newId: string): void {
+  if (oldId === newId) return;
+  const cached = lastKnownLiveLeadRow.get(oldId);
+  if (!cached) return;
+  lastKnownLiveLeadRow.set(newId, { ...cached, id: newId });
+  lastKnownLiveLeadRow.delete(oldId);
+}
+
 function computeLiveRows(
   agents: AgentEntry[],
   leads: LeadRecord[],
@@ -2145,6 +2163,7 @@ async function resumeLead(internalId: string, message: string): Promise<string |
     const leads = loadLeads();
     const rec = leads.find(l => l.internalId === internalId);
     if (rec) {
+      migrateLastKnownLiveLeadRow(current.id, newId);
       rec.id = newId;
       // 짧은 id가 stop 이전과 동일한데(newId === current.id) sessionId만 달라진 조합은, 이 코드베이스가
       // 곳곳에서 의존하는 전제("정상 resume은 항상 같은 짧은 id로 깨어나고, 그러면 sessionId도 당연히
@@ -2222,6 +2241,7 @@ async function restartLead(internalId: string, instruction: string): Promise<{ i
   const rec = leads.find(l => l.internalId === internalId);
   if (rec) {
     const oldId = rec.id;
+    migrateLastKnownLiveLeadRow(oldId, newId);
     rec.id = newId;
     rec.sessionId = newSessionId;
     rec.launchedAt = Date.now();
