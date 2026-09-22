@@ -99,8 +99,8 @@
     return invoke('fork_session_as_lead_command', { sessionId, cwd });
   }
 
-  async function launchTeamLead(targetDir, instruction, secret) {
-    return invoke('launch_team_lead_command', { targetDir, instruction, secret });
+  async function launchTeamLead(targetDir, instruction, label, secret) {
+    return invoke('launch_team_lead_command', { targetDir, instruction, label, secret });
   }
 
   async function launchMember(leadId, targetDir, instruction, role, label, model) {

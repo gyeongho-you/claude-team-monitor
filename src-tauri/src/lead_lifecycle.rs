@@ -19,13 +19,13 @@
 // β를 다시 여는 작업이라 이번 커밋 범위에는 포함하지 않았다(커밋 메시지에도 명시).
 
 use crate::agents_json::fetch_agents_typed_async;
-use crate::board_state::migrate_last_known_live_lead_row;
+use crate::board_state::{migrate_last_known_live_lead_row, state as board_state};
 use crate::claude_readiness::{check_directory_claude_ready, claude_not_ready_message};
 use crate::concurrency::queue_lead_operation;
 use crate::logging::log_critical;
 use crate::long_prompt_guard::resolve_long_prompt;
 use crate::paths::{member_templates_path, members_dir, requests_dir, skill_dest_dir, skill_src_path, team_member_server_js_path};
-use crate::resume::{find_session_id_by_short_id, resume_lead, run_claude_bg, stop_session};
+use crate::resume::{find_session_id_by_short_id_retrying, resume_lead, run_claude_bg, stop_session};
 use crate::session_registry::{load_leads, load_members, register_member, with_leads_lock, LeadRecord, MemberRecord};
 use crate::timing::{now_ms, RUN_CLAUDE_TIMEOUT_MS};
 use serde::{Deserialize, Serialize};
@@ -236,16 +236,16 @@ pub async fn restart_lead(internal_id: String, instruction: String) -> RestartLe
             error: "팀장 레코드를 찾을 수 없습니다(이미 삭제됐거나 internalId가 어긋났을 수 있음).".to_string(),
         };
     };
+    // 2026-09-21 재검증(claude_readiness.rs 주석 참고: claude CLI v2.1.278, 한 번도 실행한 적
+    // 없는 새 디렉토리 3곳에서 백그라운드 스폰 3/3 모두 트러스트 다이얼로그 없이 정상 완료) 이후로는
+    // main.ts의 restartLead와 같은 이유로 이 판정을 더 이상 spawn 차단에 쓰지 않는다 — 경고만
+    // 남기고 그대로 진행한다. 아래에서 spawn 자체가 실패하면 이 판정이 원인일 수 있다는 걸 실패
+    // 메시지에 같이 담는다(실측 UI 테스트에서 이 하드 블락이 스크래치 디렉토리의 정상적인 재시작
+    // 시도를 전부 막던 것을 확인해 완화함).
     let readiness = check_directory_claude_ready(&current.target_dir);
     if !readiness.ready {
         let reason = readiness.reason.clone().unwrap_or_default();
-        log_critical(&claude_not_ready_message(&current.target_dir, &reason));
-        return RestartLeadOutcome::Failure {
-            error: format!(
-                "\"{}\"에서 claude 최초 실행 승인이 안 돼 있습니다({reason}) — 그 디렉토리에서 터미널로 claude를 한 번 실행해 승인창을 눌러준 뒤 다시 시도하세요.",
-                current.target_dir
-            ),
-        };
+        log_critical(&format!("[restartLead] {} (경고만 하고 spawn은 계속 시도합니다)", claude_not_ready_message(&current.target_dir, &reason)));
     }
 
     // 히스토리 탭에서 이미 오프라인인 팀장을 재시작해도 여기까지 그대로 들어온다 — 지금 실제로
@@ -271,7 +271,7 @@ pub async fn restart_lead(internal_id: String, instruction: String) -> RestartLe
             ),
         };
     };
-    let new_session_id = find_session_id_by_short_id(&new_id).await.unwrap_or_else(|| new_id.clone());
+    let new_session_id = find_session_id_by_short_id_retrying(&new_id).await.unwrap_or_else(|| new_id.clone());
 
     let new_id_for_lock = new_id.clone();
     let new_session_id_for_lock = new_session_id.clone();
@@ -377,7 +377,18 @@ pub async fn end_lead_work(internal_id: String) -> EndLeadWorkOutcome {
     let current_lead_id = load_leads().into_iter().find(|l| l.internal_id.as_deref() == Some(internal_id.as_str())).map(|l| l.id).unwrap_or(lead.id);
     let mut lead_stopped = stop_session(current_lead_id.clone()).await;
     if !lead_stopped {
-        lead_stopped = stop_session(current_lead_id).await;
+        lead_stopped = stop_session(current_lead_id.clone()).await;
+    }
+    // computeOfflineLeads(live_rows.rs)는 agents 스냅샷에 한 번 안 잡힌 것만으로 바로 오프라인
+    // 확정하지 않고 LEAD_OFFLINE_GRACE_MS(stop→resume 재기동 오판 방지용, 3분 이상)를 기다린다 —
+    // 근데 지금은 사용자가 "작업 종료"를 직접 눌러서 확실하게 정지시킨 것이라 재기동 오판 걱정이
+    // 없다. main.ts의 endLeadWork(leadFirstMissAt.set(currentLead.id, 0))와 동일하게, 정지가
+    // 실제로 성공했으면 lead_first_miss_at을 유예 시간 이전 시각(0)으로 미리 채워서 다음 폴링에서
+    // 곧바로 오프라인/히스토리로 넘어가게 한다(실측 UI 테스트에서 이 처리가 빠져 최대 214초 동안
+    // 카드가 "온라인"으로 잘못 남아있는 걸 확인해 추가함). 정지 자체가 실패했으면 아직 살아있을 수
+    // 있으므로 건드리지 않고 평소 유예 판정을 그대로 둔다.
+    if lead_stopped {
+        board_state().lock().unwrap().lead_first_miss_at.insert(current_lead_id, 0);
     }
     EndLeadWorkOutcome { success: lead_stopped, member_failures }
 }
@@ -407,21 +418,45 @@ pub async fn end_lead_work_command(lead_id: String) -> EndLeadWorkOutcome {
 // launchTeamLead(main.ts) — 브랜드 뉴 팀장을 새로 띄운다.
 // ---------------------------------------------------------------------------------------------
 
-/// launchTeamLead(main.ts)와 동일.
-pub async fn launch_team_lead(target_dir: String, instruction: String, secret: bool) -> Option<String> {
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum LaunchTeamLeadOutcome {
+    Success { id: String },
+    Failure { error: String },
+}
+
+/// launchTeamLead(main.ts)와 동일 — readiness 실패는(main.ts와 같은 이유, restart_lead 위 주석
+/// 참고) 더 이상 spawn 차단에 쓰지 않고 경고만 남긴 채 그대로 진행한다. spawn 자체가 실패하면
+/// 그 판정이 원인일 수 있다는 걸 실패 메시지에 같이 담는다.
+pub async fn launch_team_lead(target_dir: String, instruction: String, label: Option<String>, secret: bool) -> LaunchTeamLeadOutcome {
     let readiness = check_directory_claude_ready(&target_dir);
     if !readiness.ready {
-        log_critical(&claude_not_ready_message(&target_dir, readiness.reason.as_deref().unwrap_or("")));
-        return None;
+        log_critical(&format!("[launchTeamLead] {} (경고만 하고 spawn은 계속 시도합니다)", claude_not_ready_message(&target_dir, readiness.reason.as_deref().unwrap_or(""))));
     }
     install_team_lead_skill();
     let (approved_members, approved_text) = approved_member_briefing(&target_dir);
     let prompt = format!("/team-lead {instruction}\n\n{approved_text}");
 
     let flags = FreshLaunchArgs::new().secret(secret).into_flags();
-    let id = run_claude_bg(flags, resolve_long_prompt(&prompt), target_dir.clone()).await?;
+    let Some(id) = run_claude_bg(flags, resolve_long_prompt(&prompt), target_dir.clone()).await else {
+        if !readiness.ready {
+            return LaunchTeamLeadOutcome::Failure {
+                error: format!(
+                    "팀장 세션 시작에 실패했습니다 — \"{target_dir}\"에서 {} 이게 원인일 수 있습니다. 그 디렉토리에서 터미널로 claude를 한 번 실행해 승인창을 눌러준 뒤 다시 시도해보세요.",
+                    readiness.reason.as_deref().unwrap_or("")
+                ),
+            };
+        }
+        return LaunchTeamLeadOutcome::Failure {
+            error: format!(
+                "claude --bg가 {}초 안에 새 세션 시작을 확인해주지 못했습니다(타임아웃 또는 \"backgrounded\" 표시를 못 찾음) — 터미널을 직접 열어 claude --version, claude --bg가 정상 동작하는지 확인해보세요(CLI 미설치·PATH 문제·로그인 만료가 흔한 원인입니다).",
+                RUN_CLAUDE_TIMEOUT_MS / 1000
+            ),
+        };
+    };
 
-    let session_id = find_session_id_by_short_id(&id).await.unwrap_or_else(|| id.clone());
+    let session_id = find_session_id_by_short_id_retrying(&id).await.unwrap_or_else(|| id.clone());
+    let trimmed_label = label.map(|l| l.trim().to_string()).filter(|l| !l.is_empty());
 
     let record = LeadRecord {
         id: id.clone(),
@@ -429,7 +464,7 @@ pub async fn launch_team_lead(target_dir: String, instruction: String, secret: b
         target_dir,
         launched_at: now_ms(),
         approved_members,
-        label: None,
+        label: trimmed_label,
         ai_title: None,
         internal_id: Some(uuid::Uuid::new_v4().to_string()),
         auto_stall_nudge: None,
@@ -441,14 +476,17 @@ pub async fn launch_team_lead(target_dir: String, instruction: String, secret: b
     })
     .await;
 
-    Some(id)
+    LaunchTeamLeadOutcome::Success { id }
 }
 
-/// launch-team-lead IPC 핸들러(main.ts:2496-2499)의 포팅.
+/// launch-team-lead IPC 핸들러(main.ts:2496-2499)의 포팅. 반환 타입이 예전엔 Option<String>이라
+/// 성공/실패를 구분할 방법이 프론트에 없었다(실측 UI 테스트에서, 인자 버그를 고쳐도 성공 케이스가
+/// result.id 부재로 항상 실패로 보였을 결함) — restart_lead_command/RestartLeadOutcome과 같은
+/// {id}|{error} untagged 모양으로 맞춘다.
 #[tauri::command]
-pub async fn launch_team_lead_command(target_dir: String, instruction: String, secret: Option<bool>) -> Option<String> {
+pub async fn launch_team_lead_command(target_dir: String, instruction: String, label: Option<String>, secret: Option<bool>) -> LaunchTeamLeadOutcome {
     let final_instruction = if instruction.is_empty() { "지금 상황을 파악하고 다음 작업을 시작해줘.".to_string() } else { instruction };
-    launch_team_lead(target_dir, final_instruction, secret.unwrap_or(false)).await
+    launch_team_lead(target_dir, final_instruction, label, secret.unwrap_or(false)).await
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -516,7 +554,7 @@ pub async fn fork_session_as_lead(session_id: String, cwd: String) -> Option<Str
         cwd.clone(),
     )
     .await?;
-    let new_session_id = find_session_id_by_short_id(&id).await.unwrap_or_else(|| id.clone());
+    let new_session_id = find_session_id_by_short_id_retrying(&id).await.unwrap_or_else(|| id.clone());
     let (approved_members, _) = approved_member_briefing(&cwd);
 
     // E-2: 위 두 await(run_claude_bg/find_session_id_by_short_id) 동안 최대 수십 초가 지날 수

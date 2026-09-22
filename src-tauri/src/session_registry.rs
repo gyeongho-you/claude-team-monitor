@@ -275,11 +275,17 @@ pub fn register_member_in(dir: &Path, member: &MemberRecord) {
 
 // guessProbableLeadId(main.ts)와 동일 — 등록은 안 됐지만 그 팀장의 승인된 디렉토리에서 그 팀장이
 // 뜬 뒤 나타난 세션이면 "이 팀장 소속일 수 있음"으로 추정만 한다(자동 등록은 안 함).
+//
+// 문자열을 그대로 비교하지 않고 std::path::Path로 비교한다 — Path::components()가 Windows에서
+// '/'와 '\' 둘 다 구분자로 인식해서 정규화해주기 때문이다(실측 UI 테스트에서, register_as_lead
+// MCP 툴로 등록된 팀장이 approvedMembers를 forward-slash로 넘기면 claude CLI가 항상 backslash로
+// 돌려주는 agent.cwd와 완전 문자열 비교가 실패해 "미등록(추정)"으로 못 뜨는 것으로 확인됨).
 fn guess_probable_lead_id(agent: &AgentEntry, leads: &[LeadRecord]) -> Option<String> {
+    let agent_cwd = std::path::Path::new(&agent.cwd);
     leads
         .iter()
         .find(|l| {
-            l.approved_members.iter().any(|d| d == &agent.cwd)
+            l.approved_members.iter().any(|d| std::path::Path::new(d) == agent_cwd)
                 && agent.started_at.unwrap_or(0) >= l.launched_at
         })
         .map(|l| l.id.clone())
