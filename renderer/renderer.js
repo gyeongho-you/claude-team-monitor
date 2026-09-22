@@ -89,6 +89,12 @@ const leadMembersChipsEl = document.getElementById('lead-members-chips');
 const chatTranscriptEl = document.getElementById('chat-transcript');
 const chatInputEl = document.getElementById('chat-input');
 const chatSendBtn = document.getElementById('chat-send-btn');
+// sendMessageToLead가 진행 중 "전송 중..."으로 바꿨다가 끝나면 되돌릴 원래 라벨. 매 호출 시점의
+// chatSendBtn.textContent를 그대로 캡처하면, 먹통 상태에서 "재시도"를 눌러 같은 lead에 대해 두
+// 번째 sendMessageToLead가 겹쳐 도는 순간 이미 "전송 중..."으로 바뀐 텍스트를 "원래 라벨"로
+// 잘못 캡처해서, 나중에 되돌릴 때 "전송 중..."인 채로 영영 굳어버린다 — 페이지 로드 시 한 번만
+// 고정해둔 진짜 원본 라벨을 쓴다.
+const chatSendBtnDefaultLabel = chatSendBtn.textContent;
 const restartLeadBtn = document.getElementById('restart-lead-btn');
 const restartLeadPanelEl = document.getElementById('restart-lead-panel');
 const restartInstructionEl = document.getElementById('restart-instruction');
@@ -712,6 +718,21 @@ function updatePendingChatTurn(leadId, itemId, patch) {
   if (item) Object.assign(item, patch);
 }
 
+// "먹통(stuck)"으로 표시된 in-flight 항목을 사용자가 직접(수동으로만) 정리할 때 쓴다 — 자동으로
+// 지우거나 재전송하지는 않는다. 원래 걸려있던 sendChatMessage/sendMessageToLead 호출은 백그라운드에서
+// 계속 응답을 기다리는 채로 남아있다가 언젠가 끝나면(또는 영영 안 끝나도) 이미 지워진 localId를
+// 대상으로 하는 후속 처리(updatePendingChatTurn/removePendingChatTurn)를 시도하는데, 둘 다 대상 id가
+// 없으면 조용히 아무 일도 안 하므로 안전하다. busyLeadIds는 그 걸린 호출의 finally가 언젠가 다시
+// 지우려 시도하겠지만, 사용자가 지금 바로 다시 보낼 수 있어야 하므로 여기서 먼저 강제로 풀어준다 —
+// 백엔드가 여전히 이 팀장 앞으로 걸려있는 stop→resume을 처리 중이라면 새로 보낸 메시지도 같은
+// 문제를 다시 겪을 수 있지만(그 근본 원인은 이 수정 범위 밖), 최소한 화면에서 손 놓고 기다리기만
+// 하는 상태는 벗어날 수 있다.
+function unstickInFlightTurn(leadId, itemId) {
+  removePendingChatTurn(leadId, itemId);
+  busyLeadIds.delete(leadId);
+  updateBusyUI();
+}
+
 // resumeLead가 다른 짧은 id로 깨어나면(main.ts 주석 참고) selectedLeadId가 바뀌는데,
 // pendingChatTurns는 옛 id 밑에 남아있으면 새 id 기준으로 조회하는 renderChat()이 못 찾는다 —
 // 그 lead의 대기 항목 전부를 새 id 밑으로 옮긴다.
@@ -742,23 +763,34 @@ function computeBusyBannerHtml(row) {
   return '';
 }
 
+// in-flight(즉시 stop→resume) 항목이 이만큼(ms) 지나도 트랜스크립트에 안 나타나면 "먹통"일 수
+// 있다고 보고 수동 재시도/삭제 버튼을 보여준다. 정상적인 stop→resume도 CLI 재기동+응답 생성으로
+// 수 초~십수 초 걸릴 수 있어서(실사용 관찰) 너무 짧게 잡으면 정상 대기 중에도 오탐한다 — 실제
+// 먹통 사례(팀장이 busy인 동안 보내져 stop이 안전한 정지 지점을 못 찾고 걸리는 경우)는 수십 초~
+// 무한정 걸리므로, 이 값은 "느리지만 정상"과 "먹통"을 가르는 대략적인 휴리스틱이다.
+const IN_FLIGHT_STUCK_MS = 30000;
+
 // 대기 중인 항목 전부를(가장 오래된 것부터, 배열에 push한 순서 그대로) 각각 별도의 chat-turn으로
 // 렌더링한다. kind==='queued'(팀장 busy라 큐에 쌓임)와 kind==='in-flight'(즉시 전송해서 응답
-// 대기 중)는 안내 문구가 다르고, in-flight는 서버측에 취소할 대상이 없으므로 취소 버튼을 아예
-// 안 보여준다. 취소 버튼 클릭은 chatTranscriptEl 위임 리스너 하나로 처리하므로(아래 참고) 여기선
-// 매번 새로 안 걸어도 된다. .chat-answer에 white-space:pre-wrap이 걸려있어서, 이 템플릿을 여러
-// 줄로 들여써서 만들면 그 들여쓰기/개행이 그대로 화면에 빈 줄로 보이고 취소 버튼도 엉뚱한 줄로
-// 밀려난다 — 한 줄로 이어서 만든다.
+// 대기 중)는 안내 문구가 다르다. queued는 서버측에 취소할 대상(pendingNotices)이 있어 취소
+// 버튼을 보여준다. in-flight는 서버측에 취소할 대상이 없어 평소엔 버튼을 안 보여주지만,
+// IN_FLIGHT_STUCK_MS보다 오래 안 끝나면 먹통일 수 있다는 안내와 함께 재시도/삭제 버튼을 보여준다
+// (자동 재전송/자동 삭제는 하지 않는다 — 항상 사용자가 직접 눌러야 한다). 버튼 클릭은
+// chatTranscriptEl 위임 리스너 하나로 처리하므로(아래 참고) 여기선 매번 새로 안 걸어도 된다.
+// .chat-answer에 white-space:pre-wrap이 걸려있어서, 이 템플릿을 여러 줄로 들여써서 만들면 그
+// 들여쓰기/개행이 그대로 화면에 빈 줄로 보이고 버튼도 엉뚱한 줄로 밀려난다 — 한 줄로 이어서 만든다.
 function renderQueuedTurnsHtml(leadId) {
   const list = pendingChatTurns.get(leadId) || [];
+  const now = Date.now();
   return list.map(item => {
+    const isStuck = item.kind === 'in-flight' && typeof item.createdAt === 'number' && (now - item.createdAt) > IN_FLIGHT_STUCK_MS;
     const statusText = item.kind === 'queued'
       ? '팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.'
-      : '응답을 기다리는 중...';
-    const cancelBtnHtml = item.kind === 'queued'
+      : (isStuck ? '⚠️ 응답이 오래 걸리고 있습니다 — 먹통일 수 있습니다.' : '응답을 기다리는 중...');
+    const actionBtnHtml = item.kind === 'queued'
       ? ` <button class="cancel-queued-btn" data-cancel-queued="${escapeHtml(item.id)}" data-cancel-lead="${escapeHtml(leadId)}">취소</button>`
-      : '';
-    return `<div class="chat-turn"><div class="chat-prompt">▸ ${escapeHtml(item.message)}</div><div class="chat-answer chat-pending">${statusText}${cancelBtnHtml}</div></div>`;
+      : (isStuck ? ` <button class="cancel-queued-btn" data-retry-stuck="${escapeHtml(item.id)}" data-retry-lead="${escapeHtml(leadId)}">재시도</button> <button class="cancel-queued-btn" data-delete-stuck="${escapeHtml(item.id)}" data-delete-lead="${escapeHtml(leadId)}">삭제</button>` : '');
+    return `<div class="chat-turn"><div class="chat-prompt">▸ ${escapeHtml(item.message)}</div><div class="chat-answer chat-pending">${statusText}${actionBtnHtml}</div></div>`;
   }).join('');
 }
 
@@ -905,6 +937,26 @@ function hasActiveSelectionInChatTranscript() {
 // 통째로 다시 그리므로, 다른 곳(leadMembersChipsEl/fileListContentEl)과 같은 패턴으로 위임 리스너
 // 하나만 걸어둔다.
 chatTranscriptEl.addEventListener('click', async e => {
+  const deleteStuckBtn = e.target.closest('[data-delete-stuck]');
+  if (deleteStuckBtn) {
+    unstickInFlightTurn(deleteStuckBtn.dataset.deleteLead, deleteStuckBtn.dataset.deleteStuck);
+    await renderChat();
+    return;
+  }
+
+  const retryStuckBtn = e.target.closest('[data-retry-stuck]');
+  if (retryStuckBtn) {
+    const leadId = retryStuckBtn.dataset.retryLead;
+    const itemId = retryStuckBtn.dataset.retryStuck;
+    // 먹통 항목을 지우기 전에 원문 메시지를 먼저 챙겨둔다 — unstickInFlightTurn이 pendingChatTurns에서
+    // 지워버리면 더 이상 꺼내올 수 없다.
+    const item = (pendingChatTurns.get(leadId) || []).find(i => i.id === itemId);
+    unstickInFlightTurn(leadId, itemId);
+    await renderChat();
+    if (item) await sendMessageToLead(leadId, item.message);
+    return;
+  }
+
   const btn = e.target.closest('[data-cancel-queued]');
   if (!btn) return;
   const leadId = btn.dataset.cancelLead;
@@ -1001,6 +1053,14 @@ async function sendChatMessage() {
   const leadId = selectedLeadId;
   const message = chatInputEl.value.trim();
   chatInputEl.value = '';
+  await sendMessageToLead(leadId, message);
+}
+
+// sendChatMessage(입력창+선택된 팀장 기준)와 "먹통" 재시도 버튼(임의의 leadId+원문 메시지 기준)이
+// 공유하는 실제 전송 로직. leadId는 호출 시점에 selectedLeadId와 다를 수 있으므로(재시도는 사용자가
+// 다른 팀장 화면을 보고 있는 동안에도 누를 수 있다) chatSendBtn 라벨 갱신처럼 "현재 보이는 화면"에만
+// 영향을 줘야 하는 부분은 매번 selectedLeadId와 비교해서 가드한다.
+async function sendMessageToLead(leadId, message) {
   busyLeadIds.add(leadId);
   updateBusyUI();
 
@@ -1010,17 +1070,20 @@ async function sendChatMessage() {
   // kind를 'queued'로 바꾼다. 이렇게 하면 즉시 전송 건도 refreshBoardNow()가 renderChat()으로
   // 화면을 서버 트랜스크립트로 통째로 다시 그려도(아직 이 턴이 없으니) 계속 보인다 — 예전엔
   // optimisticTurn을 DOM에 직접 얹기만 해서, 그 직후 refreshBoardNow()가 화면을 덮어쓰며 이
-  // 메시지가 잠깐 사라졌다 나중에 다시 뜨는 것처럼 보이는 버그가 있었다.
+  // 메시지가 잠깐 사라졌다 나중에 다시 뜨는 것처럼 보이는 버그가 있었다. createdAt은
+  // renderQueuedTurnsHtml의 먹통(stuck) 판정 기준선이다.
   const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const list = pendingChatTurns.get(leadId) || [];
-  list.push({ id: localId, message, kind: 'in-flight' });
+  list.push({ id: localId, message, kind: 'in-flight', createdAt: Date.now() });
   pendingChatTurns.set(leadId, list);
   renderChat();
 
   // 버튼이 disabled로 회색이 되는 것만으로는(updateBusyUI) "전송 중"인지 "다른 이유로 잠김"인지
   // 구분이 잘 안 된다는 피드백이 있어서, 전송 자체가 진행 중인 동안엔 버튼 라벨도 짧게 바꿔준다.
-  const originalSendLabel = chatSendBtn.textContent;
-  chatSendBtn.textContent = '전송 중...';
+  // 지금 화면에 보이는 팀장이 이 leadId일 때만 바꾼다 — 다른 팀장으로 보낸 "먹통 재시도"가 지금
+  // 보고 있는 화면의 버튼 라벨을 엉뚱하게 바꿔서는 안 된다.
+  const affectsSendBtn = selectedLeadId === leadId;
+  if (affectsSendBtn) chatSendBtn.textContent = '전송 중...';
 
   try {
     const result = await window.api.sendToLead(leadId, message);
@@ -1071,7 +1134,7 @@ async function sendChatMessage() {
     await renderChat(); // pendingChatTurns에서 지운 in-flight 항목을 화면에서도 지운다
     chatTranscriptEl.insertAdjacentHTML('beforeend', `<p style="color:#f14c4c">이어하기 중 오류가 발생했습니다: ${escapeHtml(errMsg(err))}</p>`);
   } finally {
-    chatSendBtn.textContent = originalSendLabel;
+    if (affectsSendBtn) chatSendBtn.textContent = chatSendBtnDefaultLabel;
     busyLeadIds.delete(leadId);
     updateBusyUI();
   }
