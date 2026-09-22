@@ -95,6 +95,12 @@ const chatSendBtn = document.getElementById('chat-send-btn');
 // 잘못 캡처해서, 나중에 되돌릴 때 "전송 중..."인 채로 영영 굳어버린다 — 페이지 로드 시 한 번만
 // 고정해둔 진짜 원본 라벨을 쓴다.
 const chatSendBtnDefaultLabel = chatSendBtn.textContent;
+const chatFindBarEl = document.getElementById('chat-find-bar');
+const chatFindInputEl = document.getElementById('chat-find-input');
+const chatFindStatusEl = document.getElementById('chat-find-status');
+const chatFindPrevBtn = document.getElementById('chat-find-prev-btn');
+const chatFindNextBtn = document.getElementById('chat-find-next-btn');
+const chatFindCloseBtn = document.getElementById('chat-find-close-btn');
 const restartLeadBtn = document.getElementById('restart-lead-btn');
 const restartLeadPanelEl = document.getElementById('restart-lead-panel');
 const restartInstructionEl = document.getElementById('restart-instruction');
@@ -908,6 +914,9 @@ async function renderChat() {
     `).join('') + queuedTurnHtml + busyBanner + pendingChoiceHtml;
   }
   if (wasNearBottom) chatTranscriptEl.scrollTop = chatTranscriptEl.scrollHeight;
+  // innerHTML을 방금 통째로 다시 그려서 이전 하이라이트(<mark>)가 다 사라졌다 — 찾기가 활성 상태면
+  // 같은 검색어로 다시 표시해준다(스크롤은 옮기지 않음, refreshChatFindMarks 주석 참고).
+  if (chatFindState.query) refreshChatFindMarks();
   updateBusyUI();
 }
 
@@ -932,6 +941,132 @@ function hasActiveSelectionInChatTranscript() {
   const sel = window.getSelection();
   return !!sel && !sel.isCollapsed && chatTranscriptEl.contains(sel.anchorNode);
 }
+
+// Ctrl+F로 채팅 전사(chatTranscriptEl) 안에서 단어를 찾는 기능. chatTranscriptEl은 3초 폴링마다
+// (renderChat) innerHTML을 통째로 다시 그리므로, 하이라이트용 <mark>도 그때마다 사라진다 —
+// renderChat이 화면을 새로 그린 직후 항상 refreshChatFindMarks()를 다시 불러서 같은 검색어로
+// 재적용한다. 다만 그 주기적 재적용에서는 스크롤을 옮기지 않는다(스크롤은 사용자가 검색어를 치거나
+// 이전/다음을 눌렀을 때만) — 안 그러면 3초마다 사용자가 읽고 있던 위치에서 현재 매치 위치로 화면이
+// 강제로 튀는 불편한 경험이 된다.
+const chatFindState = { query: '', matches: [], currentIndex: 0 };
+
+function clearChatFindHighlights() {
+  chatTranscriptEl.querySelectorAll('mark.find-match').forEach(mark => {
+    const parent = mark.parentNode;
+    if (!parent) return;
+    parent.replaceChild(document.createTextNode(mark.textContent), mark);
+    parent.normalize();
+  });
+}
+
+function refreshChatFindMarks() {
+  clearChatFindHighlights();
+  chatFindState.matches = [];
+  const query = chatFindState.query.trim();
+  if (!query) {
+    chatFindStatusEl.textContent = '';
+    return;
+  }
+  const lowerQuery = query.toLowerCase();
+  // 매치를 찾는 동안 DOM을 바로 바꾸면(교체된 새 텍스트 노드까지 같이 순회 대상이 되는 등) 트리
+  // 순회가 꼬일 수 있어서, 먼저 대상 텍스트 노드를 전부 모아두고 순회가 끝난 뒤에만 교체한다.
+  const walker = document.createTreeWalker(chatTranscriptEl, NodeFilter.SHOW_TEXT, null);
+  const textNodes = [];
+  let node;
+  while ((node = walker.nextNode())) textNodes.push(node);
+
+  for (const textNode of textNodes) {
+    const text = textNode.textContent;
+    const lowerText = text.toLowerCase();
+    if (!lowerText.includes(lowerQuery)) continue;
+    const parent = textNode.parentNode;
+    if (!parent) continue;
+    const frag = document.createDocumentFragment();
+    let lastEnd = 0;
+    let idx;
+    while ((idx = lowerText.indexOf(lowerQuery, lastEnd)) !== -1) {
+      if (idx > lastEnd) frag.appendChild(document.createTextNode(text.slice(lastEnd, idx)));
+      const mark = document.createElement('mark');
+      mark.className = 'find-match';
+      mark.textContent = text.slice(idx, idx + query.length);
+      frag.appendChild(mark);
+      chatFindState.matches.push(mark);
+      lastEnd = idx + query.length;
+    }
+    if (lastEnd < text.length) frag.appendChild(document.createTextNode(text.slice(lastEnd)));
+    parent.replaceChild(frag, textNode);
+  }
+
+  if (chatFindState.matches.length === 0) chatFindState.currentIndex = 0;
+  else if (chatFindState.currentIndex >= chatFindState.matches.length) chatFindState.currentIndex = chatFindState.matches.length - 1;
+  updateChatFindCurrentClassAndStatus();
+}
+
+function updateChatFindCurrentClassAndStatus() {
+  chatFindState.matches.forEach((m, i) => m.classList.toggle('find-match-current', i === chatFindState.currentIndex));
+  chatFindStatusEl.textContent = chatFindState.matches.length
+    ? `${chatFindState.currentIndex + 1}/${chatFindState.matches.length}`
+    : (chatFindState.query ? '0/0' : '');
+}
+
+function scrollToCurrentChatFindMatch() {
+  const current = chatFindState.matches[chatFindState.currentIndex];
+  if (current) current.scrollIntoView({ block: 'center' });
+}
+
+function moveChatFindMatch(delta) {
+  if (!chatFindState.matches.length) return;
+  chatFindState.currentIndex = (chatFindState.currentIndex + delta + chatFindState.matches.length) % chatFindState.matches.length;
+  updateChatFindCurrentClassAndStatus();
+  scrollToCurrentChatFindMatch();
+}
+
+function openChatFindBar() {
+  chatFindBarEl.hidden = false;
+  chatFindInputEl.focus();
+  chatFindInputEl.select();
+}
+
+function closeChatFindBar() {
+  chatFindBarEl.hidden = true;
+  chatFindState.query = '';
+  chatFindState.currentIndex = 0;
+  clearChatFindHighlights();
+  chatFindState.matches = [];
+  chatFindStatusEl.textContent = '';
+}
+
+// 다른 입력창(chat-input 등)에 포커스가 있어도 Ctrl+F는 채팅 찾기로 가로챈다 — 브라우저 기본
+// 페이지 찾기는 이 앱(Electron)엔 별 의미가 없고, 사용자가 원하는 건 지금 열려있는 대화 내용
+// 검색이다. 채팅 패널 자체가 안 열려있으면(팀장 미선택 등) 가로채지 않는다.
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && !leadChatPanelEl.hidden) {
+    e.preventDefault();
+    openChatFindBar();
+  } else if (e.key === 'Escape' && !chatFindBarEl.hidden) {
+    closeChatFindBar();
+  }
+});
+
+chatFindInputEl.addEventListener('input', () => {
+  chatFindState.query = chatFindInputEl.value;
+  chatFindState.currentIndex = 0;
+  refreshChatFindMarks();
+  scrollToCurrentChatFindMatch();
+});
+
+chatFindInputEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    moveChatFindMatch(e.shiftKey ? -1 : 1);
+  } else if (e.key === 'Escape') {
+    closeChatFindBar();
+  }
+});
+
+chatFindPrevBtn.addEventListener('click', () => moveChatFindMatch(-1));
+chatFindNextBtn.addEventListener('click', () => moveChatFindMatch(1));
+chatFindCloseBtn.addEventListener('click', closeChatFindBar);
 
 // 대기열 항목의 "취소" 버튼 — chatTranscriptEl이 폴링마다(그리고 renderChat 호출마다) innerHTML을
 // 통째로 다시 그리므로, 다른 곳(leadMembersChipsEl/fileListContentEl)과 같은 패턴으로 위임 리스너
