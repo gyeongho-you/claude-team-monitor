@@ -15,8 +15,8 @@
 // β 리뷰에서 나온 치명적 버그 수정: queue_lead_operation은 같은 internalId끼리만 직렬화하므로,
 // 서로 다른 팀장을 향한 resume이 거의 동시에 leads.json의 "쓰기 직전 재조회"(E-1 패턴) 지점에
 // 도달하면 한쪽의 저장이 다른 쪽에 덮어써지는 lost update가 실측 재현됐다(5회 중 4회,
-// TAURI_NOTICE_QUEUE_DESIGN.md §3-1이 예견한 문제). resume_lead/background_resume_healing_job/
-// issue_mcp_token 전부 leads.json 쓰기를 session_registry::with_leads_lock(전역
+// TAURI_NOTICE_QUEUE_DESIGN.md §3-1이 예견한 문제). resume_lead/background_resume_healing_job
+// 전부 leads.json 쓰기를 session_registry::with_leads_lock(전역
 // tokio::sync::Mutex 하나로 load+mutate+save를 원자화)으로 옮겨서 고쳤다 — leads.json에 쓰는
 // 지점을 새로 추가할 때는 반드시 이 헬퍼를 거쳐야 하고, load_leads()/save_leads()를 직접 짝지어
 // 쓰면 안 된다.
@@ -701,31 +701,6 @@ pub async fn resume_lead_command(internal_id: String, message: String) -> Option
 }
 
 // ---------------------------------------------------------------------------------------------
-// issueMcpToken(main.ts) — 스폰 전에 이미 internalId를 아는 경로(restartLead)에서 기존 레코드에
-// 새 토큰을 즉시 발급해 저장한다. resumeLead는 이 함수를 쓰지 않는다 — --resume에 mcp-config를
-// 다시 싣지 않으므로(A-1) 새 토큰을 만들어도 전달할 방법이 없고, 마지막으로 실제 --mcp-config를
-// 실어 떴을 때(launchTeamLead/restartLead) 발급된 값이 세션 자신의 저장된 옵션으로 계속 유효하다
-// (resume_lead 위 주석 참고). 서브청크 γ(lead_lifecycle.rs)의 restart_lead가 이 함수의 첫 실제
-// 호출부다 — α의 queue_lead_operation이 β를 기다렸던 것과 같은 패턴이라 β 시점엔 dead_code였다.
-// ---------------------------------------------------------------------------------------------
-
-fn apply_mcp_token(leads: &mut [LeadRecord], internal_id: &str, token: &str) -> bool {
-    let Some(rec) = leads.iter_mut().find(|l| l.internal_id.as_deref() == Some(internal_id)) else {
-        return false;
-    };
-    rec.mcp_token = Some(token.to_string());
-    true
-}
-
-/// issueMcpToken(main.ts)과 동일 — 치명적 버그 수정(β 리뷰)으로 leads.json 쓰기를
-/// with_leads_lock 안에서 하게 되면서 async fn이 됐다.
-pub async fn issue_mcp_token(internal_id: &str) -> String {
-    let token = uuid::Uuid::new_v4().to_string();
-    with_leads_lock(|leads| (apply_mcp_token(leads, internal_id, &token), ())).await;
-    token
-}
-
-// ---------------------------------------------------------------------------------------------
 // stop-background-session(main.ts:2507-2510) IPC — 서브청크 δ가 소비하는 IPC 목록에 포함돼
 // 있지만, 알림 큐와는 무관하고 이 파일의 stop_session/session_registry.rs의
 // get_all_background_sessions를 그대로 호출만 하는 얇은 IPC 껍데기다.
@@ -755,7 +730,6 @@ mod tests {
             internal_id: Some(internal_id.to_string()),
             auto_stall_nudge: None,
             secret: None,
-            mcp_token: None,
         }
     }
 
@@ -941,19 +915,10 @@ mod tests {
         assert!(!updated);
     }
 
-    #[test]
-    fn apply_mcp_token_sets_token_on_matching_record_only() {
-        let mut leads = vec![fake_lead("internal-x", "lead1", "session-x", "C:\\fake"), fake_lead("internal-y", "lead2", "session-y", "C:\\fake")];
-        assert!(apply_mcp_token(&mut leads, "internal-x", "token-123"));
-        assert_eq!(leads[0].mcp_token.as_deref(), Some("token-123"));
-        assert_eq!(leads[1].mcp_token, None);
-        assert!(!apply_mcp_token(&mut leads, "internal-missing", "token-456"));
-    }
-
     // "먼저 들어온 resume_lead_command 호출이 큐 직렬화를 실제로 타는지"까지 확인하는 통합
     // 테스트는 leads.json 실제 파일 I/O + queue_lead_operation을 함께 검증해야 해서 무겁다 —
     // concurrency.rs의 queued_operations_on_same_key_run_strictly_in_order가 큐 자체의 직렬화를
-    // 이미 검증하고, 위 apply_resume_session_update/apply_mcp_token 테스트가 leads.json 쓰기
+    // 이미 검증하고, 위 apply_resume_session_update 테스트가 leads.json 쓰기
     // 판정 로직을 디스크 I/O 없이 검증하므로 이 둘을 합치는 실제 파일 기반 통합 테스트는 중복이라
     // 생략한다(설계 문서 §2-β "독립적 검증 가능성" — 계층별로 이미 커버됨). 다만 "서로 다른
     // internalId끼리(=서로 다른 큐 액터끼리) leads.json에 동시에 쓰면 어떻게 되는지"는 큐 직렬화

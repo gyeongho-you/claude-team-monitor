@@ -92,8 +92,8 @@ pub fn prompts_dir() -> PathBuf {
 
 // Electron의 app.getPath('userData') 기본값은 path.join(appData, app.getName())이고, app.getName()은
 // package.json의 "name"(=claude-team-monitor)을 그대로 쓴다(main.ts에 app.setName 호출 없음을
-// 확인함) — 실제로 %APPDATA%\claude-team-monitor\leads.json에 데이터가 있는 것도 확인했다. 이
-// 앱(Tauri)도 같은 경로를 읽어야 Electron 시절에 등록된 팀장/팀원이 그대로 보인다.
+// 확인함) — favorites.json/settings.json 등은 여전히 이 경로 밑에 둔다(leads.json만 예외, 아래
+// leads_path()/legacy_leads_path() 참고).
 pub fn app_data_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
@@ -115,7 +115,20 @@ pub fn app_data_dir() -> PathBuf {
     }
 }
 
+// 예전엔 app_data_dir()(Electron의 app.getPath('userData')와 같은 값) 밑에 있었다 — 그러다 보니
+// 이 경로를 Electron/Tauri 앱이 실행 중이어야만 알 수 있어서, 팀원 생성 MCP 서버(외부 claude
+// 프로세스, 앱과 별개)는 --mcp-config env로 매번 전달받아야 했다. 앱 없이 터미널+스킬+MCP만으로
+// 팀장을 등록/운영할 수 있게 하려면 MCP 서버가 이 경로를 스스로 계산할 수 있어야 해서,
+// members_dir()/prompts_dir()과 같은 CLAUDE_HOME 컨벤션으로 옮겼다(src/lib/teamMemberPaths.js의
+// LEADS_PATH와 정확히 같은 경로여야 한다). 기존 사용자의 구 경로 데이터는
+// migrate_legacy_leads_path_if_needed()가 최초 1회 이전한다.
 pub fn leads_path() -> PathBuf {
+    claude_home().join("claude-team-monitor").join("leads.json")
+}
+
+// leads.json의 구 위치(app_data_dir() 밑, Electron 시절 경로) — 1회성 마이그레이션 전용으로만
+// 쓴다(session_registry.rs의 migrate_legacy_leads_path_if_needed 참고).
+pub fn legacy_leads_path() -> PathBuf {
     app_data_dir().join("leads.json")
 }
 

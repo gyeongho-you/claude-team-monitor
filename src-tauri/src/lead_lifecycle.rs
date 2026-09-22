@@ -1,7 +1,7 @@
 // 서브청크 γ(TAURI_NOTICE_QUEUE_DESIGN.md §2) — restartLead/endLeadWork/launchTeamLead/launchMember/
 // adoptLead/forkSessionAsLead(main.ts)와 그 공통 헬퍼(installTeamLeadSkill/approvedMemberBriefing/
 // buildMemberSpawnCliArgs/SECRET_MODE_CLI_ARGS)의 포팅. 전부 β(resume.rs)가 만든
-// run_claude_bg/stop_session/find_session_id_by_short_id/issue_mcp_token/resume_lead와
+// run_claude_bg/stop_session/find_session_id_by_short_id/resume_lead와
 // α(concurrency.rs)의 queue_lead_operation, session_registry.rs의 with_leads_lock을 그대로
 // 재사용하는 "다른 spawn 경로들"이다 — 이 파일 자체는 새로운 동시성 primitive를 만들지 않는다.
 //
@@ -24,8 +24,8 @@ use crate::claude_readiness::{check_directory_claude_ready, claude_not_ready_mes
 use crate::concurrency::queue_lead_operation;
 use crate::logging::log_critical;
 use crate::long_prompt_guard::resolve_long_prompt;
-use crate::paths::{leads_path, member_templates_path, members_dir, requests_dir, skill_dest_dir, skill_src_path, team_member_server_js_path};
-use crate::resume::{find_session_id_by_short_id, issue_mcp_token, resume_lead, run_claude_bg, stop_session};
+use crate::paths::{member_templates_path, members_dir, requests_dir, skill_dest_dir, skill_src_path, team_member_server_js_path};
+use crate::resume::{find_session_id_by_short_id, resume_lead, run_claude_bg, stop_session};
 use crate::session_registry::{load_leads, load_members, register_member, with_leads_lock, LeadRecord, MemberRecord};
 use crate::timing::{now_ms, RUN_CLAUDE_TIMEOUT_MS};
 use serde::{Deserialize, Serialize};
@@ -134,22 +134,32 @@ pub fn approved_member_briefing(caller_dir: &str) -> (Vec<String>, String) {
 
 const MEMBER_SPAWN_MCP_SERVER_NAME: &str = "team-monitor";
 const MEMBER_SPAWN_TOOL_NAME: &str = "mcp__team-monitor__spawn_team_member";
+// 이 앱을 거치지 않고 터미널+스킬만으로 시작한 세션도 스스로를 팀장으로 등록할 수 있는 툴 —
+// 이 앱이 띄운 세션은 이미 등록된 채로 시작하니 보통 쓸 일이 없지만, 혹시 모를 상황(등록이
+// 누락된 채로 남는 경우 등)을 위해 같이 화이트리스트해둔다(main.ts의 buildMemberSpawnCliArgs와
+// 동일한 이유).
+const MEMBER_REGISTER_TOOL_NAME: &str = "mcp__team-monitor__register_as_lead";
 
+// 예전엔 이 함수가 스폰 직전에 발급한 토큰(mcp_token)을 env로 실어 보냈다 — 이제 MCP 서버가
+// process.ppid로 자기 자신을 identify하므로(teamMemberServer.ts의 resolveCallingLead 참고) 더
+// 이상 토큰도, leads.json 경로를 env로 넘겨줄 필요도 없다(MCP 서버가 lib/teamMemberPaths에서
+// 직접 계산한다 — paths.rs의 leads_path()와 정확히 같은 경로).
 /// buildMemberSpawnCliArgs(main.ts)와 동일.
-pub fn build_member_spawn_cli_args(mcp_token: &str) -> Vec<String> {
+pub fn build_member_spawn_cli_args() -> Vec<String> {
     let config = serde_json::json!({
         "mcpServers": {
             MEMBER_SPAWN_MCP_SERVER_NAME: {
                 "command": "node",
                 "args": [team_member_server_js_path().to_string_lossy()],
-                "env": {
-                    "TEAM_MONITOR_LEAD_TOKEN": mcp_token,
-                    "TEAM_MONITOR_LEADS_PATH": leads_path().to_string_lossy(),
-                }
             }
         }
     });
-    vec!["--mcp-config".to_string(), config.to_string(), "--allowedTools".to_string(), MEMBER_SPAWN_TOOL_NAME.to_string()]
+    vec![
+        "--mcp-config".to_string(),
+        config.to_string(),
+        "--allowedTools".to_string(),
+        format!("{MEMBER_SPAWN_TOOL_NAME},{MEMBER_REGISTER_TOOL_NAME}"),
+    ]
 }
 
 /// SECRET_MODE_CLI_ARGS(main.ts)와 동일.
@@ -157,15 +167,15 @@ pub const SECRET_MODE_CLI_ARGS: [&str; 2] = ["--setting-sources", "project,local
 
 /// A-1 타입 분리 — 이 파일 맨 위 주석 참고. 완전히 새 세션을 스폰하는 이 청크의 함수들은 전부 이
 /// 타입을 거쳐서만 run_claude_bg에 넘길 flags를 만든다.
+#[derive(Default)]
 pub struct FreshLaunchArgs {
-    mcp_token: String,
     secret: bool,
     resume_session_id: Option<String>,
 }
 
 impl FreshLaunchArgs {
-    pub fn new(mcp_token: impl Into<String>) -> Self {
-        Self { mcp_token: mcp_token.into(), secret: false, resume_session_id: None }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn secret(mut self, secret: bool) -> Self {
@@ -185,7 +195,7 @@ impl FreshLaunchArgs {
 
     pub fn into_flags(self) -> Vec<String> {
         let mut flags = vec!["--bg".to_string()];
-        flags.extend(build_member_spawn_cli_args(&self.mcp_token));
+        flags.extend(build_member_spawn_cli_args());
         if self.secret {
             flags.extend(SECRET_MODE_CLI_ARGS.iter().map(|s| s.to_string()));
         }
@@ -250,11 +260,9 @@ pub async fn restart_lead(internal_id: String, instruction: String) -> RestartLe
     let (approved_members, approved_text) = approved_member_briefing(&current.target_dir);
     let prompt = format!("/team-lead {instruction}\n\n{approved_text}");
 
-    // issueMcpToken(resume.rs, β가 dead_code로 남겨둔 함수)의 첫 실제 호출부 — 재시작은 완전히
-    // 새 세션(--resume이 아님)이라 SECRET_MODE_CLI_ARGS도 이 시점에 다시 실어야 한다(resumeLead와
-    // 정반대 요구사항, A-1 참고).
-    let mcp_token = issue_mcp_token(&internal_id).await;
-    let flags = FreshLaunchArgs::new(mcp_token).secret(current.secret.unwrap_or(false)).into_flags();
+    // 재시작은 완전히 새 세션(--resume이 아님)이라 SECRET_MODE_CLI_ARGS도 이 시점에 다시 실어야
+    // 한다(resumeLead와 정반대 요구사항, A-1 참고).
+    let flags = FreshLaunchArgs::new().secret(current.secret.unwrap_or(false)).into_flags();
     let Some(new_id) = run_claude_bg(flags, resolve_long_prompt(&prompt), current.target_dir.clone()).await else {
         return RestartLeadOutcome::Failure {
             error: format!(
@@ -410,10 +418,7 @@ pub async fn launch_team_lead(target_dir: String, instruction: String, secret: b
     let (approved_members, approved_text) = approved_member_briefing(&target_dir);
     let prompt = format!("/team-lead {instruction}\n\n{approved_text}");
 
-    // 아직 leads.json 레코드가 없어서(브랜드 뉴 팀장) issue_mcp_token을 못 쓴다 — 스폰 전에 직접
-    // 발급해서 --mcp-config에 실은 뒤, 스폰 성공 후 같은 값을 새 레코드에 그대로 저장한다.
-    let mcp_token = uuid::Uuid::new_v4().to_string();
-    let flags = FreshLaunchArgs::new(mcp_token.clone()).secret(secret).into_flags();
+    let flags = FreshLaunchArgs::new().secret(secret).into_flags();
     let id = run_claude_bg(flags, resolve_long_prompt(&prompt), target_dir.clone()).await?;
 
     let session_id = find_session_id_by_short_id(&id).await.unwrap_or_else(|| id.clone());
@@ -429,7 +434,6 @@ pub async fn launch_team_lead(target_dir: String, instruction: String, secret: b
         internal_id: Some(uuid::Uuid::new_v4().to_string()),
         auto_stall_nudge: None,
         secret: Some(secret),
-        mcp_token: Some(mcp_token),
     };
     with_leads_lock(move |leads| {
         leads.push(record);
@@ -468,11 +472,7 @@ pub async fn adopt_lead(short_id: String) -> Option<String> {
         ai_title: None,
         internal_id: Some(uuid::Uuid::new_v4().to_string()),
         auto_stall_nudge: None,
-        // 이미 떠 있는 프로세스를 등록만 하는 경로라 --mcp-config를 지금 붙일 방법이 없다 — 여기서
-        // 발급해두면 다음 stop→resume(채팅 전송 등) 때부터 resumeLead가 이 값을 이어받아 팀원
-        // 생성 툴을 쓸 수 있게 된다.
         secret: None,
-        mcp_token: Some(uuid::Uuid::new_v4().to_string()),
     };
     with_leads_lock(move |leads| {
         leads.push(record);
@@ -509,10 +509,7 @@ pub async fn fork_session_as_lead(session_id: String, cwd: String) -> Option<Str
         return queue_lead_operation(&queue_key, move || resume_lead(internal_id, message)).await;
     }
 
-    // 아직 leads.json 레코드가 없어서(브랜드 뉴 팀장) issue_mcp_token을 못 쓴다 — launchTeamLead와
-    // 같은 이유로 스폰 전에 직접 발급한다.
-    let mcp_token = uuid::Uuid::new_v4().to_string();
-    let flags = FreshLaunchArgs::new(mcp_token.clone()).resume_session_id(session_id).into_flags();
+    let flags = FreshLaunchArgs::new().resume_session_id(session_id).into_flags();
     let id = run_claude_bg(
         flags,
         "지금 이 대화를 Claude Team Monitor로 가져왔습니다(별도 복사본, 원본 세션과는 별개). 계속 진행하세요.".to_string(),
@@ -538,7 +535,6 @@ pub async fn fork_session_as_lead(session_id: String, cwd: String) -> Option<Str
         internal_id: Some(uuid::Uuid::new_v4().to_string()),
         auto_stall_nudge: None,
         secret: None,
-        mcp_token: Some(mcp_token),
     };
     with_leads_lock(move |latest_leads| {
         latest_leads.push(record);
@@ -659,7 +655,7 @@ mod tests {
 
     #[test]
     fn fresh_launch_args_always_include_bg_and_member_spawn_mcp_config() {
-        let flags = FreshLaunchArgs::new("token-1").into_flags();
+        let flags = FreshLaunchArgs::new().into_flags();
         assert_eq!(flags[0], "--bg");
         assert!(flags.contains(&"--mcp-config".to_string()));
         assert!(flags.contains(&"--allowedTools".to_string()));
@@ -667,20 +663,29 @@ mod tests {
     }
 
     #[test]
+    fn fresh_launch_args_allows_both_spawn_and_register_tools() {
+        let flags = FreshLaunchArgs::new().into_flags();
+        let pos = flags.iter().position(|f| f == "--allowedTools").expect("--allowedTools가 있어야 한다");
+        let tools = &flags[pos + 1];
+        assert!(tools.contains("mcp__team-monitor__spawn_team_member"));
+        assert!(tools.contains("mcp__team-monitor__register_as_lead"));
+    }
+
+    #[test]
     fn fresh_launch_args_secret_appends_secret_mode_flags() {
-        let flags = FreshLaunchArgs::new("token-2").secret(true).into_flags();
+        let flags = FreshLaunchArgs::new().secret(true).into_flags();
         assert!(flags.windows(2).any(|w| w == ["--setting-sources", "project,local"]), "flags={flags:?}");
     }
 
     #[test]
     fn fresh_launch_args_without_secret_has_no_secret_mode_flags() {
-        let flags = FreshLaunchArgs::new("token-2b").secret(false).into_flags();
+        let flags = FreshLaunchArgs::new().secret(false).into_flags();
         assert!(!flags.contains(&"--setting-sources".to_string()));
     }
 
     #[test]
     fn fresh_launch_args_resume_session_id_appends_resume_flag_pair_at_the_end() {
-        let flags = FreshLaunchArgs::new("token-3").resume_session_id("session-xyz").into_flags();
+        let flags = FreshLaunchArgs::new().resume_session_id("session-xyz").into_flags();
         let pos = flags.iter().position(|f| f == "--resume").expect("--resume 플래그가 있어야 한다");
         assert_eq!(flags[pos + 1], "session-xyz");
     }
@@ -829,7 +834,6 @@ mod tests {
             internal_id: Some(internal_id.to_string()),
             auto_stall_nudge: None,
             secret: None,
-            mcp_token: None,
         }
     }
 

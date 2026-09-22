@@ -1,6 +1,6 @@
 use crate::agents_json::{fetch_agents_typed, fetch_agents_typed_async, AgentEntry};
 use crate::json_file::write_json_file_atomic;
-use crate::paths::{is_safe_id, leads_path, members_dir};
+use crate::paths::{is_safe_id, leads_path, legacy_leads_path, members_dir};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -36,11 +36,6 @@ pub struct LeadRecord {
     pub auto_stall_nudge: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<bool>,
-    // 팀원 생성 MCP 서버가 "이 프로세스가 어느 팀장인지"를 알아내는 상관값 — issue_mcp_token이
-    // 발급/저장한다(spawn_resume.rs). resumeLead는 --resume에 이 값을 다시 실어 보내지 않으므로
-    // (A-1 방어, resume_spawn_with_retry 주석 참고) resume 경로 자체는 이 필드를 안 건드린다.
-    #[serde(rename = "mcpToken", default, skip_serializing_if = "Option::is_none")]
-    pub mcp_token: Option<String>,
 }
 
 // 서브청크 γ(TAURI_NOTICE_QUEUE_DESIGN.md §2)부터 이 앱이 직접 팀원 등록 파일을 쓰기 시작해서
@@ -76,7 +71,36 @@ pub struct MemberRecord {
 // leads.json 쓰기 경로가 아예 없어서 이 백필을 못 했다 — 이번 β가 save_leads를 처음 추가하면서
 // 함께 챙긴다).
 pub fn load_leads() -> Vec<LeadRecord> {
+    migrate_legacy_leads_path_if_needed();
     load_leads_from(&leads_path())
+}
+
+// leads.json이 app_data_dir() 밑(Electron 시절 경로)에 있던 사용자를 위한 1회성 이전 — 새 경로
+// (paths::leads_path(), ~/.claude/claude-team-monitor/leads.json)에 파일이 아직 없고 구 경로에만
+// 있으면 그대로 복사한다. 새 경로에 이미 파일이 있으면(이미 이전했거나 브랜드 뉴 설치) 절대
+// 덮어쓰지 않는다. 프로세스당 한 번만 시도하면 충분해서 OnceLock으로 막는다.
+fn migrate_legacy_leads_path_if_needed() {
+    static MIGRATED: OnceLock<()> = OnceLock::new();
+    MIGRATED.get_or_init(|| {
+        migrate_legacy_leads_path_at(&leads_path(), &legacy_leads_path());
+    });
+}
+
+// 테스트 가능한 경로 파라미터 버전 — load_leads_from/with_leads_lock_at과 같은 이유로 테스트가
+// production 경로를 건드리지 않고 임시 디렉토리에 대해 그대로 검증할 수 있게 한다.
+fn migrate_legacy_leads_path_at(new_path: &Path, legacy_path: &Path) {
+    if new_path.exists() || !legacy_path.exists() {
+        return;
+    }
+    if let Some(parent) = new_path.parent() {
+        if let Err(e) = fs::create_dir_all(parent) {
+            eprintln!("[migrate_legacy_leads_path] 디렉토리 생성 실패: {e}");
+            return;
+        }
+    }
+    if let Err(e) = fs::copy(legacy_path, new_path) {
+        eprintln!("[migrate_legacy_leads_path] leads.json 이전 실패: {e}");
+    }
 }
 
 // pub(crate) — γ의 E-2 재검증 테스트(lead_lifecycle.rs)가 production leads.json을 건드리지 않고
@@ -120,7 +144,7 @@ pub(crate) fn save_leads_to(path: &Path, leads: &[LeadRecord]) {
 // 패턴으로 leads.json을 저장할 수 있다 — 파일 시스템 레벨의 write는 원자적이어도(writeJsonFileAtomic),
 // 두 read-modify-write "사이클"이 서로 겹치는 것 자체는 막아주지 못해 lost update가 실측으로
 // 재현됐다(리뷰 지적, 5회 중 4회). leads.json을 쓰는 모든 지점(resume_lead/
-// background_resume_healing_job/issue_mcp_token 등, resume.rs)은 반드시 이 락 안에서
+// background_resume_healing_job 등, resume.rs)은 반드시 이 락 안에서
 // load_leads_from~save_leads_to를 수행해야 한다 — 이 함수(with_leads_lock)를 거치지 않고
 // load_leads()/save_leads()를 직접 짝지어 쓰면 이 버그가 그대로 재발한다. 순수 읽기만 하는
 // 호출부(get_all_background_sessions/get_adoptable_sessions/live_rows.rs/stall_watchdog.rs)는
@@ -142,6 +166,7 @@ pub async fn with_leads_lock<F, R>(mutate: F) -> R
 where
     F: FnOnce(&mut Vec<LeadRecord>) -> (bool, R),
 {
+    migrate_legacy_leads_path_if_needed();
     with_leads_lock_at(&leads_path(), leads_lock(), mutate).await
 }
 
@@ -486,7 +511,6 @@ mod tests {
             internal_id: Some(internal_id.to_string()),
             auto_stall_nudge: None,
             secret: None,
-            mcp_token: None,
         }
     }
 
@@ -626,5 +650,56 @@ mod tests {
     async fn get_interactive_sessions_only_returns_interactive_kind() {
         let sessions = get_interactive_sessions_command().await;
         assert!(sessions.iter().all(|a| a.kind == "interactive"));
+    }
+
+    // migrate_legacy_leads_path_at — 위 fake_lead_for_race 테스트들과 같은 이유로 임시 파일에
+    // 대해서만 검증한다(프로덕션 leads_path()/legacy_leads_path()는 절대 건드리지 않는다).
+    fn temp_migration_path(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("claude_team_monitor_test_migrate_{tag}_{}.json", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn migrate_legacy_leads_path_copies_when_legacy_exists_and_new_does_not() {
+        let legacy = temp_migration_path("legacy-src");
+        let new_path = temp_migration_path("new-dst");
+        std::fs::write(&legacy, r#"[{"id":"legacy-lead"}]"#).unwrap();
+        let _ = std::fs::remove_file(&new_path);
+
+        migrate_legacy_leads_path_at(&new_path, &legacy);
+
+        let copied = std::fs::read_to_string(&new_path).unwrap();
+        assert!(copied.contains("legacy-lead"));
+
+        let _ = std::fs::remove_file(&legacy);
+        let _ = std::fs::remove_file(&new_path);
+    }
+
+    #[test]
+    fn migrate_legacy_leads_path_does_not_overwrite_existing_new_file() {
+        let legacy = temp_migration_path("legacy-src2");
+        let new_path = temp_migration_path("new-dst2");
+        std::fs::write(&legacy, r#"[{"id":"legacy-lead"}]"#).unwrap();
+        std::fs::write(&new_path, r#"[{"id":"already-here"}]"#).unwrap();
+
+        migrate_legacy_leads_path_at(&new_path, &legacy);
+
+        let content = std::fs::read_to_string(&new_path).unwrap();
+        assert!(content.contains("already-here"), "이미 존재하는 새 경로 파일을 덮어쓰면 안 된다");
+        assert!(!content.contains("legacy-lead"));
+
+        let _ = std::fs::remove_file(&legacy);
+        let _ = std::fs::remove_file(&new_path);
+    }
+
+    #[test]
+    fn migrate_legacy_leads_path_is_noop_when_neither_file_exists() {
+        let legacy = temp_migration_path("legacy-none");
+        let new_path = temp_migration_path("new-none");
+        let _ = std::fs::remove_file(&legacy);
+        let _ = std::fs::remove_file(&new_path);
+
+        migrate_legacy_leads_path_at(&new_path, &legacy);
+
+        assert!(!new_path.exists());
     }
 }

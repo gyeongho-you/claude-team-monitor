@@ -877,7 +877,6 @@ mod tests {
             internal_id: Some("fake-internal-id".to_string()),
             auto_stall_nudge: None,
             secret: None,
-            mcp_token: None,
         }
     }
 
