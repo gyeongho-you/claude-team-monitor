@@ -22,7 +22,7 @@
 // 쓰면 안 된다.
 
 use crate::agents_json::{fetch_agents_typed_async, fetch_agents_typed_strict};
-use crate::board_state::{state, ResumeRetryStatus};
+use crate::board_state::{migrate_last_known_live_lead_row, state, ResumeRetryStatus};
 use crate::claude_bg_output::{extract_backgrounded_id, extract_started_copy_id};
 use crate::claude_readiness::{check_directory_claude_ready, claude_not_ready_message};
 use crate::concurrency::queue_lead_operation;
@@ -526,12 +526,12 @@ async fn background_resume_healing_job(internal_id: String, current: LeadRecord,
     // 팀장의 resume이 leads.json을 저장해 lost update가 재현된다(TAURI_NOTICE_QUEUE_DESIGN.md
     // §3-1) — still_current 판정 자체도 with_leads_lock 안에서 최신 상태로 다시 해야 한다(락 밖에서
     // 미리 판정해두면 그 판정과 실제 쓰기 사이에도 같은 lost update 창이 남는다).
-    with_leads_lock(|latest_leads| {
+    let updated = with_leads_lock(|latest_leads| {
         let still_current = latest_leads
             .iter()
             .any(|l| l.internal_id.as_deref() == Some(internal_id.as_str()) && l.id == expected_id);
         if !still_current {
-            return (false, ());
+            return (false, false);
         }
         let updated = apply_resume_session_update(
             latest_leads,
@@ -541,9 +541,15 @@ async fn background_resume_healing_job(internal_id: String, current: LeadRecord,
             &healed_id,
             new_session_id.as_deref(),
         );
-        (updated, ())
+        (updated, updated)
     })
     .await;
+    // leads.json에 실제로 새 id가 반영됐을 때만 캐시도 옮긴다 — still_current가 false였던
+    // 경우(이미 다른 작업이 이 레코드를 대체함)까지 옮기면 실제로 안 바뀐 id로 캐시를 잘못 옮기게
+    // 된다.
+    if updated {
+        migrate_last_known_live_lead_row(&expected_id, &healed_id);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -660,11 +666,16 @@ pub async fn resume_lead(internal_id: String, message: String) -> Option<String>
     // 둘 다 load_leads()로 최신 배열을 각자 읽어와 자기 레코드만 고친 뒤 저장한다 — 그 사이 다른
     // 쪽의 저장이 통째로 덮어써질 수 있다(실측 재현, 5회 중 4회). with_leads_lock으로 이
     // read-modify-write 전체를 원자적으로 만든다.
-    with_leads_lock(|leads| {
+    let updated = with_leads_lock(|leads| {
         let updated = apply_resume_session_update(leads, &internal_id, &current.id, &current.session_id, &new_id, new_session_id.as_deref());
-        (updated, ())
+        (updated, updated)
     })
     .await;
+    // resume.rs 위쪽 background_resume_healing_job의 동일 이유 주석 참고 — leads.json에 실제로
+    // 반영됐을 때만 last_known_live_lead_row 캐시도 새 id로 옮긴다.
+    if updated {
+        migrate_last_known_live_lead_row(&current.id, &new_id);
+    }
     Some(new_id)
 }
 

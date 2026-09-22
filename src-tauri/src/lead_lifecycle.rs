@@ -19,6 +19,7 @@
 // β를 다시 여는 작업이라 이번 커밋 범위에는 포함하지 않았다(커밋 메시지에도 명시).
 
 use crate::agents_json::fetch_agents_typed_async;
+use crate::board_state::migrate_last_known_live_lead_row;
 use crate::claude_readiness::{check_directory_claude_ready, claude_not_ready_message};
 use crate::concurrency::queue_lead_operation;
 use crate::logging::log_critical;
@@ -294,6 +295,11 @@ pub async fn restart_lead(internal_id: String, instruction: String) -> RestartLe
         for m in migrate_members_lead_id(target_members, &old_id, &new_id) {
             register_member(&m);
         }
+        // 오늘 Electron main.ts에서 실사용 재현·수정된 것과 같은 사고(board_state.rs의
+        // migrate_last_known_live_lead_row 주석 참고) — restartLead도 resumeLead와 마찬가지로
+        // 짧은 id를 바꾸는 자리에서 캐시를 같이 옮겨야 agents 스냅샷이 새 id를 따라잡을 때까지의
+        // 틈에 화면에서 이 팀장이 사라지는 걸 막을 수 있다.
+        migrate_last_known_live_lead_row(&old_id, &new_id);
     }
 
     RestartLeadOutcome::Success { id: new_id }

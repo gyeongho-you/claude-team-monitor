@@ -166,6 +166,37 @@ pub fn load_members() -> Vec<MemberRecord> {
     load_members_from(&members_dir())
 }
 
+// repairLooseBackslashes(main.ts) 포팅 — J-1. 팀원 등록 파일은 팀장(LLM)이 직접 손으로 써서
+// 만든다 — Windows 경로(C:\Users\...)를 JSON 이스케이프 없이 그냥 넣는 실수가 실제로 나왔다
+// (\U, \P 등은 유효한 JSON 이스케이프가 아니라 파싱 자체가 깨짐). 이러면 등록이 통째로
+// 무시돼서 팀원이 화면에 아예 안 뜨는 문제로 이어진다. main.ts는 파싱 실패 시 유효한 JSON
+// 이스케이프(\" \\ \/ \b \f \n \r \t \uXXXX)가 아닌 백슬래시를 전부 두 번 이스케이프해서
+// 재시도한다(정규식 `/\\(?!["\\/bfnrtu])/g`). Rust `regex` 크레이트는 이 코드베이스가 이미 쓰는
+// 버전(claude_bg_output.rs 등)이 부정 전방탐색(negative lookahead)을 지원하지 않으므로, 같은
+// 동작을 문자 단위로 직접 스캔해서 재현한다 — 백슬래시 바로 다음 문자는 검사만 하고 그 자체는
+// 건드리지 않는다(다음 루프에서 평범한 문자로 그대로 출력됨, 정규식의 zero-width lookahead와
+// 동일한 효과).
+fn repair_loose_backslashes(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            let is_valid_escape = matches!(chars.peek(), Some('"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u'));
+            if !is_valid_escape {
+                out.push('\\'); // 원래 백슬래시 하나를 두 개로 만든다(아래 push(c)가 두 번째).
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+// readJsonFileSafe(main.ts)와 동일한 순서 — 정상 파싱을 먼저 시도하고, 실패하면 repair_loose_backslashes로
+// 한 번 더 시도한다. 둘 다 실패하면 이 파일 하나만 조용히 건너뛴다(다른 팀원 등록에 영향 안 줌).
+fn parse_member_record_lenient(raw: &str) -> Option<MemberRecord> {
+    serde_json::from_str(raw).ok().or_else(|| serde_json::from_str(&repair_loose_backslashes(raw)).ok())
+}
+
 pub fn load_members_from(dir: &Path) -> Vec<MemberRecord> {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
@@ -181,9 +212,9 @@ pub fn load_members_from(dir: &Path) -> Vec<MemberRecord> {
             Ok(s) => s,
             Err(_) => continue,
         };
-        let member: MemberRecord = match serde_json::from_str(&raw) {
-            Ok(m) => m,
-            Err(_) => continue,
+        let Some(member) = parse_member_record_lenient(&raw) else {
+            eprintln!("[load_members] {path:?} 파싱 실패(백슬래시 복구도 실패) — 이 등록 파일을 건너뜁니다.");
+            continue;
         };
         if !is_safe_id(&member.member_id) {
             eprintln!(
@@ -357,6 +388,65 @@ pub async fn get_interactive_sessions_command() -> Vec<AgentEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // J-1 — 유효한 JSON 이스케이프(\" \\ \/ \b \f \n \r \t \uXXXX)는 그대로 두고, 그 외의
+    // 백슬래시만(main.ts 예시 그대로 Windows 경로) 두 번 이스케이프해야 한다.
+    #[test]
+    fn repair_loose_backslashes_escapes_only_invalid_sequences() {
+        assert_eq!(repair_loose_backslashes(r#"C:\Users\PCuser"#), r#"C:\\Users\\PCuser"#);
+        // 이미 유효한 이스케이프는 그대로(백슬래시 개수가 안 늘어남).
+        assert_eq!(repair_loose_backslashes(r#"a\tb\"c\"d"#), r#"a\tb\"c\"d"#);
+    }
+
+    // main.ts 원본 정규식(/\\(?!["\\/bfnrtu])/g)은 전방탐색이 훑어본 글자를 "소비"하지 않고 매치
+    // 위치만 한 칸 전진시킨다 — 그래서 이미 올바르게 이스케이프된 백슬래시(JSON의 `\\`)를 다시
+    // 스캔할 때, 그 뒤쪽 백슬래시가 "다음 글자(경로 등)를 못 가리키는 백슬래시"로 잘못 판정돼
+    // 한 번 더 이스케이프되는 알려진 한계가 있다(`\\` 두 글자 → `\\\` 세 글자). 이 복구 함수는
+    // 애초에 정상 파싱이 이미 실패한 파일에 대한 최선 노력 땜빵이지 완벽한 JSON 복구기가
+    // 아니므로, 포팅본도 이 한계를 "고치지" 않고 원본과 똑같이 재현해야 한다.
+    #[test]
+    fn repair_loose_backslashes_has_known_limitation_with_already_escaped_backslashes_matching_main_ts() {
+        assert_eq!(repair_loose_backslashes(r#"\\"#), r#"\\\"#);
+    }
+
+    // 깨진 백슬래시가 있는(정상 파싱 실패) 손으로 쓴 JSON이 복구 재시도로 살아나야 한다 — 실사고
+    // 재현: Windows 경로를 이스케이프 없이 그냥 넣은 팀원 등록 파일.
+    #[test]
+    fn load_members_from_recovers_hand_written_file_with_unescaped_windows_path() {
+        let dir = std::env::temp_dir().join(format!("claude_team_monitor_test_j1_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        // approvedMembers류가 아니라 label 필드에 이스케이프 안 된 경로를 손으로 써넣은 상황을
+        // 그대로 흉내낸다 — 정상 JSON.parse라면 \U가 유효한 이스케이프가 아니라 파싱이 깨진다.
+        let broken_json = r#"{"memberId":"m1","leadId":"lead1","createdAt":1000,"label":"작업 디렉토리 C:\Users\PCuser\project"}"#;
+        fs::write(dir.join("m1.json"), broken_json).unwrap();
+
+        let members = load_members_from(&dir);
+        assert_eq!(members.len(), 1, "깨진 이스케이프도 복구 재시도로 파싱에 성공해야 한다");
+        assert_eq!(members[0].member_id, "m1");
+        assert_eq!(members[0].label.as_deref(), Some("작업 디렉토리 C:\\Users\\PCuser\\project"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // 복구 시도까지 실패하는(진짜로 깨진) 파일은 그 파일 하나만 조용히 건너뛰어야 한다 — 다른
+    // 정상 등록 파일에는 영향이 없어야 한다.
+    #[test]
+    fn load_members_from_skips_unrecoverable_file_but_keeps_others() {
+        let dir = std::env::temp_dir().join(format!("claude_team_monitor_test_j1_skip_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("broken.json"), "{ this is not json at all").unwrap();
+        fs::write(
+            dir.join("ok.json"),
+            r#"{"memberId":"m-ok","leadId":"lead1","createdAt":1000}"#,
+        )
+        .unwrap();
+
+        let members = load_members_from(&dir);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].member_id, "m-ok");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     // 실제 %APPDATA%\claude-team-monitor\leads.json / ~/.claude/claude-team-monitor/members에
     // 이 저장소를 작업 중인 팀장(1d285d20)/팀원(846ee1cb, 바로 이 세션)이 등록돼 있는 실제 환경에서

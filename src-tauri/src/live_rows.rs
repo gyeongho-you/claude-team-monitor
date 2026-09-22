@@ -3,9 +3,9 @@ use crate::board_state::{prune_missing_keys, state, track_first_miss, FirstMissR
 use crate::claude_readiness::check_directory_claude_ready;
 use crate::member_requests::{load_pending_requests, MemberRequest};
 use crate::paths::{daily_journal_dir, projects_dir, session_edits_dir};
-use crate::session_registry::{load_leads, load_members, LeadRecord, MemberRecord};
+use crate::session_registry::{load_leads, load_members, register_member, register_member_in, with_leads_lock, LeadRecord, MemberRecord};
 use crate::stall_watchdog::{list_stall_alerts_for_ui, StallAlertForUi};
-use crate::timing::{now_ms, LEAD_OFFLINE_GRACE_MS};
+use crate::timing::{now_ms, LEAD_OFFLINE_GRACE_MS, MEMBER_CLEANUP_GRACE_MS, MEMBER_MISS_GRACE_MS};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -324,6 +324,135 @@ fn build_offline_rows(offline_leads: &[LeadRecord]) -> Vec<SessionRow> {
     offline_leads.iter().map(|l| build_lead_record_row(l, true)).collect()
 }
 
+// reconcileLeadIds(main.ts) 포팅 — B-3(TAURI_NOTICE_QUEUE_DESIGN.md §1). 팀장이 이 앱 밖에서
+// (팀장 자신의 자율 재시작, 다른 오케스트레이터 등) 재시작되면 짧은 id가 이 앱 모르게 바뀐다.
+// leads.json엔 옛 id가 그대로 남아서, 실제로는 살아있는데도 "세션 정리" 탭엔 미등록으로, 작업
+// 탭엔 오프라인으로 잘못 보인다(실사고 확인: g1cl-mgt의 팀장). sessionId는 이 앱이 관여하지
+// 않아도 절대 안 바뀌므로, 짧은 id로 못 찾은 살아있는 세션을 sessionId로 다시 찾아서 leads의
+// id를 바로잡는다. 반환값은 "oldId -> newId" 목록 — 호출부가 이걸로 MemberRecord.leadId도 같이
+// 옮겨써야 한다(안 하면 팀장 id는 바로잡히는데 그 소속 팀원들은 계속 "소속 팀장 없음"으로 잘못
+// 보인다). leads.json 쓰기가 필요하므로 호출부는 반드시 with_leads_lock 안에서 이 함수를 불러야
+// 한다(E-1/E-2 lost-update 방지 규칙).
+pub fn reconcile_lead_ids(agents: &[AgentEntry], leads: &mut [LeadRecord]) -> Vec<(String, String)> {
+    let mut renames = Vec::new();
+    let mut lead_id_set: HashSet<String> = leads.iter().map(|l| l.id.clone()).collect();
+    for agent in agents {
+        let Some(agent_id) = agent.id.as_ref() else { continue };
+        if agent.session_id.is_empty() || lead_id_set.contains(agent_id) {
+            continue;
+        }
+        if let Some(rec) = leads.iter_mut().find(|l| l.session_id == agent.session_id) {
+            if &rec.id != agent_id {
+                eprintln!(
+                    "[reconcile_lead_ids] 팀장 {:?}의 짧은 id가 이 앱 밖에서 바뀐 것을 발견해 {} -> {}로 갱신합니다.",
+                    rec.internal_id, rec.id, agent_id
+                );
+                renames.push((rec.id.clone(), agent_id.clone()));
+                rec.id = agent_id.clone();
+                lead_id_set.insert(agent_id.clone());
+            }
+        }
+    }
+    renames
+}
+
+// reconcileMemberIds(main.ts) 포팅 — B-4. 팀원도 B-3과 같은 문제를 겪는데 훨씬 심각하다 — 팀장은
+// 낡은 id로 잘못 표시만 되지만, 팀원은 cleanup_stale_members가 결국 "죽은 것"으로 보고 등록
+// 파일을 영구히 지워버린다(실사고 확인: g1cl-mgt의 팀원). 짧은 id로 못 찾은 살아있는 세션을
+// sessionId로 재매칭해 등록 파일을 새 id로 "옮긴다"(지우고 새로 쓰기 — 등록 파일이 팀원별로
+// memberId.json 하나뿐이라 옮긴다는 게 곧 이런 뜻이다). 살아있는데 sessionId가 아직 없는
+// 레코드(sessionId 필드 추가 이전 옛 등록, 또는 방금 등록됨)는 이 기회에 채워 넣는다 — 나중에
+// 드리프트가 나도 되찾을 수 있게. memberFirstMissAt/lastMemberStatus도 옛 키에서 새 키로 함께
+// 옮긴다 — 안 하면 이번 폴링 사이클에서 "새 id의 busy→idle 전이"를 한 번 놓칠 수 있다(다음
+// 폴링부턴 새 키로 자연 회복되지만, 굳이 한 번이라도 완료 알림을 놓칠 이유가 없다).
+pub fn reconcile_member_ids(agents: &[AgentEntry], members: Vec<MemberRecord>) -> Vec<MemberRecord> {
+    reconcile_member_ids_in(&crate::paths::members_dir(), agents, members)
+}
+
+pub(crate) fn reconcile_member_ids_in(dir: &std::path::Path, agents: &[AgentEntry], members: Vec<MemberRecord>) -> Vec<MemberRecord> {
+    let agent_by_id: HashMap<&str, &AgentEntry> = agents.iter().filter_map(|a| a.id.as_deref().map(|id| (id, a))).collect();
+    let agent_by_session_id: HashMap<&str, &AgentEntry> = agents
+        .iter()
+        .filter(|a| !a.session_id.is_empty())
+        .map(|a| (a.session_id.as_str(), a))
+        .collect();
+
+    members
+        .into_iter()
+        .map(|m| {
+            if let Some(live_agent) = agent_by_id.get(m.member_id.as_str()).copied() {
+                if m.session_id.is_some() {
+                    return m;
+                }
+                let updated = MemberRecord { session_id: Some(live_agent.session_id.clone()), ..m };
+                register_member_in(dir, &updated);
+                return updated;
+            }
+            let Some(session_id) = m.session_id.as_deref() else { return m };
+            let Some(matched) = agent_by_session_id.get(session_id).copied() else { return m };
+            let Some(matched_id) = matched.id.as_deref() else { return m };
+            if matched_id == m.member_id {
+                return m;
+            }
+            eprintln!(
+                "[reconcile_member_ids] 팀원 {}(팀장 {})의 짧은 id가 이 앱 밖에서 바뀐 것을 발견해 {}로 등록 파일을 옮깁니다.",
+                m.member_id, m.lead_id, matched_id
+            );
+            let _ = fs::remove_file(dir.join(format!("{}.json", m.member_id)));
+            {
+                let mut guard = state().lock().unwrap();
+                if let Some(v) = guard.member_first_miss_at.remove(&m.member_id) {
+                    guard.member_first_miss_at.insert(matched_id.to_string(), v);
+                }
+                if let Some(v) = guard.last_member_status.remove(&m.member_id) {
+                    guard.last_member_status.insert(matched_id.to_string(), v);
+                }
+            }
+            let renamed = MemberRecord { member_id: matched_id.to_string(), ..m };
+            register_member_in(dir, &renamed);
+            renamed
+        })
+        .collect()
+}
+
+// cleanupStaleMembers(main.ts) 포팅 — B-5. 팀원은 팀장과 달리 일회성 하위 작업 단위라 종료되면
+// 정리한다 — 단, 방금(MEMBER_CLEANUP_GRACE_MS 이내) 등록된 팀원은 TOCTOU로 봐주고, 처음 못 잡힌
+// 시각으로부터 MEMBER_MISS_GRACE_MS가 지나기 전이면(=stop→resume 재기동 구간일 수 있음) 아직 안
+// 지운다. 팀장과 달리 만료되면 등록 파일 자체를 지우므로, firstMiss 기록도 즉시 같이 지운다.
+// 실사용 리포트로 "팀원 프로세스는 안 죽었는데 등록 파일만 사라졌다"는 사고가 재현됐는데 원인을
+// 확정 못 했다 — 다음에 재현되면 최소한 "얼마나 오래 못 잡혔었는지"와 "그 시점에 이 앱이 실제로
+// 살아있다고 본 세션이 몇 개였는지"(시스템 부하 정황)는 바로 알 수 있게 지우기 직전에 로그를
+// 남긴다(막는 방어가 아니라 다음 사고를 진단 가능하게 하는, 사후 추적용 로깅이라는 점이 특이).
+pub fn cleanup_stale_members(members: &[MemberRecord], agent_id_set: &HashSet<String>, now: i64) {
+    cleanup_stale_members_in(&crate::paths::members_dir(), members, agent_id_set, now);
+}
+
+pub(crate) fn cleanup_stale_members_in(dir: &std::path::Path, members: &[MemberRecord], agent_id_set: &HashSet<String>, now: i64) {
+    let current_member_ids: HashSet<String> = members.iter().map(|m| m.member_id.clone()).collect();
+    let mut guard = state().lock().unwrap();
+    for m in members {
+        if now - m.created_at < MEMBER_CLEANUP_GRACE_MS {
+            continue;
+        }
+        let first_miss_at = guard.member_first_miss_at.get(&m.member_id).copied();
+        let is_present = agent_id_set.contains(&m.member_id);
+        let result = track_first_miss(&mut guard.member_first_miss_at, is_present, &m.member_id, now, MEMBER_MISS_GRACE_MS);
+        if result != FirstMissResult::Expired {
+            continue;
+        }
+        guard.member_first_miss_at.remove(&m.member_id);
+        eprintln!(
+            "[cleanup_stale_members] 팀원 {}(팀장 {}) 등록 파일을 정리합니다 — {} 동안 agents 스냅샷에서 못 잡힘(유예 {MEMBER_MISS_GRACE_MS}ms), 현재 살아있는 세션 수={}",
+            m.member_id,
+            m.lead_id,
+            first_miss_at.map(|t| format!("{}ms", now - t)).unwrap_or_else(|| "알 수 없음".to_string()),
+            agent_id_set.len(),
+        );
+        let _ = fs::remove_file(dir.join(format!("{}.json", m.member_id)));
+    }
+    prune_missing_keys(&mut guard.member_first_miss_at, &current_member_ids);
+}
+
 /// computeLiveRows + computeOfflineLeads/buildGraceRows/buildOfflineRows(main.ts)의 포팅 —
 /// "작업" 탭 보드가 그리는 SessionRow 전체 목록. leads.json/members에 등록된(=팀장이거나
 /// 팀원인) 세션만 대상으로 하고, 그 외(미등록 세션, interactive 세션)는 보드에 아예 안
@@ -335,8 +464,8 @@ fn build_offline_rows(offline_leads: &[LeadRecord]) -> Vec<SessionRow> {
 /// - 유예(LEAD_OFFLINE_GRACE_MS)가 끝난 팀장 → 오프라인 확정(offline:true, 히스토리 탭용)
 ///
 /// 정체 감시(runStallWatchdog), 알림 큐(notifyLeadsOfFinishedMembers/deliverPendingNotices),
-/// 팀원 쪽 그레이스 만료 시 등록 파일 삭제(cleanupStaleMembers), 팀원/팀장 짧은 id 드리프트 보정
-/// (reconcileLeadIds/reconcileMemberIds)은 이번 포팅 범위 밖이다 — 전부 다음 청크로 남겨뒀다.
+/// 팀원 쪽 그레이스 만료 시 등록 파일 삭제(cleanup_stale_members), 팀원/팀장 짧은 id 드리프트
+/// 보정(reconcile_lead_ids/reconcile_member_ids)까지 전부 이 함수 안에서 순서대로 실행한다.
 ///
 /// buildSessionRowsChain(main.ts:1535-1540)의 포팅 — 이 커맨드는 진입 시 전역
 /// `concurrency::session_rows_lock()`을 잡아, 3초 정기 폴링과 refresh-board류 즉시 호출이 겹쳐도
@@ -347,17 +476,40 @@ fn build_offline_rows(offline_leads: &[LeadRecord]) -> Vec<SessionRow> {
 #[tauri::command]
 pub async fn get_live_session_rows() -> Vec<SessionRow> {
     let _guard = crate::concurrency::session_rows_lock().lock().await;
-    get_live_session_rows_inner()
+    get_live_session_rows_inner().await
 }
 
-fn get_live_session_rows_inner() -> Vec<SessionRow> {
+async fn get_live_session_rows_inner() -> Vec<SessionRow> {
     let now = now_ms();
     let agents = fetch_agents_typed();
     let agent_id_set: HashSet<String> = agents.iter().filter_map(|a| a.id.clone()).collect();
 
-    let leads = load_leads();
+    // reconcileLeadIds(main.ts:1585-1592)와 동일한 순서 — leads.json 쓰기가 필요해서
+    // with_leads_lock으로 감싼다(E-1/E-2 lost-update 방지 규칙). 순수 읽기만 하던 이 함수가
+    // 이번에 처음으로 leads.json에 쓰기 시작하므로 반드시 이 락을 거쳐야 한다.
+    let (leads, lead_renames) = with_leads_lock(|leads_mut| {
+        let renames = reconcile_lead_ids(&agents, leads_mut);
+        let dirty = !renames.is_empty();
+        (dirty, (leads_mut.clone(), renames))
+    })
+    .await;
+
+    // 팀장 id가 바로잡혔으면, 그 팀장 소속 팀원들의 leadId도 같이 옮겨써야 한다 — 안 하면 팀장
+    // id는 바로잡히는데 그 팀원들은 계속 "소속 팀장 없음"으로 잘못 보인다(F-1과 같은 원리).
+    if !lead_renames.is_empty() {
+        let rename_map: HashMap<&str, &str> = lead_renames.iter().map(|(old, new)| (old.as_str(), new.as_str())).collect();
+        for m in load_members() {
+            if let Some(&new_lead_id) = rename_map.get(m.lead_id.as_str()) {
+                register_member(&MemberRecord { lead_id: new_lead_id.to_string(), ..m });
+            }
+        }
+    }
+
     let lead_by_id: HashMap<String, &LeadRecord> = leads.iter().map(|l| (l.id.clone(), l)).collect();
-    let members = load_members();
+    // 위에서 팀원 소속 팀장 id를 옮겨썼을 수 있으므로 다시 읽는다 — reconcile_member_ids 자체의
+    // 매칭 로직(memberId/sessionId 기준)은 leadId와 무관하지만, 이후 rows/알림에 쓰일 members
+    // 목록은 최신 leadId를 반영해야 한다.
+    let members = reconcile_member_ids(&agents, load_members());
     let member_by_id: HashMap<String, &MemberRecord> = members.iter().map(|m| (m.member_id.clone(), m)).collect();
 
     let live_rows = compute_live_rows(&agents, &lead_by_id, &member_by_id);
@@ -435,6 +587,11 @@ fn get_live_session_rows_inner() -> Vec<SessionRow> {
     let mut rows = live_rows;
     rows.extend(grace_rows);
     rows.extend(offline_rows);
+
+    // cleanupStaleMembers(main.ts:1621)와 같은 위치 — rows를 다 만든 뒤, 이번 폴링에서 쓴 members
+    // 스냅샷 기준으로 정리한다.
+    cleanup_stale_members(&members, &agent_id_set, now);
+
     rows
 }
 
@@ -492,7 +649,7 @@ pub struct RefreshBoardResult {
 #[tauri::command]
 pub async fn refresh_board_command() -> RefreshBoardResult {
     let _guard = crate::concurrency::session_rows_lock().lock().await;
-    let rows = get_live_session_rows_inner();
+    let rows = get_live_session_rows_inner().await;
     let leads = load_leads();
     RefreshBoardResult {
         rows,
@@ -518,9 +675,9 @@ mod tests {
 
     // session_registry.rs의 tags_this_running_session_as_member와 같은 전제 — 실제 등록 상태
     // 기준으로 검증한다(1d285d20=팀장, 846ee1cb=바로 이 세션인 팀원).
-    #[test]
-    fn builds_rows_for_this_running_lead_and_member() {
-        let rows = get_live_session_rows_inner();
+    #[tokio::test]
+    async fn builds_rows_for_this_running_lead_and_member() {
+        let rows = get_live_session_rows_inner().await;
         let member_row = rows.iter().find(|r| r.agent.id.as_deref() == Some("846ee1cb"));
         if let Some(row) = member_row {
             assert!(!row.is_lead);
@@ -533,6 +690,179 @@ mod tests {
             assert!(row.is_lead);
             assert!(row.internal_id.is_some());
         }
+    }
+
+    fn fake_agent(id: &str, session_id: &str) -> AgentEntry {
+        AgentEntry {
+            id: Some(id.to_string()),
+            pid: None,
+            cwd: String::new(),
+            kind: "background".to_string(),
+            started_at: None,
+            session_id: session_id.to_string(),
+            name: None,
+            status: Some("idle".to_string()),
+            state: None,
+            waiting_for: None,
+        }
+    }
+
+    fn fake_member(member_id: &str, lead_id: &str, session_id: Option<&str>, created_at: i64) -> MemberRecord {
+        MemberRecord {
+            member_id: member_id.to_string(),
+            lead_id: lead_id.to_string(),
+            created_at,
+            role: None,
+            label: None,
+            session_id: session_id.map(|s| s.to_string()),
+            secret: None,
+        }
+    }
+
+    fn temp_members_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("claude_team_monitor_test_members_{tag}_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // reconcileLeadIds(B-3) — 짧은 id는 못 찾았지만 sessionId가 기존 레코드와 일치하면 그 id로
+    // 바로잡고 (oldId, newId)를 반환해야 한다.
+    #[test]
+    fn reconcile_lead_ids_updates_id_on_session_id_match() {
+        let mut leads = vec![fake_lead("old-short-id")]; // fake_lead의 sessionId는 "{id}-session"
+        let agents = vec![fake_agent("new-short-id", "old-short-id-session")];
+        let renames = reconcile_lead_ids(&agents, &mut leads);
+        assert_eq!(renames, vec![("old-short-id".to_string(), "new-short-id".to_string())]);
+        assert_eq!(leads[0].id, "new-short-id");
+    }
+
+    // 짧은 id가 이미 알려진 값이면(드리프트 없음) 아무 것도 바뀌면 안 된다.
+    #[test]
+    fn reconcile_lead_ids_no_op_when_id_already_known() {
+        let mut leads = vec![fake_lead("known-id")];
+        let agents = vec![fake_agent("known-id", "known-id-session")];
+        let renames = reconcile_lead_ids(&agents, &mut leads);
+        assert!(renames.is_empty());
+        assert_eq!(leads[0].id, "known-id");
+    }
+
+    // sessionId가 아예 안 맞으면(무관한 세션) 건드리면 안 된다 — 엉뚱한 세션을 팀장으로 오인하는
+    // 사고를 막는 핵심 조건.
+    #[test]
+    fn reconcile_lead_ids_ignores_agent_with_unmatched_session_id() {
+        let mut leads = vec![fake_lead("known-id")];
+        let agents = vec![fake_agent("unrelated-id", "totally-different-session")];
+        let renames = reconcile_lead_ids(&agents, &mut leads);
+        assert!(renames.is_empty());
+        assert_eq!(leads[0].id, "known-id");
+    }
+
+    // reconcileMemberIds(B-4) — 살아있는데 sessionId가 아직 없는 레코드는 이 기회에 채워 넣어야
+    // 한다(나중에 드리프트가 나도 되찾을 수 있게).
+    #[test]
+    fn reconcile_member_ids_backfills_missing_session_id_when_live_under_same_id() {
+        let dir = temp_members_dir("backfill");
+        let agents = vec![fake_agent("member-a", "member-a-session")];
+        let members = vec![fake_member("member-a", "lead-1", None, 1_000)];
+        let updated = reconcile_member_ids_in(&dir, &agents, members);
+        assert_eq!(updated[0].session_id.as_deref(), Some("member-a-session"));
+        let raw = fs::read_to_string(dir.join("member-a.json")).unwrap();
+        assert!(raw.contains("member-a-session"), "백필된 sessionId가 파일에도 저장돼야 한다");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // 짧은 id로 못 찾았지만 저장해둔 sessionId로 살아있는 세션을 다시 찾으면, 등록 파일을
+    // 새 id로 옮기고(옛 파일 삭제 + 새 파일 생성) memberId를 갱신한 레코드를 반환해야 한다.
+    // memberFirstMissAt/lastMemberStatus도 옛 키에서 새 키로 같이 옮겨져야 한다.
+    #[test]
+    fn reconcile_member_ids_renames_when_found_under_new_id_via_session_id() {
+        let dir = temp_members_dir("rename");
+        let old = fake_member("old-member-id", "lead-1", Some("shared-session"), 1_000);
+        register_member_in(&dir, &old);
+
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let mut guard = state().lock().unwrap();
+                guard.member_first_miss_at.remove("old-member-id");
+                guard.member_first_miss_at.remove("new-member-id");
+                guard.last_member_status.remove("old-member-id");
+                guard.last_member_status.remove("new-member-id");
+            }
+        }
+        let _cleanup = Cleanup;
+        {
+            let mut guard = state().lock().unwrap();
+            guard.member_first_miss_at.insert("old-member-id".to_string(), 500);
+            guard.last_member_status.insert("old-member-id".to_string(), "busy".to_string());
+        }
+
+        let agents = vec![fake_agent("new-member-id", "shared-session")];
+        let updated = reconcile_member_ids_in(&dir, &agents, vec![old]);
+
+        assert_eq!(updated[0].member_id, "new-member-id");
+        assert!(!dir.join("old-member-id.json").exists(), "옛 파일은 지워져야 한다");
+        assert!(dir.join("new-member-id.json").exists(), "새 파일로 옮겨 써야 한다");
+        {
+            let guard = state().lock().unwrap();
+            assert!(guard.member_first_miss_at.get("old-member-id").is_none());
+            assert_eq!(guard.member_first_miss_at.get("new-member-id"), Some(&500));
+            assert_eq!(guard.last_member_status.get("new-member-id").map(String::as_str), Some("busy"));
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // 매칭되는 살아있는 세션이 전혀 없으면(진짜로 죽었을 수 있음) 아무 것도 건드리지 않고 그대로
+    // 돌려줘야 한다 — 이후 cleanup_stale_members가 유예 판정을 이어서 처리한다.
+    #[test]
+    fn reconcile_member_ids_leaves_unmatched_record_untouched() {
+        let dir = temp_members_dir("untouched");
+        let member = fake_member("gone-member", "lead-1", Some("gone-session"), 1_000);
+        let agents: Vec<AgentEntry> = Vec::new();
+        let updated = reconcile_member_ids_in(&dir, &agents, vec![member.clone()]);
+        assert_eq!(updated[0].member_id, "gone-member");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // cleanupStaleMembers(B-5) — 살아있으면 절대 안 지우고, 방금 등록된 건 부재해도 유예 안이라
+    // 안 지우고, 오래전에 등록됐고 처음 못 잡힌 시각 이후 MEMBER_MISS_GRACE_MS가 지난 것만 지운다.
+    #[test]
+    fn cleanup_stale_members_removes_only_expired_absentees() {
+        let dir = temp_members_dir("cleanup");
+        let now = 10_000_000i64;
+
+        let present = fake_member("present-member", "lead-1", None, 0);
+        register_member_in(&dir, &present);
+        let fresh = fake_member("fresh-member", "lead-1", None, now); // 방금 생성됨
+        register_member_in(&dir, &fresh);
+        let expired = fake_member("expired-member", "lead-1", None, 0); // 오래전 생성
+        register_member_in(&dir, &expired);
+
+        let members = vec![present.clone(), fresh.clone(), expired.clone()];
+        let mut agent_id_set: HashSet<String> = HashSet::new();
+        agent_id_set.insert("present-member".to_string());
+
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                state().lock().unwrap().member_first_miss_at.remove("expired-member");
+            }
+        }
+        let _cleanup = Cleanup;
+        // 이 팀원의 first-miss가 이미 유예 시간보다 훨씬 전에 기록돼있었다고 미리 세팅 — 실제로는
+        // 이전 폴링에서 track_first_miss가 채워뒀을 값이다.
+        state().lock().unwrap().member_first_miss_at.insert("expired-member".to_string(), now - MEMBER_MISS_GRACE_MS - 1);
+
+        cleanup_stale_members_in(&dir, &members, &agent_id_set, now);
+
+        assert!(dir.join("present-member.json").exists(), "살아있는 팀원은 절대 안 지워져야 한다");
+        assert!(dir.join("fresh-member.json").exists(), "방금 생성된 팀원은 부재해도 유예 안이라 안 지워져야 한다");
+        assert!(!dir.join("expired-member.json").exists(), "유예가 지난 오래된 팀원은 지워져야 한다");
+        assert!(
+            state().lock().unwrap().member_first_miss_at.get("expired-member").is_none(),
+            "지워진 팀원의 first-miss 기록도 즉시 같이 지워져야 한다"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     fn fake_lead(id: &str) -> LeadRecord {
