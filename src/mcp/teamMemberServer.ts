@@ -153,9 +153,14 @@ server.registerTool(
     const normalizedModel = normalizeMemberModel(model);
     const modelArgs = normalizedModel === 'default' ? [] : ['--model', normalizedModel];
 
+    // main.ts의 launchTeamLead/resumeLead/restartLead와 같은 이유로(claudeReadiness.js 주석 참고:
+    // 2026-09-21 재검증 — claude CLI v2.1.278, 한 번도 실행한 적 없는 새 디렉토리 3곳에서 백그라운드
+    // 스폰 3/3 모두 트러스트 다이얼로그 없이 정상 완료) 이 판정을 더 이상 spawn 차단에 쓰지 않는다 —
+    // 경고만 남기고 그대로 진행한다. 그래도 아래에서 spawn 자체가 실패하면(구버전 CLI로 되돌아갔거나
+    // 이번 재검증이 특이 케이스였을 가능성 포함) readiness가 원인일 수 있다는 걸 실패 메시지에 같이 담는다.
     const readiness = checkDirectoryClaudeReady(resolvedTarget);
     if (!readiness.ready) {
-      return errorResult(claudeNotReadyMessage(resolvedTarget, readiness.reason!));
+      console.error(`[teamMemberServer] ${claudeNotReadyMessage(resolvedTarget, readiness.reason!)} (경고만 하고 spawn은 계속 시도합니다)`);
     }
 
     const memberId = await runClaudeBg(
@@ -163,6 +168,12 @@ server.registerTool(
       resolvedTarget,
     );
     if (!memberId) {
+      if (!readiness.ready) {
+        return errorResult(
+          `팀원 세션 시작에 실패했습니다 — "${resolvedTarget}"에서 ${readiness.reason} 이게 원인일 수 있습니다. ` +
+          '그 디렉토리에서 터미널로 claude를 한 번 실행해 승인창을 눌러준 뒤 다시 시도해보세요.',
+        );
+      }
       return errorResult('claude --bg 실행에 실패했습니다 — claude CLI 설치/로그인 상태 또는 대상 디렉토리를 확인하세요.');
     }
 
