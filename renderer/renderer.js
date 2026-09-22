@@ -656,7 +656,11 @@ async function syncQueuedMessagesWithTranscript(leadId, transcript) {
   let remainingQueuedIds = null;
   if (listForLead.some(item => item.kind === 'queued')) {
     try {
-      remainingQueuedIds = new Set(await window.api.getPendingNoticeIds(leadId));
+      // get-pending-notice-ids는 이제 {id, exhausted}를 돌려준다(exhausted: 자동 재시도
+      // MAX_NOTICE_DELIVERY_ATTEMPTS회를 다 써서 더 이상 자동으로는 안 풀리는 항목) — id만
+      // 있으면 되는 자리(존재 여부 확인)는 Map을 Set처럼 .has()로 그대로 쓰고, exhausted
+      // 값이 필요한 자리는 .get()으로 꺼낸다.
+      remainingQueuedIds = new Map((await window.api.getPendingNoticeIds(leadId)).map(n => [n.id, n.exhausted]));
     } catch (err) {
       console.error('대기열 상태 확인 실패:', err);
       // 조회 실패 시 성급하게 지우지 않고 다음 폴링에 다시 시도한다(remainingQueuedIds는 null로
@@ -695,7 +699,12 @@ async function syncQueuedMessagesWithTranscript(leadId, transcript) {
   }
 
   const stillPending = currentList.filter(item => {
-    if (item.kind === 'queued') return remainingQueuedIds ? remainingQueuedIds.has(item.id) : true;
+    if (item.kind === 'queued') {
+      if (!remainingQueuedIds) return true;
+      if (!remainingQueuedIds.has(item.id)) return false;
+      item.exhausted = remainingQueuedIds.get(item.id);
+      return true;
+    }
     // 이 항목을 처음 보는 순간(즉시전송으로 push된 직후 첫 렌더)의 transcript 길이를 기준선으로
     // 고정한다 — 그 이후로는 절대 다시 계산하지 않는다. 항상 최신 transcript.length로 다시 계산하면
     // "아직 응답이 안 와서 길이가 그대로인" 정상적인 경우와 구별이 안 된다.
@@ -790,13 +799,24 @@ function renderQueuedTurnsHtml(leadId) {
   const now = Date.now();
   return list.map(item => {
     const isStuck = item.kind === 'in-flight' && typeof item.createdAt === 'number' && (now - item.createdAt) > IN_FLIGHT_STUCK_MS;
-    const statusText = item.kind === 'queued'
-      ? '팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.'
-      : (isStuck ? '⚠️ 응답이 오래 걸리고 있습니다 — 먹통일 수 있습니다.' : '응답을 기다리는 중...');
+    // exhausted(큐 자동 재시도를 MAX_NOTICE_DELIVERY_ATTEMPTS회 다 쓰고 포기한 상태)는 일반
+    // 'queued'와 구분해서 보여준다 — 안 그러면 사실상 다시 안 풀리는 메시지가 "완료되면
+    // 자동으로 전달됩니다"라고 계속 표시돼서 사용자가 영구 미배달을 알 수 없었다. "터미널에서
+    // 직접 열기"로 인한 경합은 이제 attempts를 안 깎고 그냥 이번 폴링만 건너뛰므로(main.ts
+    // deliverPendingNotices의 attachOpen 분기) 더 이상 exhausted의 주된 원인이 아니다 — 그래도
+    // 다른 이유(daemon 일시적 오류 등)로 exhausted에 도달할 수 있으니, "팀장 복구" 같은 전용
+    // 버튼은 이 앱에 없다는 전제로 실제로 있는 조치만 안내한다: 아래 취소 버튼으로 이 항목을
+    // 빼고 다시 보내보거나, 계속되면 상단의 "새 작업 시작"으로 세션을 통째로 새로 띄운다.
+    const statusText = item.exhausted
+      ? '자동 재시도가 모두 실패해 전달을 멈췄습니다. 아래 취소 버튼으로 지우고 다시 보내보세요 — 계속 반복되면 "새 작업 시작"으로 세션을 새로 띄우세요.'
+      : item.kind === 'queued'
+        ? '팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.'
+        : (isStuck ? '⚠️ 응답이 오래 걸리고 있습니다 — 먹통일 수 있습니다.' : '응답을 기다리는 중...');
+    const answerClass = item.exhausted ? 'chat-answer chat-pending chat-pending-exhausted' : 'chat-answer chat-pending';
     const actionBtnHtml = item.kind === 'queued'
       ? ` <button class="cancel-queued-btn" data-cancel-queued="${escapeHtml(item.id)}" data-cancel-lead="${escapeHtml(leadId)}">취소</button>`
       : (isStuck ? ` <button class="cancel-queued-btn" data-retry-stuck="${escapeHtml(item.id)}" data-retry-lead="${escapeHtml(leadId)}">재시도</button> <button class="cancel-queued-btn" data-delete-stuck="${escapeHtml(item.id)}" data-delete-lead="${escapeHtml(leadId)}">삭제</button>` : '');
-    return `<div class="chat-turn"><div class="chat-prompt">▸ ${escapeHtml(item.message)}</div><div class="chat-answer chat-pending">${statusText}${actionBtnHtml}</div></div>`;
+    return `<div class="chat-turn"><div class="chat-prompt">▸ ${escapeHtml(item.message)}</div><div class="${answerClass}">${statusText}${actionBtnHtml}</div></div>`;
   }).join('');
 }
 
@@ -1227,6 +1247,16 @@ async function sendMessageToLead(leadId, message) {
       removePendingChatTurn(leadId, localId);
       await renderChat(); // pendingChatTurns에서 지운 in-flight 항목을 화면에서도 지운다
       chatTranscriptEl.insertAdjacentHTML('beforeend', '<p style="color:#f14c4c">이어하기에 실패했습니다 — 세션이 만료됐거나 claude CLI 실행에 문제가 있을 수 있습니다.</p>');
+      return;
+    }
+    if (result.status === 'attach-open') {
+      // main.ts의 send-to-lead가 이 팀장에 "터미널에서 직접 열기"로 띄운 attach 창이 아직
+      // 붙어있는 걸 감지하고 stop→resume 자체를 시도하지 않은 경우 — 그대로 보냈다간 attach의
+      // 독립적인 재연결과 경합해서 세션이 갈라질 수 있다(실사용 재현). 'failed'와 달리 원인을
+      // 정확히 알 수 있으니 그대로 알려준다.
+      removePendingChatTurn(leadId, localId);
+      await renderChat();
+      chatTranscriptEl.insertAdjacentHTML('beforeend', '<p style="color:#f14c4c">이 팀장에 연결된 터미널 창(터미널에서 직접 열기)이 아직 열려있어 보내지 않았습니다 — 그 터미널을 닫고 다시 시도하세요.</p>');
       return;
     }
     if (result.status === 'failed') {

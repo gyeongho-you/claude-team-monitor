@@ -1310,10 +1310,21 @@ function deliverPendingNotices(agents: AgentEntry[], leads: LeadRecord[]): void 
     // 큐에 계속 묶어두면 영원히 배달 안 되는 메시지가 된다(2026-09-17 실사용 재현). blocked도 배달을
     // 시도해 stop→resume으로 깨우고, 세션 포크 방지는 resumeLead 안의 안전장치가 맡는다.
     const isBusy = !!liveAgent && isLeadTooBusyToInterrupt(liveAgent);
+    // "터미널에서 직접 열기"로 띄운 attach 창이 아직 붙어있으면 여기서 stop→resume을 시도하지
+    // 않는다(send-to-lead와 같은 이유, 위 isAttachTerminalOpenFor 주석 참고) — 다만 이건 busy와
+    // 달리 attempts를 소모시키지 않는다: 사람이 그 터미널에서 아직 답하고 있는 중일 뿐 실패한 게
+    // 아니므로, 시도 횟수를 깎지 않고 그냥 이번 폴링만 건너뛴다(창을 닫으면 다음 폴링부터 정상
+    // 배달된다).
+    const attachOpen = !!liveAgent?.id && isAttachTerminalOpenFor(liveAgent.id);
+    if (attachOpen) {
+      stillPending.push(...notices);
+      continue;
+    }
     // 영원히 stop이 안 되는 팀장(좀비 프로세스, 영구히 망가진 세션 등)에게는 재시도해봤자 매번
     // 실패한다 — 상한 없이 폴링마다 계속 resume을 시도하면 프로세스 스폰과 에러 로그만 무기한
     // 낭비된다(팀원 코드리뷰에서 지적). 상한을 넘으면 자동 재시도를 멈추고 큐에 그대로(제거하지
-    // 않고) 남겨서 사용자가 채팅창에서 직접 취소하거나, 팀장을 복구한 뒤 다시 보내게 한다.
+    // 않고) 남겨서 사용자가 채팅창에서 직접 취소하거나 다시 보내게 한다(실제로 없는 "팀장 복구"
+    // 버튼을 안내하지 않는다).
     const attemptsSoFar = Math.max(0, ...notices.map(n => n.attempts ?? 0));
     const exhausted = attemptsSoFar >= MAX_NOTICE_DELIVERY_ATTEMPTS;
     if (exhausted) {
@@ -1333,7 +1344,7 @@ function deliverPendingNotices(agents: AgentEntry[], leads: LeadRecord[]): void 
             const attempts = attemptedNotices[0].attempts!;
             logCritical(`[deliverPendingNotices] 팀장 ${leadRec.internalId} 알림 배달(resume)이 실패해 큐에 되돌립니다(시도 ${attempts}/${MAX_NOTICE_DELIVERY_ATTEMPTS}).`);
             if (attempts >= MAX_NOTICE_DELIVERY_ATTEMPTS) {
-              logCritical(`[deliverPendingNotices] 팀장 ${leadRec.internalId} 알림이 ${MAX_NOTICE_DELIVERY_ATTEMPTS}회 연속 실패해 자동 재시도를 멈춥니다 — 채팅창에서 직접 취소하거나 팀장을 복구한 뒤 다시 보내야 합니다.`);
+              logCritical(`[deliverPendingNotices] 팀장 ${leadRec.internalId} 알림이 ${MAX_NOTICE_DELIVERY_ATTEMPTS}회 연속 실패해 자동 재시도를 멈춥니다 — 채팅창에서 직접 취소하고 다시 보내야 합니다.`);
             }
             requeuePendingNotices(attemptedNotices);
           }
@@ -1806,7 +1817,17 @@ function checkClaudeBinaryOnce(): Promise<void> {
 // 사라진다("역할: reviewer"까지만 전달되고 실제 지시가 날아가는 등). `claude`는 실제로 .exe라
 // (`where claude` 확인) shell 없이 바로 spawn해도 PATH에서 찾아 실행되고, 이 경우 인자는 OS의
 // CreateProcess 인자 규칙을 따르므로 개행이 든 문자열도 그대로 온전히 전달된다.
-function runClaudeBg(args: string[], cwd: string): Promise<string | null> {
+//
+// prompt는 반드시 flags와 분리된 별도 인자로 받아서 flags 뒤에 `--`(옵션 종료 마커)를 끼워 넣고서야
+// argv에 싣는다 — 실측 확인(2026-09-18): `--allowedTools`/`--mcp-config`는 `claude --help`에
+// `<tools...>`/`<configs...>`로 명시된 가변인자(variadic) 플래그라, 그 바로 뒤에 구분자 없이 prompt를
+// 붙이면 CLI가 prompt 문자열 전체를 "허용할 도구 이름 하나 더"로 먹어버리고 실제 메시지는 통째로
+// 사라진다. 이 경우 `claude --bg`가 에러 없이 "backgrounded · <id> (idle — send a prompt to start)"를
+// 찍고 뜨는데, 새 세션은 완전히 빈 입력창 상태로 시작해서 지시도 안 가고 스킬(`/team-lead` 등)도 전혀
+// 로드되지 않는다 — 사용자가 "값이랑 명령이 안 간다"고 리포트한 것과 정확히 일치하는 증상이었다.
+// `--`는 POSIX 표준 "이후는 전부 위치 인자" 마커라 그 앞의 플래그가 가변인자든 아니든 항상 안전하다.
+function runClaudeBg(flags: string[], prompt: string, cwd: string): Promise<string | null> {
+  const args = [...flags, '--', prompt];
   return checkClaudeBinaryOnce().then(() => new Promise<string | null>(resolve => {
     let out = '';
     let settled = false;
@@ -1978,7 +1999,7 @@ function queueLeadOperation<T>(internalId: string, fn: () => Promise<T>): Promis
 // 참고, "woke session ... with its saved options"로 확인됨)를 이용해, 돌아온 짧은 id가 resume 전
 // id(current.id)와 다르면 문구를 못 알아봤어도 복사본으로 단정하고 정리한다(resumeOnce).
 function resumeOnce(internalId: string, current: LeadRecord, message: string, attempt: number): Promise<string | null> {
-  return runClaudeBg(['--bg', '--resume', current.sessionId, resolveLongPrompt(message)], current.targetDir).then(candidateId => {
+  return runClaudeBg(['--bg', '--resume', current.sessionId], resolveLongPrompt(message), current.targetDir).then(candidateId => {
     if (!candidateId) return null;
     if (candidateId !== current.id) {
       logCritical(
@@ -2229,7 +2250,8 @@ async function restartLead(internalId: string, instruction: string): Promise<{ i
   // 재시작은 완전히 새 세션(--resume이 아님)이라 launchTeamLead와 같은 이유로 이 시점에 SECRET_MODE_CLI_ARGS를
   // 다시 실어야 한다 — resumeLead와 달리 "저장된 옵션을 물려받는" 경로가 아니다.
   const newId = await runClaudeBg(
-    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), ...(current.secret ? SECRET_MODE_CLI_ARGS : []), resolveLongPrompt(prompt)],
+    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), ...(current.secret ? SECRET_MODE_CLI_ARGS : [])],
+    resolveLongPrompt(prompt),
     current.targetDir,
   );
   if (!newId) {
@@ -2346,7 +2368,8 @@ async function launchTeamLead(targetDir: string, instruction: string, label?: st
   // 발급해서 --mcp-config에 실은 뒤, 스폰 성공 후 같은 값을 새 레코드에 그대로 저장한다.
   const mcpToken = crypto.randomUUID();
   const id = await runClaudeBg(
-    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), ...(secret ? SECRET_MODE_CLI_ARGS : []), resolveLongPrompt(prompt)],
+    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), ...(secret ? SECRET_MODE_CLI_ARGS : [])],
+    resolveLongPrompt(prompt),
     targetDir,
   );
   if (!id) {
@@ -2486,7 +2509,8 @@ async function forkSessionAsLead(sessionId: string, cwd: string): Promise<string
   // 같은 이유로 스폰 전에 직접 발급한다.
   const mcpToken = crypto.randomUUID();
   const id = await runClaudeBg(
-    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), '--resume', sessionId, '지금 이 대화를 Claude Team Monitor로 가져왔습니다(별도 복사본, 원본 세션과는 별개). 계속 진행하세요.'],
+    ['--bg', ...buildMemberSpawnCliArgs(mcpToken), '--resume', sessionId],
+    '지금 이 대화를 Claude Team Monitor로 가져왔습니다(별도 복사본, 원본 세션과는 별개). 계속 진행하세요.',
     cwd,
   );
   if (!id) return null;
@@ -2535,7 +2559,7 @@ async function launchMember(leadId: string, targetDir: string, instruction: stri
   const prompt = `${TEAM_MEMBER_BRIEFING}\n\n${roleLine}${TEAM_MEMBER_STANDBY_NOTE}\n\n"""\n${instruction}\n"""`;
   const normalizedModel = normalizeMemberModel(model);
   const modelArgs = normalizedModel === 'default' ? [] : ['--model', normalizedModel];
-  const id = await runClaudeBg(['--bg', ...modelArgs, resolveLongPrompt(prompt)], targetDir);
+  const id = await runClaudeBg(['--bg', ...modelArgs], resolveLongPrompt(prompt), targetDir);
   if (!id) return null;
   registerMember({ memberId: id, leadId, createdAt: Date.now(), role: role || undefined, label: label.trim() });
 
@@ -2827,6 +2851,14 @@ ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string) => {
   const lead = loadLeads().find(l => l.id === leadId);
   if (!lead) return { status: 'not-found' as const };
 
+  // "터미널에서 직접 열기"로 띄운 attach 창이 아직 이 세션에 붙어있으면, 여기서 stop→resume을
+  // 걸었다가 attach 쪽의 독립적인 재연결 시도와 경합해서 daemon이 복사본을 만들 수 있다(위
+  // isAttachTerminalOpenFor 주석 참고, 실사용 재현됨). 큐로 돌리지 않고(그러면 영원히 안 풀릴
+  // 수 있다) 바로 실패로 알려서 사용자가 터미널을 닫고 다시 보내게 한다.
+  if (isAttachTerminalOpenFor(leadId)) {
+    return { status: 'attach-open' as const };
+  }
+
   const agents = await fetchAgents();
   const agent = agents.find(a => a.id === leadId);
   // blocked(권한 승인 대기 등)는 busy와 달리 "언젠가 저절로 풀리는" 상태가 아니다 — headless라
@@ -2880,15 +2912,22 @@ async function deleteLeadHistory(internalId: string): Promise<{ success: boolean
 
 ipcMain.handle('delete-lead-history', (_e, internalId: string) => deleteLeadHistory(internalId));
 
-// 이 팀장 앞으로 아직 서버에 남아있는(전달 안 된) 대기열 알림들의 id 목록을 돌려준다 — 렌더러는
-// 짧은 id만 알고 있으므로 여기서 internalId로 변환해서 찾는다. 두 곳에서 쓴다: (1) 재시작/작업종료
-// 확인 모달의 "몇 건 남았는지" 경고(개수만 필요), (2) deliverPendingNotices가 이제 같은 팀장 앞
-// 여러 건을 하나로 합쳐서 보낼 수 있어서, 대화창의 각 큐 항목이 실제로 전달됐는지를 더 이상
-// 원문 텍스트로 트랜스크립트와 대조할 수 없다 — 이 id 목록에 더 이상 없으면 전달된 것으로 본다.
+// 이 팀장 앞으로 아직 서버에 남아있는(전달 안 된) 대기열 알림들을 돌려준다 — 렌더러는 짧은 id만
+// 알고 있으므로 여기서 internalId로 변환해서 찾는다. 두 곳에서 쓴다: (1) 재시작/작업종료 확인
+// 모달의 "몇 건 남았는지" 경고(개수만 필요), (2) deliverPendingNotices가 이제 같은 팀장 앞 여러
+// 건을 하나로 합쳐서 보낼 수 있어서, 대화창의 각 큐 항목이 실제로 전달됐는지를 더 이상 원문
+// 텍스트로 트랜스크립트와 대조할 수 없다 — 이 목록에 더 이상 없으면 전달된 것으로 본다.
+// exhausted(시도 횟수가 MAX_NOTICE_DELIVERY_ATTEMPTS에 도달)도 함께 내려준다 — 예전엔 id
+// 존재 여부만 봤는데, 그러면 "아직 재시도 중"과 "자동 재시도를 완전히 포기하고 큐에 남아만
+// 있음"이 화면에서 똑같이 "대기열에 넣었습니다"로 보였다(실사용 재현: 다른 경로가 같은 세션을
+// 동시에 resume해서 포크가 반복되면 5회 재시도가 전부 실패하는데, 채팅창은 계속 "자동으로
+// 전달됩니다"라고만 보여줘서 사용자가 메시지가 사실상 영구히 막힌 걸 알 도리가 없었다).
 ipcMain.handle('get-pending-notice-ids', (_e, leadId: string) => {
   const lead = loadLeads().find(l => l.id === leadId);
   if (!lead) return [];
-  return loadPendingNotices().filter(n => n.leadInternalId === lead.internalId).map(n => n.id);
+  return loadPendingNotices()
+    .filter(n => n.leadInternalId === lead.internalId)
+    .map(n => ({ id: n.id, exhausted: (n.attempts ?? 0) >= MAX_NOTICE_DELIVERY_ATTEMPTS }));
 });
 
 // 정체 감시가 만들어낸, 아직 사용자 확인을 안 거친 알림 목록. 화면에 팀장 이름 등을 붙여
@@ -2988,6 +3027,64 @@ function openTerminalRunning(command: string, cwd?: string, winEnv?: NodeJS.Proc
   console.error(`[openTerminalRunning] 이 OS(${process.platform})에서는 터미널 자동 열기를 지원하지 않습니다.`);
 }
 
+// "터미널에서 직접 열기"로 띄운 attach 터미널의 PID를 세션 짧은 id별로 기억해둔다 — 이 창이 열려
+// 있는 동안 앱이 같은 세션에 stop→resume을 걸면(메시지 배달) attach 쪽도 독립적으로 재연결을
+// 시도해서 daemon이 복사본을 만드는 경합이 실제로 재현됐다(2026-09-18, 이 앱 자신의 팀장 세션에서
+// 실사용 재현 — daemon.log에 fleet/shell 태그가 같은 세션에 몇 초 간격으로 번갈아 찍히며 6연속
+// 포크). Windows에서만 지원한다 — macOS는 osascript가 이미 떠있는 Terminal.app에 Apple Event로
+// 명령만 보내는 방식이라 새로 생기는 자식 프로세스가 없어서 PID로 추적할 방법이 없다.
+const attachTerminalPids = new Map<string, number[]>(); // key: session 짧은 id
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// resumeLead/deliverPendingNotices가 stop→resume을 걸기 전에 확인한다 — 살아있는 PID가 하나도
+// 없으면(창을 닫았거나 애초에 못 찾았으면) false를 돌려주면서 지도도 정리한다.
+function isAttachTerminalOpenFor(sessionShortId: string): boolean {
+  const pids = attachTerminalPids.get(sessionShortId);
+  if (!pids || pids.length === 0) return false;
+  const alive = pids.filter(isProcessAlive);
+  if (alive.length === 0) {
+    attachTerminalPids.delete(sessionShortId);
+    return false;
+  }
+  if (alive.length !== pids.length) attachTerminalPids.set(sessionShortId, alive);
+  return true;
+}
+
+// openTerminalRunning으로 claude attach 터미널을 띄운 직후, 그 창의 실제 PID를 찾아 기록한다.
+// Windows에서 콘솔 없는 프로세스(Electron main)가 `cmd.exe /c start cmd.exe /k <command>`로 새
+// 콘솔 창을 띄우면, spawn()이 돌려주는 child(=`cmd.exe /c start ...` 자신)는 `start`가 새 창을
+// 띄우자마자 곧바로 종료돼버려서 child.pid로는 실제 창의 PID를 못 잡는다 — 대신 명령줄에 이
+// 세션의 짧은 id가 고유하게 박혀있는 걸 이용해 WMI로 찾는다. `start`가 실제로 새 창을 띄우기까지
+// 짧은 지연이 있어 800ms 뒤에 조회한다(그 사이 사라지는 `/c start` 자신의 프로세스가 같이 잡혀도
+// 무해하다 — isAttachTerminalOpenFor가 매번 살아있는 것만 걸러낸다).
+function trackAttachTerminal(sessionShortId: string): void {
+  if (process.platform !== 'win32') return;
+  setTimeout(() => {
+    const needle = `claude attach ${sessionShortId}`;
+    const ps = spawn('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command',
+      `Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" | Where-Object { $_.CommandLine -like '*${needle}*' } | Select-Object -ExpandProperty ProcessId`,
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    ps.stdout?.on('data', d => { out += d.toString(); });
+    ps.on('close', () => {
+      const pids = out.split(/\s+/).map(s => parseInt(s, 10)).filter(n => Number.isFinite(n));
+      if (pids.length) attachTerminalPids.set(sessionShortId, pids);
+    });
+    // 못 찾아도(예: powershell 자체가 없는 환경) 이 세션에 대해서만 경합 감지를 못 하는 것뿐이고
+    // 예전(이 기능 추가 전)과 같은 동작으로 남으므로 best-effort로 둔다.
+    ps.on('error', () => { /* ignore */ });
+  }, 800);
+}
+
 ipcMain.handle('open-in-terminal', (_e, sessionShortId: string) => {
   if (typeof sessionShortId !== 'string' || !SESSION_SHORT_ID_RE.test(sessionShortId)) {
     console.error('[open-in-terminal] 유효하지 않은 세션 id라 거부합니다:', sessionShortId);
@@ -2995,6 +3092,7 @@ ipcMain.handle('open-in-terminal', (_e, sessionShortId: string) => {
   }
   // claude attach는 인터랙티브 터미널이 필요해서, 새 콘솔 창을 띄워 그 안에서 attach를 실행한다.
   openTerminalRunning(`claude attach ${sessionShortId}`);
+  trackAttachTerminal(sessionShortId);
 });
 
 // 이 앱(Claude Team Monitor.exe) 자신이 다른 claude 세션 안에서(팀장 세션의 자식 프로세스 등으로)
