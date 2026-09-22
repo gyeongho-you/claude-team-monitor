@@ -1052,12 +1052,19 @@ async function sendChatMessage() {
       return;
     }
     // resumeLead가 다른 짧은 id로 깨어날 수 있다(main.ts resumeLead 주석 참고) — 반영하지 않으면
-    // 대화창 선택이 풀려서 방금 보낸 대화가 사라진 것처럼 보인다. pendingChatTurns도 새 id 밑으로
-    // 옮겨야 renderChat()이 selectedLeadId 기준으로 계속 찾는다.
+    // 대화창 선택이 풀려서 방금 보낸 대화가 사라진 것처럼 보인다. pendingChatTurns는 사용자가 그
+    // 사이 어디로 이동했든 항상 새 id 밑으로 옮긴다(대기 중이던 메시지 자체는 새 id로 계속
+    // 추적돼야 renderChat()이 나중에 그 팀장으로 돌아왔을 때 찾을 수 있다).
     movePendingChatTurns(leadId, result.id);
-    selectedLeadId = result.id;
+    // 그런데 화면 전환(selectedLeadId 갱신)은 사용자가 이 응답을 기다리는 동안 다른 팀장으로
+    // 이미 옮겨갔으면 하면 안 된다 — autoStallNudgeToggle 핸들러가 이미 쓰는 것과 같은 가드
+    // (요청 시작 시점의 leadId와 지금 selectedLeadId가 같을 때만 갱신). 안 그러면 사용자가
+    // B로 이동해 있는데 응답이 늦게 온 A의 결과가 selectedLeadId를 다시 A로 덮어써서, 화면이
+    // 사용자가 보고 있던 B에서 A로 튕겨나가는 사고가 난다(실사용 재현).
+    if (selectedLeadId === leadId) selectedLeadId = result.id;
     // renderChat()만 부르면 대화 내용만 갱신되고, 카드의 busy 표시 등은 다음 3초 폴링까지 그대로다 —
     // refreshBoardNow()가 renderBoard()를 거쳐 renderChat()까지 알아서 호출해주므로 이걸로 대체한다.
+    // 이건 selectedLeadId가 바뀌었든 아니든 항상 호출해야 한다(카드 목록 자체는 항상 최신이어야 함).
     await refreshBoardNow();
   } catch (err) {
     removePendingChatTurn(leadId, localId);
@@ -2091,16 +2098,19 @@ launchBtn.addEventListener('click', async () => {
   launchBtn.disabled = true;
   launchStatusEl.textContent = '띄우는 중...';
   try {
-    const id = await window.api.launchTeamLead(targetDirSelect.value, instructionEl.value, leadNameEl.value.trim(), launchSecretToggle.checked);
-    if (id) {
-      launchStatusEl.textContent = `팀장 세션(${id})을 시작했습니다.`;
+    // launchTeamLead가 이제 실패 시에도 그냥 null이 아니라 구체적 사유({ error })를 돌려준다 —
+    // 예전엔 readiness 실패든 runClaudeBg 타임아웃이든 항상 이 하드코딩된 범용 메시지만 봤는데,
+    // 이제는 실제 원인(예: "워크스페이스 신뢐 승인이 안 돼 있습니다")이 그대로 화면에 보인다.
+    const result = await window.api.launchTeamLead(targetDirSelect.value, instructionEl.value, leadNameEl.value.trim(), launchSecretToggle.checked);
+    if (result && result.id) {
+      launchStatusEl.textContent = `팀장 세션(${result.id})을 시작했습니다.`;
       formMode = 'none';
-      selectedLeadId = id;
+      selectedLeadId = result.id;
       launchSecretToggle.checked = false; // 다음 팀장은 기본값(일반 모드)에서 다시 시작 — 매번 실수로 켜져 있으면 안 됨
       leadNameEl.value = ''; // 다음 팀장 띄울 때 이전 이름이 남아있지 않게 초기화
       renderMemberRow(); // 새 팀장이라 소속 팀원이 없을 테니, 폴링 안 기다리고 바로 비워서 보여준다
     } else {
-      launchStatusEl.textContent = '팀장 세션 시작에 실패했습니다 — 터미널을 직접 열어 claude --version, claude --bg가 정상 동작하는지 확인해보세요(CLI 미설치·PATH 문제·로그인 만료가 흔한 원인입니다).';
+      launchStatusEl.textContent = (result && result.error) || '팀장 세션 시작에 실패했습니다 — 터미널을 직접 열어 claude --version, claude --bg가 정상 동작하는지 확인해보세요(CLI 미설치·PATH 문제·로그인 만료가 흔한 원인입니다).';
     }
   } catch (err) {
     launchStatusEl.textContent = `팀장 세션 시작 중 오류가 발생했습니다: ${errMsg(err)}`;

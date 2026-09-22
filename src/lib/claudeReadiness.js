@@ -19,6 +19,18 @@ const os = require('os');
 // 풀렸고, 이 플래그는 그 뒤로도 계속 false였다). 즉 이 필드는 "막혀있다"는 신호가 아니라 그냥
 // "이 기능을 아직 안 써봤다"는 뜻일 수 있어서, 이걸 막는 조건으로 쓰면 실제로는 멀쩡한 디렉토리를
 // 영구 오탐(false positive)으로 계속 잡아낸다 — 그래서 뺐다.
+//
+// 2026-09-21 재검증: claude CLI가 그 사이 업데이트돼서(v2.1.278) `claude --help`의 문구가
+// "workspace trust dialog is skipped when Claude is run in non-interactive mode (via -p, or
+// when stdout is not a TTY...)"로 바뀌었다 — `--bg`(headless)도 non-interactive라 이제 이
+// 케이스에 포함되는 것으로 보인다. 실측: 한 번도 실행한 적 없는 완전히 새 디렉토리 3곳에서
+// 각각 `claude --bg`를 스폰 → 3/3 전부 트러스트 다이얼로그 없이 정상 완료(`claude logs`로
+// 멈춤 없음 확인, "trust" 문구 자체가 안 뜸). 이 재검증 이후로 `launchTeamLead`/`resumeLead`/
+// `restartLead`는 이 함수의 `ready: false` 판정을 더 이상 spawn 차단에 쓰지 않고 경고 로그만
+// 남긴다(각 함수 호출부 주석 참고) — 이 함수 자체(판정 로직)는 안 건드렸다, 판정 결과를 "어떻게
+// 쓸지"만 호출부에서 바꿨다(설정 화면의 미승인 디렉토리 안내 배너 용도는 여전히 이 판정을 그대로
+// 쓴다). CLI 동작이 다시 바뀌면 이 재검증도 다시 해야 한다 — 위와 같은 방식(새 디렉토리에서
+// 직접 `claude --bg` 스폰해서 멈추는지 확인)으로 재현하면 된다.
 /**
  * @param {string} targetDir
  * @returns {{ ready: boolean, reason?: string }}

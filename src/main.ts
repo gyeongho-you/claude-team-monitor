@@ -1982,10 +1982,14 @@ async function resumeSpawnWithRetry(internalId: string, current: LeadRecord, mes
 async function resumeLead(internalId: string, message: string): Promise<string | null> {
   const current = loadLeads().find(l => l.internalId === internalId);
   if (!current) return null;
+  // 2026-09-21 재검증(claudeReadiness.js 주석 참고: claude CLI v2.1.278, 한 번도 실행한 적
+  // 없는 새 디렉토리 3곳에서 백그라운드 스폰 3/3 모두 트러스트 다이얼로그 없이 정상 완료) 이후로는
+  // 이 판정을 더 이상 spawn 차단에 쓰지 않는다(launchTeamLead/restartLead와 같은 이유) — 경고만
+  // 남기고 그대로 진행한다. resumeLead의 반환 타입(string | null)은 이번 청크 범위 밖이라(호출부가
+  // 많아 일관되게 고치려면 별도 청크가 필요) 그대로 두고, 이 판정 하나만 차단 대신 경고로 바꾼다.
   const readiness = checkDirectoryClaudeReady(current.targetDir);
   if (!readiness.ready) {
-    logCritical(claudeNotReadyMessage(current.targetDir, readiness.reason!));
-    return null;
+    logCritical(`[resumeLead] ${claudeNotReadyMessage(current.targetDir, readiness.reason!)} (경고만 하고 resume은 계속 시도합니다)`);
   }
   // 히스토리 탭에서 이미 오프라인인(agents 스냅샷에 안 잡히는) 팀장에게 메시지를 보내도 여기까지
   // 그대로 들어온다 — restartLead와 같은 이유로, 실제로 떠있을 때만 stop을 호출한다(없는 프로세스에
@@ -2087,10 +2091,13 @@ async function resumeLead(internalId: string, message: string): Promise<string |
 async function restartLead(internalId: string, instruction: string): Promise<{ id: string } | { error: string }> {
   const current = loadLeads().find(l => l.internalId === internalId);
   if (!current) return { error: '팀장 레코드를 찾을 수 없습니다(이미 삭제됐거나 internalId가 어긋났을 수 있음).' };
+  // 2026-09-21 재검증(claudeReadiness.js 주석 참고: claude CLI v2.1.278, 한 번도 실행한 적
+  // 없는 새 디렉토리 3곳에서 백그라운드 스폰 3/3 모두 트러스트 다이얼로그 없이 정상 완료) 이후로는
+  // 이 판정을 더 이상 spawn 차단에 쓰지 않는다(launchTeamLead와 같은 이유) — 경고만 남기고 그대로
+  // 진행한다. 아래에서 spawn 자체가 실패하면 이 판정이 원인일 수 있다는 걸 실패 메시지에 같이 담는다.
   const readiness = checkDirectoryClaudeReady(current.targetDir);
   if (!readiness.ready) {
-    logCritical(claudeNotReadyMessage(current.targetDir, readiness.reason!));
-    return { error: `"${current.targetDir}"에서 claude 최초 실행 승인이 안 돼 있습니다(${readiness.reason}) — 그 디렉토리에서 터미널로 claude를 한 번 실행해 승인창을 눌러준 뒤 다시 시도하세요.` };
+    logCritical(`[restartLead] ${claudeNotReadyMessage(current.targetDir, readiness.reason!)} (경고만 하고 spawn은 계속 시도합니다)`);
   }
   // 히스토리 탭에서 이미 오프라인인(agents 스냅샷에 안 잡히는) 팀장을 골라 재시작해도 여기까지
   // 그대로 들어온다 — 이 경우 claude stop을 걸 실제 프로세스가 없으니 불필요하게 시간만 쓰고
@@ -2196,11 +2203,18 @@ async function findSessionIdByShortIdRetrying(shortId: string): Promise<string |
   return null;
 }
 
-async function launchTeamLead(targetDir: string, instruction: string, label?: string, secret?: boolean): Promise<string | null> {
+// 예전엔 실패하면 항상 null만 돌려줘서, renderer.js가 readiness 실패든 runClaudeBg 타임아웃이든
+// 항상 똑같은 하드코딩된 범용 안내문만 보여줬다 — restartLead가 이미 겪고 고친 것과 같은 문제라
+// (아래 restartLead 주석 참고) 같은 방식으로 반환 타입을 바꿔서 실패 사유를 렌더러까지 전달한다.
+async function launchTeamLead(targetDir: string, instruction: string, label?: string, secret?: boolean): Promise<{ id: string } | { error: string }> {
   const readiness = checkDirectoryClaudeReady(targetDir);
   if (!readiness.ready) {
-    logCritical(claudeNotReadyMessage(targetDir, readiness.reason!));
-    return null;
+    // 2026-09-21 재검증(claudeReadiness.js 주석 참고: claude CLI v2.1.278, 한 번도 실행한 적
+    // 없는 새 디렉토리 3곳에서 백그라운드 스폰 3/3 모두 트러스트 다이얼로그 없이 정상 완료) 이후로는
+    // 이 판정을 더 이상 spawn 차단에 쓰지 않는다 — 경고만 남기고 그대로 진행한다. 그래도 아래에서
+    // spawn 자체가 실패하면(구버전 CLI로 되돌아갔거나 이번 재검증이 특이 케이스였을 가능성 포함)
+    // readiness가 원인일 수 있다는 걸 실패 메시지에 같이 담는다.
+    logCritical(`[launchTeamLead] ${claudeNotReadyMessage(targetDir, readiness.reason!)} (경고만 하고 spawn은 계속 시도합니다)`);
   }
   installTeamLeadSkill();
   const { paths: approvedMembers, text: approvedText } = approvedMemberBriefing(targetDir);
@@ -2213,7 +2227,12 @@ async function launchTeamLead(targetDir: string, instruction: string, label?: st
     ['--bg', ...buildMemberSpawnCliArgs(mcpToken), ...(secret ? SECRET_MODE_CLI_ARGS : []), resolveLongPrompt(prompt)],
     targetDir,
   );
-  if (!id) return null;
+  if (!id) {
+    if (!readiness.ready) {
+      return { error: `팀장 세션 시작에 실패했습니다 — "${targetDir}"에서 ${readiness.reason} 이게 원인일 수 있습니다. 그 디렉토리에서 터미널로 claude를 한 번 실행해 승인창을 눌러준 뒤 다시 시도해보세요.` };
+    }
+    return { error: `claude --bg가 ${RUN_CLAUDE_TIMEOUT_MS / 1000}초 안에 새 세션 시작을 확인해주지 못했습니다(타임아웃 또는 "backgrounded" 표시를 못 찾음) — 터미널을 직접 열어 claude --version, claude --bg가 정상 동작하는지 확인해보세요(CLI 미설치·PATH 문제·로그인 만료가 흔한 원인입니다).` };
+  }
 
   // 막 시작한 세션은 첫 턴을 처리 중일 수 있어 곧바로 stop시키면 방해가 된다 — 그래서 이 시점엔 자기 id를
   // 알려주는 후속 메시지를 보내지 않는다(위험). 대신 SKILL.md가 스스로 `claude agents --json`으로 자기
@@ -2224,7 +2243,7 @@ async function launchTeamLead(targetDir: string, instruction: string, label?: st
   leads.push({ id, sessionId, targetDir, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID(), mcpToken, secret, label: label?.trim() || undefined });
   saveLeads(leads);
 
-  return id;
+  return { id };
 }
 
 // 터미널에서 사용자가 직접 `claude --bg "/team-lead ..."`로 띄운 세션을 나중에 이 앱에 등록해서
