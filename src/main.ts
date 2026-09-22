@@ -2290,6 +2290,14 @@ async function endLeadWork(internalId: string): Promise<{ success: boolean; memb
   if (!leadStopped) {
     leadStopped = await stopSession(currentLead.id);
   }
+  // computeOfflineLeads는 agents 스냅샷에 한 번 안 잡힌 것만으로 바로 오프라인 확정하지 않고
+  // LEAD_OFFLINE_GRACE_MS(stop→resume 재기동 오판 방지용, 70초 이상)를 기다린다 — 근데 지금은
+  // 사용자가 "작업 종료"를 직접 눌러서 확실하게 정지시킨 것이라 재기동 오판 걱정이 없다. 이
+  // 유예를 그대로 두면 히스토리 탭으로 넘어가기까지 매번 1분 넘게 기다려야 하는 것처럼
+  // 보인다(실사용 지적) — leadFirstMissAt을 유예 시간 이전 시각으로 미리 채워두면, 다음 폴링에서
+  // trackFirstMiss가 곧바로 'expired'를 반환해 즉시 히스토리로 넘어간다. 정지 자체가 실패했으면
+  // (leadStopped===false) 실제로는 아직 살아있을 수 있으므로 건드리지 않고 평소 유예 판정을 그대로 둔다.
+  if (leadStopped) leadFirstMissAt.set(currentLead.id, 0);
   return { success: leadStopped, memberFailures };
 }
 
