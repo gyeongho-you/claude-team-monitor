@@ -144,7 +144,18 @@ pub fn track_first_miss(map: &mut HashMap<String, i64>, is_present: bool, id: &s
     match map.get(id) {
         None => {
             map.insert(id.to_string(), now);
-            FirstMissResult::FirstMiss
+            // grace_ms<=0은 "유예 없이 즉시 만료"를 의도한 호출(예: 앱 재시작 직후 첫 폴링, 또는
+            // endLeadWork가 확정 종료를 알리려고 유예를 건너뛰는 경우)인데, 이 id를 처음 보는
+            // 순간이면(map에 아직 기록이 없으면) 항상 FirstMiss만 반환해서 grace_ms를 사실상 무시하고
+            // 있었다 — 그 다음 폴링부터는 has_completed_first_poll이 이미 true라 원래 유예
+            // (LEAD_OFFLINE_GRACE_MS, 3분 이상)가 적용돼, "즉시 만료"를 의도했던 호출이 실제로는
+            // 다음 폴링까지 grace_ms=0을 전혀 못 써보고 전체 유예를 그대로 물게 됐다(실측 UI
+            // 테스트에서 죽은 팀장이 앱 재시작 후 ~217초 동안 어느 탭에도 안 보이는 것으로 재현됨).
+            if grace_ms <= 0 {
+                FirstMissResult::Expired
+            } else {
+                FirstMissResult::FirstMiss
+            }
         }
         Some(&first_miss_at) => {
             if now - first_miss_at < grace_ms {
@@ -215,6 +226,19 @@ mod tests {
         // 다시 살아있는 것으로 잡히면 기록이 지워지고, 다음번엔 다시 처음부터(FirstMiss) 시작한다.
         assert_eq!(track_first_miss(&mut map, true, "lead-a", 999_999, 5_000), FirstMissResult::Present);
         assert!(!map.contains_key("lead-a"));
+    }
+
+    // 실측 UI 테스트로 재현됨(2026-09-22): 앱을 새로 켜면 lead_first_miss_at이 메모리라 전부
+    // 비어서, 이미 죽어있던 팀장도 정상 유예(LEAD_OFFLINE_GRACE_MS, 3분 이상)만큼 화면 어디에도
+    // 안 보이는 공백이 생겼다. computeOfflineLeads는 앱 시작 직후 첫 폴링에만 grace_ms=0을 주는데,
+    // 예전엔 이 함수가 "처음 보는 id"면 grace_ms 값과 무관하게 항상 FirstMiss만 반환해서, 그
+    // grace_ms=0이 있으나 마나였다(같은 버그가 Node 쪽 firstMissTracker.js에도 있었다).
+    #[test]
+    fn zero_grace_expires_immediately_even_on_first_sighting() {
+        let mut map = HashMap::new();
+        assert_eq!(track_first_miss(&mut map, false, "lead-a", 1_000, 0), FirstMissResult::Expired);
+        assert_eq!(map.get("lead-a"), Some(&1_000));
+        assert_eq!(track_first_miss(&mut map, false, "lead-a", 1_001, 0), FirstMissResult::Expired);
     }
 
     #[test]

@@ -2279,7 +2279,7 @@ async function restartLead(internalId: string, instruction: string): Promise<{ i
   if (!newId) {
     return { error: `claude --bg가 ${RUN_CLAUDE_TIMEOUT_MS / 1000}초 안에 새 세션 시작을 확인해주지 못했습니다(타임아웃 또는 "backgrounded" 표시를 못 찾음). claude CLI 로그인/설치 상태를 확인해보세요 — 자세한 로그는 앱 콘솔에 남습니다.` };
   }
-  const newSessionId = (await findSessionIdByShortId(newId)) ?? newId;
+  const newSessionId = (await findSessionIdByShortIdRetrying(newId)) ?? newId;
 
   const leads = loadLeads();
   const rec = leads.find(l => l.internalId === internalId);
@@ -2401,7 +2401,7 @@ async function launchTeamLead(targetDir: string, instruction: string, label?: st
   // 막 시작한 세션은 첫 턴을 처리 중일 수 있어 곧바로 stop시키면 방해가 된다 — 그래서 이 시점엔 자기 id를
   // 알려주는 후속 메시지를 보내지 않는다(위험). 대신 SKILL.md가 스스로 `claude agents --json`으로 자기
   // cwd에 맞는 id를 찾도록 안내한다.
-  const sessionId = (await findSessionIdByShortId(id)) ?? id;
+  const sessionId = (await findSessionIdByShortIdRetrying(id)) ?? id;
 
   const leads = loadLeads();
   leads.push({ id, sessionId, targetDir, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID(), secret, label: label?.trim() || undefined });
@@ -2431,8 +2431,14 @@ async function getAdoptableSessions(): Promise<AgentEntry[]> {
 // 없어도 "이 팀장의 승인된 디렉토리에서, 이 팀장이 뜬 뒤에 새로 나타난 미등록 세션"이면 꽤 높은
 // 확률로 그 팀장이 띄운 팀원이라고 추정할 수 있다 — 확정은 아니라서 자동으로 등록하지는 않고,
 // "이 팀장 소속일 수 있음"이라고 표시만 해서 사람이 한 번 확인 후 등록 버튼을 누르게 한다.
+// 문자열을 그대로 비교하지 않고 path.resolve로 정규화해서 비교한다(teamMemberServer.ts의
+// spawn_team_member 승인 체크와 같은 패턴) — register_as_lead MCP 툴로 등록된 팀장이
+// approvedMembers를 forward-slash로 넘기면(LLM이 흔히 그렇게 준다) claude CLI가 항상
+// backslash로 돌려주는 agent.cwd와 완전 문자열 비교가 실패해 "미등록(추정)"으로 못 뜬다(Tauri
+// 포팅본의 실측 UI 테스트로 재현·확인됨).
 function guessProbableLeadId(agent: AgentEntry, leads: LeadRecord[]): string | undefined {
-  const lead = leads.find(l => l.approvedMembers.includes(agent.cwd) && (agent.startedAt ?? 0) >= l.launchedAt);
+  const agentCwd = path.resolve(agent.cwd);
+  const lead = leads.find(l => l.approvedMembers.some(dir => path.resolve(dir) === agentCwd) && (agent.startedAt ?? 0) >= l.launchedAt);
   return lead?.id;
 }
 
@@ -2526,7 +2532,7 @@ async function forkSessionAsLead(sessionId: string, cwd: string): Promise<string
     cwd,
   );
   if (!id) return null;
-  const newSessionId = (await findSessionIdByShortId(id)) ?? id;
+  const newSessionId = (await findSessionIdByShortIdRetrying(id)) ?? id;
   const { paths: approvedMembers } = approvedMemberBriefing(cwd);
   // 위 두 await(runClaudeBg/findSessionIdByShortId) 동안 최대 수십 초가 지날 수 있고, 그 사이
   // 3초 폴링의 reconcileLeadIds 등이 leads.json에 다른 팀장의 변경을 저장했을 수 있다 — 맨 위에서
