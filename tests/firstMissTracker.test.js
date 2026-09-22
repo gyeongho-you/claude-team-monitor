@@ -48,14 +48,23 @@ test('trackFirstMiss: 다시 잡히면(present) 처음부터 다시 유예가 �
   assert.equal(map.get('a'), 22000);
 });
 
-test('trackFirstMiss: graceMs=0이면 바로 다음 호출부터 expired — 콜드 스타트 유예 우회(computeOfflineLeads)가 기대는 동작', () => {
+test('trackFirstMiss: graceMs<=0이면 처음 놓친 순간(map에 기록이 아직 없을 때)에도 곧바로 expired — 콜드 스타트 유예 우회(computeOfflineLeads)가 기대는 동작', () => {
   // 앱을 새로 켜면 leadFirstMissAt/lastKnownLiveLeadRow가 메모리라 전부 비어서, 이미 죽어있던
-  // 팀장도 정상 유예시간(약 75초)만큼 화면 어디에도 안 보이는 공백이 생겼다(실사용 재현). 앱이
-  // 막 시작한 첫 폴링에서만 graceMs를 0으로 줘서, 두 번째 폴링(각 폴링 사이 실제 간격이 있는 한)
-  // 부터 곧바로 expired가 나오게 한 게 그 수정이다 — 이 테스트는 그 전제(graceMs=0이면 정말
-  // "찰나만 지나도" expired가 되는지)를 검증한다.
+  // 팀장도 정상 유예시간(LEAD_OFFLINE_GRACE_MS, 3분 이상)만큼 화면 어디에도 안 보이는 공백이
+  // 생겼다(실사용 재현, Tauri 포팅본의 실측 UI 테스트로 재확인 — 앱 재시작 후 ~217초 공백).
+  //
+  // 예전엔 이 함수가 "처음 보는 id"면 graceMs 값과 무관하게 항상 'first-miss'만 반환했다 —
+  // computeOfflineLeads가 앱 시작 직후 첫 폴링에만 graceMs=0을 줘도, 바로 그 첫 폴링이 이 id를
+  // 처음 보는 순간이라 grace 판정 자체를 아직 못 타보고 무조건 'first-miss'가 나왔고, 그 다음
+  // 폴링부터는 hasCompletedFirstPoll이 true라 원래 유예(LEAD_OFFLINE_GRACE_MS)로 돌아가서
+  // "즉시 만료"가 사실상 죽은 코드였다(이 테스트가 예전엔 첫 호출을 'first-miss'로 기대하고
+  // 두 번째 호출에도 graceMs=0을 또 줘서 통과했는데, 실제 호출부는 두 번째 폴링부터 graceMs가
+  // 이미 전체 유예로 바뀌어 있어서 이 테스트가 실제 동작을 반영하지 못하고 있었다).
+  //
+  // 지금은 graceMs<=0이면 처음 보는 순간에도(map에 기록이 없어도) 바로 expired를 반환한다.
   const map = new Map();
-  assert.equal(trackFirstMiss(map, false, 'a', 1000, 0), 'first-miss');
+  assert.equal(trackFirstMiss(map, false, 'a', 1000, 0), 'expired');
+  assert.equal(map.get('a'), 1000); // 기록 자체는 남는다 — 다시 present가 되기 전까지 계속 expired가 나와야 한다
   assert.equal(trackFirstMiss(map, false, 'a', 1001, 0), 'expired');
 });
 
