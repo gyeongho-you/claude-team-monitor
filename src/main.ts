@@ -435,6 +435,35 @@ function getFileDiff(cwd: string, file: string): Promise<{ diff: string; isNew: 
 
 // 팀장을 하루 넘겨 이어가는 경우가 있어서, 오늘 날짜뿐 아니라 daily-journal에 쌓인 모든 날짜의
 // 기록을 (오래된 순으로) 훑어서 합친다 — 그래야 어제 이전 대화도 이어하기 후 대화창에 남아있다.
+function readJournalFile(journalDataDir: string, date: string, projectName: string): any[] {
+  const file = path.join(journalDataDir, date, 'history', `${projectName}.jsonl`);
+  if (!fs.existsSync(file)) return [];
+  const content = fs.readFileSync(file, 'utf-8').trim();
+  if (!content) return [];
+  const entries: any[] = [];
+  content.split('\n').filter(Boolean).forEach(l => {
+    try { entries.push(JSON.parse(l)); } catch { /* 손상된 줄은 건너뜀 */ }
+  });
+  return entries;
+}
+
+// 예전엔 캐시 없이 매번 모든 날짜 폴더를 처음부터 다시 읽고 파싱했다 — 프로젝트마다 기록이
+// 쌓일수록(실측: 두 달치 프로젝트 호출 한 번에 130~145ms) 느려지고, 이 함수가 폴링마다 팀장/
+// 히스토리 카드 하나하나에 대해(getLatestPreview 경유) 반복 호출되므로 그 비용이 그대로
+// 곱해져서 앱을 켤 때 히스토리가 눈에 띄게 늦게 뜨는 원인이 됐다. 지난 날짜 폴더는 그 날이
+// 지나면 daily-journal이 다시는 그 폴더에 안 쓰므로(항상 "오늘" 폴더에만 씀) 한 번 읽으면
+// 프로젝트별 캐시에 영구 보관하고, "오늘" 날짜 폴더만 매번 mtime을 확인해서 실제로 바뀐
+// 경우에만 다시 읽는다 — 자정이 지나 그 날짜가 더 이상 "오늘"이 아니게 되면, 이미 캐시된
+// 마지막 내용이 그대로 "지난 날짜" 취급되어 재확인 없이 재사용된다(별도 이관 로직 불필요).
+type JournalDateCache = { entriesByDate: Map<string, any[]>; todayMtimeMs: number | null };
+const journalEntriesCache = new Map<string, JournalDateCache>();
+
+function todayDateString(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 function readJournalEntries(projectName: string): any[] {
   try {
     const journalDataDir = resolveJournalDataDir();
@@ -442,15 +471,33 @@ function readJournalEntries(projectName: string): any[] {
     const dates = fs.readdirSync(journalDataDir)
       .filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d))
       .sort();
+    if (dates.length === 0) return [];
+
+    const today = todayDateString();
+    let cache = journalEntriesCache.get(projectName);
+    if (!cache) {
+      cache = { entriesByDate: new Map(), todayMtimeMs: null };
+      journalEntriesCache.set(projectName, cache);
+    }
+
+    for (const date of dates) {
+      if (date === today) {
+        const file = path.join(journalDataDir, date, 'history', `${projectName}.jsonl`);
+        let mtimeMs: number | null = null;
+        try { mtimeMs = fs.statSync(file).mtimeMs; } catch { mtimeMs = null; }
+        if (mtimeMs !== cache.todayMtimeMs || !cache.entriesByDate.has(date)) {
+          cache.entriesByDate.set(date, readJournalFile(journalDataDir, date, projectName));
+          cache.todayMtimeMs = mtimeMs;
+        }
+      } else if (!cache.entriesByDate.has(date)) {
+        cache.entriesByDate.set(date, readJournalFile(journalDataDir, date, projectName));
+      }
+    }
+
     const entries: any[] = [];
     for (const date of dates) {
-      const file = path.join(journalDataDir, date, 'history', `${projectName}.jsonl`);
-      if (!fs.existsSync(file)) continue;
-      const content = fs.readFileSync(file, 'utf-8').trim();
-      if (!content) continue;
-      content.split('\n').filter(Boolean).forEach(l => {
-        try { entries.push(JSON.parse(l)); } catch { /* 손상된 줄은 건너뜀 */ }
-      });
+      const dateEntries = cache.entriesByDate.get(date);
+      if (dateEntries) entries.push(...dateEntries);
     }
     return entries;
   } catch {
@@ -475,11 +522,15 @@ function getLatestPreview(projectName: string, sessionId: string): SessionRow['p
 // 이슈로 실측 확인됨)에서 기록을 통째로 누락할 수 있다 — 그러면 대화창이 텅 비거나 최근 턴만
 // 쏙 빠져 보인다. daily-journal 기록이 비었거나 원본 세션 파일보다 뒤처져 보이면, 원본 세션 파일
 // (~/.claude/projects/<cwd 인코딩>/<sessionId>.jsonl)에서 직접 읽어와 모자란 뒷부분만 이어붙인다.
+// 그 다음 enrichAnswersFromRawSession으로, daily-journal에 이미 있는 턴이라도 원본 쪽 답변이 더
+// 길면(daily-journal은 그 턴의 "마지막 assistant 메시지" 한 조각만 남기는 구조라 도구 호출
+// 사이사이의 앞쪽 설명이 다 빠질 수 있음 — daily-journal 자체 소스로 확인함) 그쪽으로 교체한다.
 function getTranscript(projectName: string, sessionId: string, cwd: string): TranscriptEntry[] {
   const journalEntries = readJournalEntries(projectName)
     .filter(e => e.sessionId === sessionId)
     .map(e => ({ time: e.time ?? '', prompt: e.prompt ?? '', answer: e.answer ?? '' }));
-  return fillMissingTranscriptFromRawSession(journalEntries, cwd, sessionId);
+  const filled = fillMissingTranscriptFromRawSession(journalEntries, cwd, sessionId);
+  return enrichAnswersFromRawSession(filled, cwd, sessionId);
 }
 
 // "YYYY-MM-DD HH:MM"(daily-journal의 time 포맷, 분 단위) 문자열을 로컬 시각 기준 epoch ms로
@@ -498,6 +549,29 @@ function formatRawSessionTimestamp(iso: string | undefined): string {
   if (Number.isNaN(d.getTime())) return '';
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// readRawSessionTranscript는 몇 MB짜리 파일(실측: 두 달치 프로젝트의 팀장 세션 파일이 1.7MB)을
+// 매번 통째로 읽고 파싱한다 — fillMissingTranscriptFromRawSession의 "꼬리 보완"과
+// enrichAnswersFromRawSession의 "턴별 답변 비교"가 같은 폴링 호출 안에서 둘 다 원본을 필요로 할
+// 수 있어서, 세션당(cwd+sessionId 조합) mtime 기준 캐시를 하나 둬서 파일이 실제로 바뀌지
+// 않았으면 재파싱 없이 재사용한다.
+const rawSessionTranscriptCache = new Map<string, { mtimeMs: number; entries: TranscriptEntry[] }>();
+
+function getCachedRawSessionTranscript(cwd: string, sessionId: string): TranscriptEntry[] {
+  const file = path.join(PROJECTS_DIR, encodeProjectDirName(cwd), `${sessionId}.jsonl`);
+  let mtimeMs: number;
+  try {
+    mtimeMs = fs.statSync(file).mtimeMs;
+  } catch {
+    return [];
+  }
+  const key = `${cwd}::${sessionId}`;
+  const cached = rawSessionTranscriptCache.get(key);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.entries;
+  const entries = readRawSessionTranscript(cwd, sessionId);
+  rawSessionTranscriptCache.set(key, { mtimeMs, entries });
+  return entries;
 }
 
 // 원본 세션 파일(~/.claude/projects/.../<sessionId>.jsonl)은 daily-journal과 포맷이 전혀 다르다 —
@@ -565,7 +639,7 @@ function readRawSessionTranscript(cwd: string, sessionId: string): TranscriptEnt
 // 없다는 뜻이니 그냥 넘어간다.
 function fillMissingTranscriptFromRawSession(journalEntries: TranscriptEntry[], cwd: string, sessionId: string): TranscriptEntry[] {
   if (journalEntries.length === 0) {
-    const raw = readRawSessionTranscript(cwd, sessionId);
+    const raw = getCachedRawSessionTranscript(cwd, sessionId);
     return raw.length ? raw : journalEntries;
   }
 
@@ -583,7 +657,7 @@ function fillMissingTranscriptFromRawSession(journalEntries: TranscriptEntry[], 
     return journalEntries;
   }
 
-  const rawEntries = readRawSessionTranscript(cwd, sessionId);
+  const rawEntries = getCachedRawSessionTranscript(cwd, sessionId);
   if (rawEntries.length === 0) return journalEntries;
 
   const cutIndex = findLastMatchingRawIndex(journalEntries[journalEntries.length - 1], rawEntries);
@@ -591,6 +665,26 @@ function fillMissingTranscriptFromRawSession(journalEntries: TranscriptEntry[], 
   // 개수 기준으로 대략 맞춰 보완한다 — 완벽하지 않아도 아예 안 보이는 것보다는 낫다.
   const tail = cutIndex >= 0 ? rawEntries.slice(cutIndex + 1) : rawEntries.slice(journalEntries.length);
   return tail.length ? journalEntries.concat(tail) : journalEntries;
+}
+
+// daily-journal에 이미 기록이 있는 턴이라도, 그 턴의 답변이 원본 세션 파일 쪽보다 짧으면 원본
+// 쪽으로 교체한다. daily-journal의 answer는 Stop 훅이 넘겨주는 last_assistant_message 그대로인데,
+// 이건 그 턴의 "진짜 마지막 assistant 메시지 하나"일 뿐이다(daily-journal 자체 소스 stop-hook.ts
+// 확인) — 도구 호출 사이사이에 나온 앞쪽 설명은 애초에 daily-journal에 전달조차 안 된다. 그래서
+// 실시간으로 볼 때는(원본 파일 기반) 전체가 다 보이다가, daily-journal이 그 턴의 기록을 남기는
+// 순간부터 "완료했습니다" 같은 마지막 한 마디로 줄어드는 게 실사용으로 확인된 증상이다. 매칭은
+// findLastMatchingRawIndex와 같은 방식(prompt 정확히 일치 + 시간 가장 가까운 후보)을 항목별로
+// 반복한다 — 못 찾으면(문구 가공 등) 그 항목은 그대로 둔다.
+function enrichAnswersFromRawSession(entries: TranscriptEntry[], cwd: string, sessionId: string): TranscriptEntry[] {
+  if (entries.length === 0) return entries;
+  const rawEntries = getCachedRawSessionTranscript(cwd, sessionId);
+  if (rawEntries.length === 0) return entries;
+  return entries.map(entry => {
+    const idx = findLastMatchingRawIndex(entry, rawEntries);
+    if (idx < 0) return entry;
+    const rawAnswer = rawEntries[idx].answer;
+    return rawAnswer.length > entry.answer.length ? { ...entry, answer: rawAnswer } : entry;
+  });
 }
 
 // journalEntries의 마지막 항목과 똑같은 prompt 텍스트가 원본 세션 파일에 정확히 어디 있었는지
