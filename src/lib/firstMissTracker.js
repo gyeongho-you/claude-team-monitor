@@ -20,7 +20,14 @@ function trackFirstMiss(map, isPresent, id, now, graceMs) {
   const firstMissAt = map.get(id);
   if (firstMissAt === undefined) {
     map.set(id, now);
-    return 'first-miss';
+    // graceMs<=0은 "유예 없이 즉시 만료"를 의도한 호출(앱 시작 직후 첫 폴링, endLeadWork의 확정
+    // 종료 등)인데, 이 id를 처음 보는 순간이면 항상 'first-miss'만 반환해서 graceMs를 사실상
+    // 무시하고 있었다 — 다음 폴링부터는 hasCompletedFirstPoll이 이미 true라 원래 유예
+    // (LEAD_OFFLINE_GRACE_MS, 3분 이상)가 그대로 적용돼, "즉시 만료"를 의도한 호출이 전체 유예를
+    // 그대로 물게 된다(Tauri 포팅본의 실측 UI 테스트로 재현·확인 — 죽은 팀장이 앱 재시작 후
+    // ~217초 동안 어느 탭에도 안 보임. Rust로 옮겨진 동일 로직에서 먼저 발견됐지만 이 원본 함수의
+    // 버그다).
+    return graceMs <= 0 ? 'expired' : 'first-miss';
   }
   if (now - firstMissAt < graceMs) {
     return 'within-grace';
