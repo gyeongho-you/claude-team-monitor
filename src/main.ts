@@ -435,6 +435,35 @@ function getFileDiff(cwd: string, file: string): Promise<{ diff: string; isNew: 
 
 // 팀장을 하루 넘겨 이어가는 경우가 있어서, 오늘 날짜뿐 아니라 daily-journal에 쌓인 모든 날짜의
 // 기록을 (오래된 순으로) 훑어서 합친다 — 그래야 어제 이전 대화도 이어하기 후 대화창에 남아있다.
+function readJournalFile(journalDataDir: string, date: string, projectName: string): any[] {
+  const file = path.join(journalDataDir, date, 'history', `${projectName}.jsonl`);
+  if (!fs.existsSync(file)) return [];
+  const content = fs.readFileSync(file, 'utf-8').trim();
+  if (!content) return [];
+  const entries: any[] = [];
+  content.split('\n').filter(Boolean).forEach(l => {
+    try { entries.push(JSON.parse(l)); } catch { /* 손상된 줄은 건너뜀 */ }
+  });
+  return entries;
+}
+
+// 예전엔 캐시 없이 매번 모든 날짜 폴더를 처음부터 다시 읽고 파싱했다 — 프로젝트마다 기록이
+// 쌓일수록(실측: 두 달치 프로젝트 호출 한 번에 130~145ms) 느려지고, 이 함수가 폴링마다 팀장/
+// 히스토리 카드 하나하나에 대해(getLatestPreview 경유) 반복 호출되므로 그 비용이 그대로
+// 곱해져서 앱을 켤 때 히스토리가 눈에 띄게 늦게 뜨는 원인이 됐다. 지난 날짜 폴더는 그 날이
+// 지나면 daily-journal이 다시는 그 폴더에 안 쓰므로(항상 "오늘" 폴더에만 씀) 한 번 읽으면
+// 프로젝트별 캐시에 영구 보관하고, "오늘" 날짜 폴더만 매번 mtime을 확인해서 실제로 바뀐
+// 경우에만 다시 읽는다 — 자정이 지나 그 날짜가 더 이상 "오늘"이 아니게 되면, 이미 캐시된
+// 마지막 내용이 그대로 "지난 날짜" 취급되어 재확인 없이 재사용된다(별도 이관 로직 불필요).
+type JournalDateCache = { entriesByDate: Map<string, any[]>; todayMtimeMs: number | null };
+const journalEntriesCache = new Map<string, JournalDateCache>();
+
+function todayDateString(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 function readJournalEntries(projectName: string): any[] {
   try {
     const journalDataDir = resolveJournalDataDir();
@@ -442,15 +471,33 @@ function readJournalEntries(projectName: string): any[] {
     const dates = fs.readdirSync(journalDataDir)
       .filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d))
       .sort();
+    if (dates.length === 0) return [];
+
+    const today = todayDateString();
+    let cache = journalEntriesCache.get(projectName);
+    if (!cache) {
+      cache = { entriesByDate: new Map(), todayMtimeMs: null };
+      journalEntriesCache.set(projectName, cache);
+    }
+
+    for (const date of dates) {
+      if (date === today) {
+        const file = path.join(journalDataDir, date, 'history', `${projectName}.jsonl`);
+        let mtimeMs: number | null = null;
+        try { mtimeMs = fs.statSync(file).mtimeMs; } catch { mtimeMs = null; }
+        if (mtimeMs !== cache.todayMtimeMs || !cache.entriesByDate.has(date)) {
+          cache.entriesByDate.set(date, readJournalFile(journalDataDir, date, projectName));
+          cache.todayMtimeMs = mtimeMs;
+        }
+      } else if (!cache.entriesByDate.has(date)) {
+        cache.entriesByDate.set(date, readJournalFile(journalDataDir, date, projectName));
+      }
+    }
+
     const entries: any[] = [];
     for (const date of dates) {
-      const file = path.join(journalDataDir, date, 'history', `${projectName}.jsonl`);
-      if (!fs.existsSync(file)) continue;
-      const content = fs.readFileSync(file, 'utf-8').trim();
-      if (!content) continue;
-      content.split('\n').filter(Boolean).forEach(l => {
-        try { entries.push(JSON.parse(l)); } catch { /* 손상된 줄은 건너뜀 */ }
-      });
+      const dateEntries = cache.entriesByDate.get(date);
+      if (dateEntries) entries.push(...dateEntries);
     }
     return entries;
   } catch {
@@ -475,11 +522,15 @@ function getLatestPreview(projectName: string, sessionId: string): SessionRow['p
 // 이슈로 실측 확인됨)에서 기록을 통째로 누락할 수 있다 — 그러면 대화창이 텅 비거나 최근 턴만
 // 쏙 빠져 보인다. daily-journal 기록이 비었거나 원본 세션 파일보다 뒤처져 보이면, 원본 세션 파일
 // (~/.claude/projects/<cwd 인코딩>/<sessionId>.jsonl)에서 직접 읽어와 모자란 뒷부분만 이어붙인다.
+// 그 다음 enrichAnswersFromRawSession으로, daily-journal에 이미 있는 턴이라도 원본 쪽 답변이 더
+// 길면(daily-journal은 그 턴의 "마지막 assistant 메시지" 한 조각만 남기는 구조라 도구 호출
+// 사이사이의 앞쪽 설명이 다 빠질 수 있음 — daily-journal 자체 소스로 확인함) 그쪽으로 교체한다.
 function getTranscript(projectName: string, sessionId: string, cwd: string): TranscriptEntry[] {
   const journalEntries = readJournalEntries(projectName)
     .filter(e => e.sessionId === sessionId)
     .map(e => ({ time: e.time ?? '', prompt: e.prompt ?? '', answer: e.answer ?? '' }));
-  return fillMissingTranscriptFromRawSession(journalEntries, cwd, sessionId);
+  const filled = fillMissingTranscriptFromRawSession(journalEntries, cwd, sessionId);
+  return enrichAnswersFromRawSession(filled, cwd, sessionId);
 }
 
 // "YYYY-MM-DD HH:MM"(daily-journal의 time 포맷, 분 단위) 문자열을 로컬 시각 기준 epoch ms로
@@ -498,6 +549,29 @@ function formatRawSessionTimestamp(iso: string | undefined): string {
   if (Number.isNaN(d.getTime())) return '';
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// readRawSessionTranscript는 몇 MB짜리 파일(실측: 두 달치 프로젝트의 팀장 세션 파일이 1.7MB)을
+// 매번 통째로 읽고 파싱한다 — fillMissingTranscriptFromRawSession의 "꼬리 보완"과
+// enrichAnswersFromRawSession의 "턴별 답변 비교"가 같은 폴링 호출 안에서 둘 다 원본을 필요로 할
+// 수 있어서, 세션당(cwd+sessionId 조합) mtime 기준 캐시를 하나 둬서 파일이 실제로 바뀌지
+// 않았으면 재파싱 없이 재사용한다.
+const rawSessionTranscriptCache = new Map<string, { mtimeMs: number; entries: TranscriptEntry[] }>();
+
+function getCachedRawSessionTranscript(cwd: string, sessionId: string): TranscriptEntry[] {
+  const file = path.join(PROJECTS_DIR, encodeProjectDirName(cwd), `${sessionId}.jsonl`);
+  let mtimeMs: number;
+  try {
+    mtimeMs = fs.statSync(file).mtimeMs;
+  } catch {
+    return [];
+  }
+  const key = `${cwd}::${sessionId}`;
+  const cached = rawSessionTranscriptCache.get(key);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.entries;
+  const entries = readRawSessionTranscript(cwd, sessionId);
+  rawSessionTranscriptCache.set(key, { mtimeMs, entries });
+  return entries;
 }
 
 // 원본 세션 파일(~/.claude/projects/.../<sessionId>.jsonl)은 daily-journal과 포맷이 전혀 다르다 —
@@ -565,7 +639,7 @@ function readRawSessionTranscript(cwd: string, sessionId: string): TranscriptEnt
 // 없다는 뜻이니 그냥 넘어간다.
 function fillMissingTranscriptFromRawSession(journalEntries: TranscriptEntry[], cwd: string, sessionId: string): TranscriptEntry[] {
   if (journalEntries.length === 0) {
-    const raw = readRawSessionTranscript(cwd, sessionId);
+    const raw = getCachedRawSessionTranscript(cwd, sessionId);
     return raw.length ? raw : journalEntries;
   }
 
@@ -583,7 +657,7 @@ function fillMissingTranscriptFromRawSession(journalEntries: TranscriptEntry[], 
     return journalEntries;
   }
 
-  const rawEntries = readRawSessionTranscript(cwd, sessionId);
+  const rawEntries = getCachedRawSessionTranscript(cwd, sessionId);
   if (rawEntries.length === 0) return journalEntries;
 
   const cutIndex = findLastMatchingRawIndex(journalEntries[journalEntries.length - 1], rawEntries);
@@ -591,6 +665,26 @@ function fillMissingTranscriptFromRawSession(journalEntries: TranscriptEntry[], 
   // 개수 기준으로 대략 맞춰 보완한다 — 완벽하지 않아도 아예 안 보이는 것보다는 낫다.
   const tail = cutIndex >= 0 ? rawEntries.slice(cutIndex + 1) : rawEntries.slice(journalEntries.length);
   return tail.length ? journalEntries.concat(tail) : journalEntries;
+}
+
+// daily-journal에 이미 기록이 있는 턴이라도, 그 턴의 답변이 원본 세션 파일 쪽보다 짧으면 원본
+// 쪽으로 교체한다. daily-journal의 answer는 Stop 훅이 넘겨주는 last_assistant_message 그대로인데,
+// 이건 그 턴의 "진짜 마지막 assistant 메시지 하나"일 뿐이다(daily-journal 자체 소스 stop-hook.ts
+// 확인) — 도구 호출 사이사이에 나온 앞쪽 설명은 애초에 daily-journal에 전달조차 안 된다. 그래서
+// 실시간으로 볼 때는(원본 파일 기반) 전체가 다 보이다가, daily-journal이 그 턴의 기록을 남기는
+// 순간부터 "완료했습니다" 같은 마지막 한 마디로 줄어드는 게 실사용으로 확인된 증상이다. 매칭은
+// findLastMatchingRawIndex와 같은 방식(prompt 정확히 일치 + 시간 가장 가까운 후보)을 항목별로
+// 반복한다 — 못 찾으면(문구 가공 등) 그 항목은 그대로 둔다.
+function enrichAnswersFromRawSession(entries: TranscriptEntry[], cwd: string, sessionId: string): TranscriptEntry[] {
+  if (entries.length === 0) return entries;
+  const rawEntries = getCachedRawSessionTranscript(cwd, sessionId);
+  if (rawEntries.length === 0) return entries;
+  return entries.map(entry => {
+    const idx = findLastMatchingRawIndex(entry, rawEntries);
+    if (idx < 0) return entry;
+    const rawAnswer = rawEntries[idx].answer;
+    return rawAnswer.length > entry.answer.length ? { ...entry, answer: rawAnswer } : entry;
+  });
 }
 
 // journalEntries의 마지막 항목과 똑같은 prompt 텍스트가 원본 세션 파일에 정확히 어디 있었는지
@@ -888,6 +982,24 @@ let hasCompletedFirstPoll = false;
 // 리셋되면서 대화창 패널(leadChatPanelEl) 자체가 순간적으로 숨겨지는 버그로 이어진다(실사용 재현:
 // 즉시 전송할 때마다 화면이 잠깐 지워졌다 돌아옴 — pendingChatTurns 통합 수정과는 별개의 원인).
 const lastKnownLiveLeadRow = new Map<string, SessionRow>();
+
+// resumeLead/restartLead가 짧은 id를 바꾼 그 순간부터, buildSessionRowsInternal이 다음 폴링에서
+// claude agents --json으로 그 새 id를 실제 살아있다고 확인할 때까지는 위 lastKnownLiveLeadRow가
+// 여전히 "옛 id" 밑에만 캐시돼있다 — 그 사이에 도는 폴링은 옛 id로도(agents 스냅샷에 없음) 새
+// id로도(캐시에 없음, hasLiveMember도 없으면) 이 팀장을 못 찾아 rows에서 통째로 빠뜨린다. 그
+// 결과 위 주석의 "순간적으로 숨겨지는" 것과 똑같은 경로로, renderer.js가 selectedLeadId를 null로
+// 리셋했다가 "온라인인 아무 팀장(첫 번째)"으로 자동 전환해버려 사용자 모르게 화면이 다른 팀장으로
+// 튀는 사고로 이어진다(실사용 재현) — internalId로 따라가는 renderer.js의 가드는 애초에 이 팀장이
+// rows 배열에 하나도 안 잡히는 이 경우를 못 막는다(찾을 대상 자체가 없음). resumeLead/restartLead가
+// leads.json의 id를 바꾸는 바로 그 자리에서 캐시도 같이 새 id로 옮겨 두면, agents 스냅샷이 따라잡을
+// 때까지의 그 짧은 틈에도 buildGraceRows가 옛 스냅숏을 새 id로 계속 보여줄 수 있다.
+function migrateLastKnownLiveLeadRow(oldId: string, newId: string): void {
+  if (oldId === newId) return;
+  const cached = lastKnownLiveLeadRow.get(oldId);
+  if (!cached) return;
+  lastKnownLiveLeadRow.set(newId, { ...cached, id: newId });
+  lastKnownLiveLeadRow.delete(oldId);
+}
 
 function computeLiveRows(
   agents: AgentEntry[],
@@ -2003,10 +2115,14 @@ async function resumeSpawnWithRetry(internalId: string, current: LeadRecord, mes
 async function resumeLead(internalId: string, message: string): Promise<string | null> {
   const current = loadLeads().find(l => l.internalId === internalId);
   if (!current) return null;
+  // 2026-09-21 재검증(claudeReadiness.js 주석 참고: claude CLI v2.1.278, 한 번도 실행한 적
+  // 없는 새 디렉토리 3곳에서 백그라운드 스폰 3/3 모두 트러스트 다이얼로그 없이 정상 완료) 이후로는
+  // 이 판정을 더 이상 spawn 차단에 쓰지 않는다(launchTeamLead/restartLead와 같은 이유) — 경고만
+  // 남기고 그대로 진행한다. resumeLead의 반환 타입(string | null)은 이번 청크 범위 밖이라(호출부가
+  // 많아 일관되게 고치려면 별도 청크가 필요) 그대로 두고, 이 판정 하나만 차단 대신 경고로 바꾼다.
   const readiness = checkDirectoryClaudeReady(current.targetDir);
   if (!readiness.ready) {
-    logCritical(claudeNotReadyMessage(current.targetDir, readiness.reason!));
-    return null;
+    logCritical(`[resumeLead] ${claudeNotReadyMessage(current.targetDir, readiness.reason!)} (경고만 하고 resume은 계속 시도합니다)`);
   }
   // 히스토리 탭에서 이미 오프라인인(agents 스냅샷에 안 잡히는) 팀장에게 메시지를 보내도 여기까지
   // 그대로 들어온다 — restartLead와 같은 이유로, 실제로 떠있을 때만 stop을 호출한다(없는 프로세스에
@@ -2068,6 +2184,7 @@ async function resumeLead(internalId: string, message: string): Promise<string |
     const leads = loadLeads();
     const rec = leads.find(l => l.internalId === internalId);
     if (rec) {
+      migrateLastKnownLiveLeadRow(current.id, newId);
       rec.id = newId;
       // 짧은 id가 stop 이전과 동일한데(newId === current.id) sessionId만 달라진 조합은, 이 코드베이스가
       // 곳곳에서 의존하는 전제("정상 resume은 항상 같은 짧은 id로 깨어나고, 그러면 sessionId도 당연히
@@ -2108,10 +2225,13 @@ async function resumeLead(internalId: string, message: string): Promise<string |
 async function restartLead(internalId: string, instruction: string): Promise<{ id: string } | { error: string }> {
   const current = loadLeads().find(l => l.internalId === internalId);
   if (!current) return { error: '팀장 레코드를 찾을 수 없습니다(이미 삭제됐거나 internalId가 어긋났을 수 있음).' };
+  // 2026-09-21 재검증(claudeReadiness.js 주석 참고: claude CLI v2.1.278, 한 번도 실행한 적
+  // 없는 새 디렉토리 3곳에서 백그라운드 스폰 3/3 모두 트러스트 다이얼로그 없이 정상 완료) 이후로는
+  // 이 판정을 더 이상 spawn 차단에 쓰지 않는다(launchTeamLead와 같은 이유) — 경고만 남기고 그대로
+  // 진행한다. 아래에서 spawn 자체가 실패하면 이 판정이 원인일 수 있다는 걸 실패 메시지에 같이 담는다.
   const readiness = checkDirectoryClaudeReady(current.targetDir);
   if (!readiness.ready) {
-    logCritical(claudeNotReadyMessage(current.targetDir, readiness.reason!));
-    return { error: `"${current.targetDir}"에서 claude 최초 실행 승인이 안 돼 있습니다(${readiness.reason}) — 그 디렉토리에서 터미널로 claude를 한 번 실행해 승인창을 눌러준 뒤 다시 시도하세요.` };
+    logCritical(`[restartLead] ${claudeNotReadyMessage(current.targetDir, readiness.reason!)} (경고만 하고 spawn은 계속 시도합니다)`);
   }
   // 히스토리 탭에서 이미 오프라인인(agents 스냅샷에 안 잡히는) 팀장을 골라 재시작해도 여기까지
   // 그대로 들어온다 — 이 경우 claude stop을 걸 실제 프로세스가 없으니 불필요하게 시간만 쓰고
@@ -2143,6 +2263,7 @@ async function restartLead(internalId: string, instruction: string): Promise<{ i
   const rec = leads.find(l => l.internalId === internalId);
   if (rec) {
     const oldId = rec.id;
+    migrateLastKnownLiveLeadRow(oldId, newId);
     rec.id = newId;
     rec.sessionId = newSessionId;
     rec.launchedAt = Date.now();
@@ -2191,6 +2312,14 @@ async function endLeadWork(internalId: string): Promise<{ success: boolean; memb
   if (!leadStopped) {
     leadStopped = await stopSession(currentLead.id);
   }
+  // computeOfflineLeads는 agents 스냅샷에 한 번 안 잡힌 것만으로 바로 오프라인 확정하지 않고
+  // LEAD_OFFLINE_GRACE_MS(stop→resume 재기동 오판 방지용, 70초 이상)를 기다린다 — 근데 지금은
+  // 사용자가 "작업 종료"를 직접 눌러서 확실하게 정지시킨 것이라 재기동 오판 걱정이 없다. 이
+  // 유예를 그대로 두면 히스토리 탭으로 넘어가기까지 매번 1분 넘게 기다려야 하는 것처럼
+  // 보인다(실사용 지적) — leadFirstMissAt을 유예 시간 이전 시각으로 미리 채워두면, 다음 폴링에서
+  // trackFirstMiss가 곧바로 'expired'를 반환해 즉시 히스토리로 넘어간다. 정지 자체가 실패했으면
+  // (leadStopped===false) 실제로는 아직 살아있을 수 있으므로 건드리지 않고 평소 유예 판정을 그대로 둔다.
+  if (leadStopped) leadFirstMissAt.set(currentLead.id, 0);
   return { success: leadStopped, memberFailures };
 }
 
@@ -2218,11 +2347,18 @@ async function findSessionIdByShortIdRetrying(shortId: string): Promise<string |
   return null;
 }
 
-async function launchTeamLead(targetDir: string, instruction: string, secret?: boolean): Promise<string | null> {
+// 예전엔 실패하면 항상 null만 돌려줘서, renderer.js가 readiness 실패든 runClaudeBg 타임아웃이든
+// 항상 똑같은 하드코딩된 범용 안내문만 보여줬다 — restartLead가 이미 겪고 고친 것과 같은 문제라
+// (아래 restartLead 주석 참고) 같은 방식으로 반환 타입을 바꿔서 실패 사유를 렌더러까지 전달한다.
+async function launchTeamLead(targetDir: string, instruction: string, label?: string, secret?: boolean): Promise<{ id: string } | { error: string }> {
   const readiness = checkDirectoryClaudeReady(targetDir);
   if (!readiness.ready) {
-    logCritical(claudeNotReadyMessage(targetDir, readiness.reason!));
-    return null;
+    // 2026-09-21 재검증(claudeReadiness.js 주석 참고: claude CLI v2.1.278, 한 번도 실행한 적
+    // 없는 새 디렉토리 3곳에서 백그라운드 스폰 3/3 모두 트러스트 다이얼로그 없이 정상 완료) 이후로는
+    // 이 판정을 더 이상 spawn 차단에 쓰지 않는다 — 경고만 남기고 그대로 진행한다. 그래도 아래에서
+    // spawn 자체가 실패하면(구버전 CLI로 되돌아갔거나 이번 재검증이 특이 케이스였을 가능성 포함)
+    // readiness가 원인일 수 있다는 걸 실패 메시지에 같이 담는다.
+    logCritical(`[launchTeamLead] ${claudeNotReadyMessage(targetDir, readiness.reason!)} (경고만 하고 spawn은 계속 시도합니다)`);
   }
   installTeamLeadSkill();
   const { paths: approvedMembers, text: approvedText } = approvedMemberBriefing(targetDir);
@@ -2236,7 +2372,12 @@ async function launchTeamLead(targetDir: string, instruction: string, secret?: b
     resolveLongPrompt(prompt),
     targetDir,
   );
-  if (!id) return null;
+  if (!id) {
+    if (!readiness.ready) {
+      return { error: `팀장 세션 시작에 실패했습니다 — "${targetDir}"에서 ${readiness.reason} 이게 원인일 수 있습니다. 그 디렉토리에서 터미널로 claude를 한 번 실행해 승인창을 눌러준 뒤 다시 시도해보세요.` };
+    }
+    return { error: `claude --bg가 ${RUN_CLAUDE_TIMEOUT_MS / 1000}초 안에 새 세션 시작을 확인해주지 못했습니다(타임아웃 또는 "backgrounded" 표시를 못 찾음) — 터미널을 직접 열어 claude --version, claude --bg가 정상 동작하는지 확인해보세요(CLI 미설치·PATH 문제·로그인 만료가 흔한 원인입니다).` };
+  }
 
   // 막 시작한 세션은 첫 턴을 처리 중일 수 있어 곧바로 stop시키면 방해가 된다 — 그래서 이 시점엔 자기 id를
   // 알려주는 후속 메시지를 보내지 않는다(위험). 대신 SKILL.md가 스스로 `claude agents --json`으로 자기
@@ -2244,10 +2385,10 @@ async function launchTeamLead(targetDir: string, instruction: string, secret?: b
   const sessionId = (await findSessionIdByShortId(id)) ?? id;
 
   const leads = loadLeads();
-  leads.push({ id, sessionId, targetDir, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID(), mcpToken, secret });
+  leads.push({ id, sessionId, targetDir, launchedAt: Date.now(), approvedMembers, internalId: crypto.randomUUID(), mcpToken, secret, label: label?.trim() || undefined });
   saveLeads(leads);
 
-  return id;
+  return { id };
 }
 
 // 터미널에서 사용자가 직접 `claude --bg "/team-lead ..."`로 띄운 세션을 나중에 이 앱에 등록해서
@@ -2493,9 +2634,9 @@ ipcMain.handle('update-favorite-name', (_e, dir: string, name: string) => {
   return favs;
 });
 
-ipcMain.handle('launch-team-lead', async (_e, targetDir: string, instruction: string, secret?: boolean) => {
+ipcMain.handle('launch-team-lead', async (_e, targetDir: string, instruction: string, label?: string, secret?: boolean) => {
   const finalInstruction = instruction || '지금 상황을 파악하고 다음 작업을 시작해줘.';
-  return launchTeamLead(targetDir, finalInstruction, secret);
+  return launchTeamLead(targetDir, finalInstruction, label, secret);
 });
 
 ipcMain.handle('get-adoptable-sessions', () => getAdoptableSessions());

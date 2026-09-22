@@ -89,6 +89,18 @@ const leadMembersChipsEl = document.getElementById('lead-members-chips');
 const chatTranscriptEl = document.getElementById('chat-transcript');
 const chatInputEl = document.getElementById('chat-input');
 const chatSendBtn = document.getElementById('chat-send-btn');
+// sendMessageToLead가 진행 중 "전송 중..."으로 바꿨다가 끝나면 되돌릴 원래 라벨. 매 호출 시점의
+// chatSendBtn.textContent를 그대로 캡처하면, 먹통 상태에서 "재시도"를 눌러 같은 lead에 대해 두
+// 번째 sendMessageToLead가 겹쳐 도는 순간 이미 "전송 중..."으로 바뀐 텍스트를 "원래 라벨"로
+// 잘못 캡처해서, 나중에 되돌릴 때 "전송 중..."인 채로 영영 굳어버린다 — 페이지 로드 시 한 번만
+// 고정해둔 진짜 원본 라벨을 쓴다.
+const chatSendBtnDefaultLabel = chatSendBtn.textContent;
+const chatFindBarEl = document.getElementById('chat-find-bar');
+const chatFindInputEl = document.getElementById('chat-find-input');
+const chatFindStatusEl = document.getElementById('chat-find-status');
+const chatFindPrevBtn = document.getElementById('chat-find-prev-btn');
+const chatFindNextBtn = document.getElementById('chat-find-next-btn');
+const chatFindCloseBtn = document.getElementById('chat-find-close-btn');
 const restartLeadBtn = document.getElementById('restart-lead-btn');
 const restartLeadPanelEl = document.getElementById('restart-lead-panel');
 const restartInstructionEl = document.getElementById('restart-instruction');
@@ -253,6 +265,7 @@ const addMemberStatusEl = document.getElementById('add-member-status');
 
 const targetDirSelect = document.getElementById('target-dir-select');
 const pickDirBtn = document.getElementById('pick-dir-btn');
+const leadNameEl = document.getElementById('lead-name');
 const instructionEl = document.getElementById('instruction');
 const launchSecretToggle = document.getElementById('launch-secret-toggle');
 const launchBtn = document.getElementById('launch-btn');
@@ -720,6 +733,21 @@ function updatePendingChatTurn(leadId, itemId, patch) {
   if (item) Object.assign(item, patch);
 }
 
+// "먹통(stuck)"으로 표시된 in-flight 항목을 사용자가 직접(수동으로만) 정리할 때 쓴다 — 자동으로
+// 지우거나 재전송하지는 않는다. 원래 걸려있던 sendChatMessage/sendMessageToLead 호출은 백그라운드에서
+// 계속 응답을 기다리는 채로 남아있다가 언젠가 끝나면(또는 영영 안 끝나도) 이미 지워진 localId를
+// 대상으로 하는 후속 처리(updatePendingChatTurn/removePendingChatTurn)를 시도하는데, 둘 다 대상 id가
+// 없으면 조용히 아무 일도 안 하므로 안전하다. busyLeadIds는 그 걸린 호출의 finally가 언젠가 다시
+// 지우려 시도하겠지만, 사용자가 지금 바로 다시 보낼 수 있어야 하므로 여기서 먼저 강제로 풀어준다 —
+// 백엔드가 여전히 이 팀장 앞으로 걸려있는 stop→resume을 처리 중이라면 새로 보낸 메시지도 같은
+// 문제를 다시 겪을 수 있지만(그 근본 원인은 이 수정 범위 밖), 최소한 화면에서 손 놓고 기다리기만
+// 하는 상태는 벗어날 수 있다.
+function unstickInFlightTurn(leadId, itemId) {
+  removePendingChatTurn(leadId, itemId);
+  busyLeadIds.delete(leadId);
+  updateBusyUI();
+}
+
 // resumeLead가 다른 짧은 id로 깨어나면(main.ts 주석 참고) selectedLeadId가 바뀌는데,
 // pendingChatTurns는 옛 id 밑에 남아있으면 새 id 기준으로 조회하는 renderChat()이 못 찾는다 —
 // 그 lead의 대기 항목 전부를 새 id 밑으로 옮긴다.
@@ -750,16 +778,27 @@ function computeBusyBannerHtml(row) {
   return '';
 }
 
+// in-flight(즉시 stop→resume) 항목이 이만큼(ms) 지나도 트랜스크립트에 안 나타나면 "먹통"일 수
+// 있다고 보고 수동 재시도/삭제 버튼을 보여준다. 정상적인 stop→resume도 CLI 재기동+응답 생성으로
+// 수 초~십수 초 걸릴 수 있어서(실사용 관찰) 너무 짧게 잡으면 정상 대기 중에도 오탐한다 — 실제
+// 먹통 사례(팀장이 busy인 동안 보내져 stop이 안전한 정지 지점을 못 찾고 걸리는 경우)는 수십 초~
+// 무한정 걸리므로, 이 값은 "느리지만 정상"과 "먹통"을 가르는 대략적인 휴리스틱이다.
+const IN_FLIGHT_STUCK_MS = 30000;
+
 // 대기 중인 항목 전부를(가장 오래된 것부터, 배열에 push한 순서 그대로) 각각 별도의 chat-turn으로
 // 렌더링한다. kind==='queued'(팀장 busy라 큐에 쌓임)와 kind==='in-flight'(즉시 전송해서 응답
-// 대기 중)는 안내 문구가 다르고, in-flight는 서버측에 취소할 대상이 없으므로 취소 버튼을 아예
-// 안 보여준다. 취소 버튼 클릭은 chatTranscriptEl 위임 리스너 하나로 처리하므로(아래 참고) 여기선
-// 매번 새로 안 걸어도 된다. .chat-answer에 white-space:pre-wrap이 걸려있어서, 이 템플릿을 여러
-// 줄로 들여써서 만들면 그 들여쓰기/개행이 그대로 화면에 빈 줄로 보이고 취소 버튼도 엉뚱한 줄로
-// 밀려난다 — 한 줄로 이어서 만든다.
+// 대기 중)는 안내 문구가 다르다. queued는 서버측에 취소할 대상(pendingNotices)이 있어 취소
+// 버튼을 보여준다. in-flight는 서버측에 취소할 대상이 없어 평소엔 버튼을 안 보여주지만,
+// IN_FLIGHT_STUCK_MS보다 오래 안 끝나면 먹통일 수 있다는 안내와 함께 재시도/삭제 버튼을 보여준다
+// (자동 재전송/자동 삭제는 하지 않는다 — 항상 사용자가 직접 눌러야 한다). 버튼 클릭은
+// chatTranscriptEl 위임 리스너 하나로 처리하므로(아래 참고) 여기선 매번 새로 안 걸어도 된다.
+// .chat-answer에 white-space:pre-wrap이 걸려있어서, 이 템플릿을 여러 줄로 들여써서 만들면 그
+// 들여쓰기/개행이 그대로 화면에 빈 줄로 보이고 버튼도 엉뚱한 줄로 밀려난다 — 한 줄로 이어서 만든다.
 function renderQueuedTurnsHtml(leadId) {
   const list = pendingChatTurns.get(leadId) || [];
+  const now = Date.now();
   return list.map(item => {
+    const isStuck = item.kind === 'in-flight' && typeof item.createdAt === 'number' && (now - item.createdAt) > IN_FLIGHT_STUCK_MS;
     // exhausted(큐 자동 재시도를 MAX_NOTICE_DELIVERY_ATTEMPTS회 다 쓰고 포기한 상태)는 일반
     // 'queued'와 구분해서 보여준다 — 안 그러면 사실상 다시 안 풀리는 메시지가 "완료되면
     // 자동으로 전달됩니다"라고 계속 표시돼서 사용자가 영구 미배달을 알 수 없었다. "터미널에서
@@ -772,12 +811,12 @@ function renderQueuedTurnsHtml(leadId) {
       ? '자동 재시도가 모두 실패해 전달을 멈췄습니다. 아래 취소 버튼으로 지우고 다시 보내보세요 — 계속 반복되면 "새 작업 시작"으로 세션을 새로 띄우세요.'
       : item.kind === 'queued'
         ? '팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.'
-        : '응답을 기다리는 중...';
+        : (isStuck ? '⚠️ 응답이 오래 걸리고 있습니다 — 먹통일 수 있습니다.' : '응답을 기다리는 중...');
     const answerClass = item.exhausted ? 'chat-answer chat-pending chat-pending-exhausted' : 'chat-answer chat-pending';
-    const cancelBtnHtml = item.kind === 'queued'
+    const actionBtnHtml = item.kind === 'queued'
       ? ` <button class="cancel-queued-btn" data-cancel-queued="${escapeHtml(item.id)}" data-cancel-lead="${escapeHtml(leadId)}">취소</button>`
-      : '';
-    return `<div class="chat-turn"><div class="chat-prompt">▸ ${escapeHtml(item.message)}</div><div class="${answerClass}">${statusText}${cancelBtnHtml}</div></div>`;
+      : (isStuck ? ` <button class="cancel-queued-btn" data-retry-stuck="${escapeHtml(item.id)}" data-retry-lead="${escapeHtml(leadId)}">재시도</button> <button class="cancel-queued-btn" data-delete-stuck="${escapeHtml(item.id)}" data-delete-lead="${escapeHtml(leadId)}">삭제</button>` : '');
+    return `<div class="chat-turn"><div class="chat-prompt">▸ ${escapeHtml(item.message)}</div><div class="${answerClass}">${statusText}${actionBtnHtml}</div></div>`;
   }).join('');
 }
 
@@ -895,6 +934,9 @@ async function renderChat() {
     `).join('') + queuedTurnHtml + busyBanner + pendingChoiceHtml;
   }
   if (wasNearBottom) chatTranscriptEl.scrollTop = chatTranscriptEl.scrollHeight;
+  // innerHTML을 방금 통째로 다시 그려서 이전 하이라이트(<mark>)가 다 사라졌다 — 찾기가 활성 상태면
+  // 같은 검색어로 다시 표시해준다(스크롤은 옮기지 않음, refreshChatFindMarks 주석 참고).
+  if (chatFindState.query) refreshChatFindMarks();
   updateBusyUI();
 }
 
@@ -920,10 +962,156 @@ function hasActiveSelectionInChatTranscript() {
   return !!sel && !sel.isCollapsed && chatTranscriptEl.contains(sel.anchorNode);
 }
 
+// Ctrl+F로 채팅 전사(chatTranscriptEl) 안에서 단어를 찾는 기능. chatTranscriptEl은 3초 폴링마다
+// (renderChat) innerHTML을 통째로 다시 그리므로, 하이라이트용 <mark>도 그때마다 사라진다 —
+// renderChat이 화면을 새로 그린 직후 항상 refreshChatFindMarks()를 다시 불러서 같은 검색어로
+// 재적용한다. 다만 그 주기적 재적용에서는 스크롤을 옮기지 않는다(스크롤은 사용자가 검색어를 치거나
+// 이전/다음을 눌렀을 때만) — 안 그러면 3초마다 사용자가 읽고 있던 위치에서 현재 매치 위치로 화면이
+// 강제로 튀는 불편한 경험이 된다.
+const chatFindState = { query: '', matches: [], currentIndex: 0 };
+
+function clearChatFindHighlights() {
+  chatTranscriptEl.querySelectorAll('mark.find-match').forEach(mark => {
+    const parent = mark.parentNode;
+    if (!parent) return;
+    parent.replaceChild(document.createTextNode(mark.textContent), mark);
+    parent.normalize();
+  });
+}
+
+function refreshChatFindMarks() {
+  clearChatFindHighlights();
+  chatFindState.matches = [];
+  const query = chatFindState.query.trim();
+  if (!query) {
+    chatFindStatusEl.textContent = '';
+    return;
+  }
+  const lowerQuery = query.toLowerCase();
+  // 매치를 찾는 동안 DOM을 바로 바꾸면(교체된 새 텍스트 노드까지 같이 순회 대상이 되는 등) 트리
+  // 순회가 꼬일 수 있어서, 먼저 대상 텍스트 노드를 전부 모아두고 순회가 끝난 뒤에만 교체한다.
+  const walker = document.createTreeWalker(chatTranscriptEl, NodeFilter.SHOW_TEXT, null);
+  const textNodes = [];
+  let node;
+  while ((node = walker.nextNode())) textNodes.push(node);
+
+  for (const textNode of textNodes) {
+    const text = textNode.textContent;
+    const lowerText = text.toLowerCase();
+    if (!lowerText.includes(lowerQuery)) continue;
+    const parent = textNode.parentNode;
+    if (!parent) continue;
+    const frag = document.createDocumentFragment();
+    let lastEnd = 0;
+    let idx;
+    while ((idx = lowerText.indexOf(lowerQuery, lastEnd)) !== -1) {
+      if (idx > lastEnd) frag.appendChild(document.createTextNode(text.slice(lastEnd, idx)));
+      const mark = document.createElement('mark');
+      mark.className = 'find-match';
+      mark.textContent = text.slice(idx, idx + query.length);
+      frag.appendChild(mark);
+      chatFindState.matches.push(mark);
+      lastEnd = idx + query.length;
+    }
+    if (lastEnd < text.length) frag.appendChild(document.createTextNode(text.slice(lastEnd)));
+    parent.replaceChild(frag, textNode);
+  }
+
+  if (chatFindState.matches.length === 0) chatFindState.currentIndex = 0;
+  else if (chatFindState.currentIndex >= chatFindState.matches.length) chatFindState.currentIndex = chatFindState.matches.length - 1;
+  updateChatFindCurrentClassAndStatus();
+}
+
+function updateChatFindCurrentClassAndStatus() {
+  chatFindState.matches.forEach((m, i) => m.classList.toggle('find-match-current', i === chatFindState.currentIndex));
+  chatFindStatusEl.textContent = chatFindState.matches.length
+    ? `${chatFindState.currentIndex + 1}/${chatFindState.matches.length}`
+    : (chatFindState.query ? '0/0' : '');
+}
+
+function scrollToCurrentChatFindMatch() {
+  const current = chatFindState.matches[chatFindState.currentIndex];
+  if (current) current.scrollIntoView({ block: 'center' });
+}
+
+function moveChatFindMatch(delta) {
+  if (!chatFindState.matches.length) return;
+  chatFindState.currentIndex = (chatFindState.currentIndex + delta + chatFindState.matches.length) % chatFindState.matches.length;
+  updateChatFindCurrentClassAndStatus();
+  scrollToCurrentChatFindMatch();
+}
+
+function openChatFindBar() {
+  chatFindBarEl.hidden = false;
+  chatFindInputEl.focus();
+  chatFindInputEl.select();
+}
+
+function closeChatFindBar() {
+  chatFindBarEl.hidden = true;
+  chatFindState.query = '';
+  chatFindState.currentIndex = 0;
+  clearChatFindHighlights();
+  chatFindState.matches = [];
+  chatFindStatusEl.textContent = '';
+}
+
+// 다른 입력창(chat-input 등)에 포커스가 있어도 Ctrl+F는 채팅 찾기로 가로챈다 — 브라우저 기본
+// 페이지 찾기는 이 앱(Electron)엔 별 의미가 없고, 사용자가 원하는 건 지금 열려있는 대화 내용
+// 검색이다. 채팅 패널 자체가 안 열려있으면(팀장 미선택 등) 가로채지 않는다.
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f' && !leadChatPanelEl.hidden) {
+    e.preventDefault();
+    openChatFindBar();
+  } else if (e.key === 'Escape' && !chatFindBarEl.hidden) {
+    closeChatFindBar();
+  }
+});
+
+chatFindInputEl.addEventListener('input', () => {
+  chatFindState.query = chatFindInputEl.value;
+  chatFindState.currentIndex = 0;
+  refreshChatFindMarks();
+  scrollToCurrentChatFindMatch();
+});
+
+chatFindInputEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    moveChatFindMatch(e.shiftKey ? -1 : 1);
+  } else if (e.key === 'Escape') {
+    closeChatFindBar();
+  }
+});
+
+chatFindPrevBtn.addEventListener('click', () => moveChatFindMatch(-1));
+chatFindNextBtn.addEventListener('click', () => moveChatFindMatch(1));
+chatFindCloseBtn.addEventListener('click', closeChatFindBar);
+
 // 대기열 항목의 "취소" 버튼 — chatTranscriptEl이 폴링마다(그리고 renderChat 호출마다) innerHTML을
 // 통째로 다시 그리므로, 다른 곳(leadMembersChipsEl/fileListContentEl)과 같은 패턴으로 위임 리스너
 // 하나만 걸어둔다.
 chatTranscriptEl.addEventListener('click', async e => {
+  const deleteStuckBtn = e.target.closest('[data-delete-stuck]');
+  if (deleteStuckBtn) {
+    unstickInFlightTurn(deleteStuckBtn.dataset.deleteLead, deleteStuckBtn.dataset.deleteStuck);
+    await renderChat();
+    return;
+  }
+
+  const retryStuckBtn = e.target.closest('[data-retry-stuck]');
+  if (retryStuckBtn) {
+    const leadId = retryStuckBtn.dataset.retryLead;
+    const itemId = retryStuckBtn.dataset.retryStuck;
+    // 먹통 항목을 지우기 전에 원문 메시지를 먼저 챙겨둔다 — unstickInFlightTurn이 pendingChatTurns에서
+    // 지워버리면 더 이상 꺼내올 수 없다.
+    const item = (pendingChatTurns.get(leadId) || []).find(i => i.id === itemId);
+    unstickInFlightTurn(leadId, itemId);
+    await renderChat();
+    if (item) await sendMessageToLead(leadId, item.message);
+    return;
+  }
+
   const btn = e.target.closest('[data-cancel-queued]');
   if (!btn) return;
   const leadId = btn.dataset.cancelLead;
@@ -1020,6 +1208,14 @@ async function sendChatMessage() {
   const leadId = selectedLeadId;
   const message = chatInputEl.value.trim();
   chatInputEl.value = '';
+  await sendMessageToLead(leadId, message);
+}
+
+// sendChatMessage(입력창+선택된 팀장 기준)와 "먹통" 재시도 버튼(임의의 leadId+원문 메시지 기준)이
+// 공유하는 실제 전송 로직. leadId는 호출 시점에 selectedLeadId와 다를 수 있으므로(재시도는 사용자가
+// 다른 팀장 화면을 보고 있는 동안에도 누를 수 있다) chatSendBtn 라벨 갱신처럼 "현재 보이는 화면"에만
+// 영향을 줘야 하는 부분은 매번 selectedLeadId와 비교해서 가드한다.
+async function sendMessageToLead(leadId, message) {
   busyLeadIds.add(leadId);
   updateBusyUI();
 
@@ -1029,17 +1225,20 @@ async function sendChatMessage() {
   // kind를 'queued'로 바꾼다. 이렇게 하면 즉시 전송 건도 refreshBoardNow()가 renderChat()으로
   // 화면을 서버 트랜스크립트로 통째로 다시 그려도(아직 이 턴이 없으니) 계속 보인다 — 예전엔
   // optimisticTurn을 DOM에 직접 얹기만 해서, 그 직후 refreshBoardNow()가 화면을 덮어쓰며 이
-  // 메시지가 잠깐 사라졌다 나중에 다시 뜨는 것처럼 보이는 버그가 있었다.
+  // 메시지가 잠깐 사라졌다 나중에 다시 뜨는 것처럼 보이는 버그가 있었다. createdAt은
+  // renderQueuedTurnsHtml의 먹통(stuck) 판정 기준선이다.
   const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const list = pendingChatTurns.get(leadId) || [];
-  list.push({ id: localId, message, kind: 'in-flight' });
+  list.push({ id: localId, message, kind: 'in-flight', createdAt: Date.now() });
   pendingChatTurns.set(leadId, list);
   renderChat();
 
   // 버튼이 disabled로 회색이 되는 것만으로는(updateBusyUI) "전송 중"인지 "다른 이유로 잠김"인지
   // 구분이 잘 안 된다는 피드백이 있어서, 전송 자체가 진행 중인 동안엔 버튼 라벨도 짧게 바꿔준다.
-  const originalSendLabel = chatSendBtn.textContent;
-  chatSendBtn.textContent = '전송 중...';
+  // 지금 화면에 보이는 팀장이 이 leadId일 때만 바꾼다 — 다른 팀장으로 보낸 "먹통 재시도"가 지금
+  // 보고 있는 화면의 버튼 라벨을 엉뚱하게 바꿔서는 안 된다.
+  const affectsSendBtn = selectedLeadId === leadId;
+  if (affectsSendBtn) chatSendBtn.textContent = '전송 중...';
 
   try {
     const result = await window.api.sendToLead(leadId, message);
@@ -1081,19 +1280,26 @@ async function sendChatMessage() {
       return;
     }
     // resumeLead가 다른 짧은 id로 깨어날 수 있다(main.ts resumeLead 주석 참고) — 반영하지 않으면
-    // 대화창 선택이 풀려서 방금 보낸 대화가 사라진 것처럼 보인다. pendingChatTurns도 새 id 밑으로
-    // 옮겨야 renderChat()이 selectedLeadId 기준으로 계속 찾는다.
+    // 대화창 선택이 풀려서 방금 보낸 대화가 사라진 것처럼 보인다. pendingChatTurns는 사용자가 그
+    // 사이 어디로 이동했든 항상 새 id 밑으로 옮긴다(대기 중이던 메시지 자체는 새 id로 계속
+    // 추적돼야 renderChat()이 나중에 그 팀장으로 돌아왔을 때 찾을 수 있다).
     movePendingChatTurns(leadId, result.id);
-    selectedLeadId = result.id;
+    // 그런데 화면 전환(selectedLeadId 갱신)은 사용자가 이 응답을 기다리는 동안 다른 팀장으로
+    // 이미 옮겨갔으면 하면 안 된다 — autoStallNudgeToggle 핸들러가 이미 쓰는 것과 같은 가드
+    // (요청 시작 시점의 leadId와 지금 selectedLeadId가 같을 때만 갱신). 안 그러면 사용자가
+    // B로 이동해 있는데 응답이 늦게 온 A의 결과가 selectedLeadId를 다시 A로 덮어써서, 화면이
+    // 사용자가 보고 있던 B에서 A로 튕겨나가는 사고가 난다(실사용 재현).
+    if (selectedLeadId === leadId) selectedLeadId = result.id;
     // renderChat()만 부르면 대화 내용만 갱신되고, 카드의 busy 표시 등은 다음 3초 폴링까지 그대로다 —
     // refreshBoardNow()가 renderBoard()를 거쳐 renderChat()까지 알아서 호출해주므로 이걸로 대체한다.
+    // 이건 selectedLeadId가 바뀌었든 아니든 항상 호출해야 한다(카드 목록 자체는 항상 최신이어야 함).
     await refreshBoardNow();
   } catch (err) {
     removePendingChatTurn(leadId, localId);
     await renderChat(); // pendingChatTurns에서 지운 in-flight 항목을 화면에서도 지운다
     chatTranscriptEl.insertAdjacentHTML('beforeend', `<p style="color:#f14c4c">이어하기 중 오류가 발생했습니다: ${escapeHtml(errMsg(err))}</p>`);
   } finally {
-    chatSendBtn.textContent = originalSendLabel;
+    if (affectsSendBtn) chatSendBtn.textContent = chatSendBtnDefaultLabel;
     busyLeadIds.delete(leadId);
     updateBusyUI();
   }
@@ -2120,15 +2326,19 @@ launchBtn.addEventListener('click', async () => {
   launchBtn.disabled = true;
   launchStatusEl.textContent = '띄우는 중...';
   try {
-    const id = await window.api.launchTeamLead(targetDirSelect.value, instructionEl.value, launchSecretToggle.checked);
-    if (id) {
-      launchStatusEl.textContent = `팀장 세션(${id})을 시작했습니다.`;
+    // launchTeamLead가 이제 실패 시에도 그냥 null이 아니라 구체적 사유({ error })를 돌려준다 —
+    // 예전엔 readiness 실패든 runClaudeBg 타임아웃이든 항상 이 하드코딩된 범용 메시지만 봤는데,
+    // 이제는 실제 원인(예: "워크스페이스 신뢐 승인이 안 돼 있습니다")이 그대로 화면에 보인다.
+    const result = await window.api.launchTeamLead(targetDirSelect.value, instructionEl.value, leadNameEl.value.trim(), launchSecretToggle.checked);
+    if (result && result.id) {
+      launchStatusEl.textContent = `팀장 세션(${result.id})을 시작했습니다.`;
       formMode = 'none';
-      selectedLeadId = id;
+      selectedLeadId = result.id;
       launchSecretToggle.checked = false; // 다음 팀장은 기본값(일반 모드)에서 다시 시작 — 매번 실수로 켜져 있으면 안 됨
+      leadNameEl.value = ''; // 다음 팀장 띄울 때 이전 이름이 남아있지 않게 초기화
       renderMemberRow(); // 새 팀장이라 소속 팀원이 없을 테니, 폴링 안 기다리고 바로 비워서 보여준다
     } else {
-      launchStatusEl.textContent = '팀장 세션 시작에 실패했습니다 — 터미널을 직접 열어 claude --version, claude --bg가 정상 동작하는지 확인해보세요(CLI 미설치·PATH 문제·로그인 만료가 흔한 원인입니다).';
+      launchStatusEl.textContent = (result && result.error) || '팀장 세션 시작에 실패했습니다 — 터미널을 직접 열어 claude --version, claude --bg가 정상 동작하는지 확인해보세요(CLI 미설치·PATH 문제·로그인 만료가 흔한 원인입니다).';
     }
   } catch (err) {
     launchStatusEl.textContent = `팀장 세션 시작 중 오류가 발생했습니다: ${errMsg(err)}`;

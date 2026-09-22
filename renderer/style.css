@@ -328,6 +328,28 @@ body.modal-open { overflow: hidden; }
 #restart-cancel-btn, #end-work-cancel-btn { background: var(--border-2); color: var(--text); margin-left: 6px; }
 #restart-status, #end-work-status { margin-top: 8px; color: var(--success); font-size: 11px; }
 .pending-warning { color: var(--warning); font-size: 11px; margin-bottom: 8px; }
+#chat-find-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border-2);
+  border-radius: 4px;
+  padding: 4px 6px;
+  margin-bottom: 6px;
+}
+#chat-find-input { flex: 1; background: transparent; border: none; color: var(--text); font-size: 12px; outline: none; }
+#chat-find-status { color: var(--text-dim); font-size: 11px; min-width: 40px; text-align: right; }
+#chat-find-prev-btn, #chat-find-next-btn, #chat-find-close-btn {
+  background: var(--border-2);
+  color: var(--text);
+  font-size: 10px;
+  padding: 2px 6px;
+}
+/* Ctrl+F로 찾은 단어 전체 — 브라우저 기본 <mark> 노란색 대신 테마와 어울리는 톤으로 맞춘다. */
+mark.find-match { background: var(--warning); color: #1a1a1a; border-radius: 2px; }
+/* 지금 보고 있는(다음/이전으로 이동한) 매치는 더 눈에 띄게 구분한다. */
+mark.find-match-current { background: var(--accent-2); color: #fff; }
 #chat-transcript {
   height: 340px;
   min-height: 140px;
@@ -399,7 +421,7 @@ body.modal-open { overflow: hidden; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-#member-role-select, #member-role-custom, #manual-session-id, #member-name {
+#member-role-select, #member-role-custom, #manual-session-id, #member-name, #lead-name {
   flex: 1;
   min-width: 0;
   background: var(--bg);
