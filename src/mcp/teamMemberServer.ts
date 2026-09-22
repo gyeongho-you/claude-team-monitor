@@ -7,23 +7,24 @@
 // (팀원을 스폰만 하고 등록은 안 해서 모니터링 화면에 안 잡히는 사고). 이 서버는 스폰+등록을
 // 툴 호출 하나로 묶어서, "스폰은 했는데 등록을 깜빡"하는 상황 자체를 구조적으로 없앤다.
 //
-// "이 프로세스가 어느 팀장인지"는 이 프로세스를 실행하는 claude 세션의 환경변수
-// (TEAM_MONITOR_LEAD_TOKEN / TEAM_MONITOR_LEADS_PATH)로 전달받는다 — main.ts가 팀장을
-// 시작/재개할 때마다(launchTeamLead/resumeLead/restartLead/adoptLead/forkSessionAsLead) 그
-// 시점에 새로 발급한 토큰을 --mcp-config에 실어 보낸다. sessionId를 안 쓰는 이유: launchTeamLead/
-// restartLead처럼 새 세션을 스폰하는 경로는 claude --bg 실행 전엔 결과 sessionId를 알 수
-// 없다(CLI가 실행 후에 발급) — 그래서 스폰 전에 미리 만들어 넘길 수 있는, 이 앱이 직접 발급하는
-// 별도 토큰(LeadRecord.mcpToken)을 쓴다.
+// "이 프로세스가 어느 팀장인지"는 process.ppid(이 MCP 서버를 실행시킨 claude 세션 자신의 pid)로
+// `claude agents --json`에서 자기 자신을 찾아 알아낸다(resolveCallingLead 참고). 예전엔 스폰
+// 시점에 이 앱이 발급한 토큰을 환경변수(TEAM_MONITOR_LEAD_TOKEN/TEAM_MONITOR_LEADS_PATH)로
+// 전달받아 식별했는데, 그러면 이 앱을 거쳐 스폰된 세션만 쓸 수 있었다 — 터미널에서 스킬만으로
+// 직접 시작한 팀장은 토큰을 받을 방법이 없었다. ppid 기반 식별은 실측 확인됐다(2026-09-22: MCP
+// stdio 서버는 claude 세션의 직계 자식으로 뜨고, process.ppid가 그 세션의 pid와 정확히 일치한다 —
+// 중간에 daemon이 안 낀다). 아직 leads.json에 없는 세션은 register_as_lead 툴로 스스로 등록한다.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { isSafeId } from '../lib/pathGuard';
 import { extractBackgroundedId } from '../lib/claudeBgOutput';
 import { normalizeMemberModel } from '../lib/appSettings';
-import { MEMBERS_DIR } from '../lib/teamMemberPaths';
+import { MEMBERS_DIR, LEADS_PATH } from '../lib/teamMemberPaths';
 import { execAgentsJson } from '../lib/agentsJson';
 import { checkDirectoryClaudeReady, claudeNotReadyMessage } from '../lib/claudeReadiness';
 // TEAM_MEMBER_BRIEFING은 launchMember(main.ts)가 쓰는 것과 정확히 같은 상수를 그대로 재사용한다
@@ -37,7 +38,18 @@ import { resolveLongPrompt } from '../lib/longPromptGuard';
 // 값만 그대로 복사해 유지한다.
 const RUN_CLAUDE_TIMEOUT_MS = 45000;
 
-type LeadRecord = { id: string; sessionId: string; approvedMembers: string[]; mcpToken?: string; secret?: boolean };
+// main.ts의 LeadRecord와 정확히 같은 파일(leads.json)을 읽고 쓰므로, 그 필드셋과 어긋나면 안 된다
+// — 여기서 실제로 쓰는 필드만 타입에 올린다(다른 팀장 레코드에 있는, 여기서 모르는 필드는
+// JSON.parse/stringify를 그대로 거치므로 유실되지 않는다).
+type LeadRecord = {
+  id: string;
+  sessionId: string;
+  targetDir: string;
+  launchedAt: number;
+  approvedMembers: string[];
+  internalId: string;
+  secret?: boolean;
+};
 
 // main.ts의 SECRET_MODE_CLI_ARGS와 정확히 같은 값이다 — 시크릿 팀장이 만드는 팀원도 daily-journal
 // 등 user-level 훅에 안 남아야 "팀장만 시크릿이고 팀원은 흔적이 남는" 반쪽짜리가 안 된다. 상수
@@ -49,20 +61,49 @@ function errorResult(text: string) {
   return { content: [{ type: 'text' as const, text }], isError: true as const };
 }
 
-function loadLeadFromEnv(): { lead: LeadRecord } | { error: string } {
-  const leadsPath = process.env.TEAM_MONITOR_LEADS_PATH;
-  const token = process.env.TEAM_MONITOR_LEAD_TOKEN;
-  if (!leadsPath || !token) {
-    return { error: '이 MCP 서버가 팀장 컨텍스트 없이 실행되고 있습니다(환경변수 누락) — Claude Team Monitor를 통해 시작된 팀장 세션에서만 이 툴을 쓸 수 있습니다.' };
-  }
-  let leads: LeadRecord[];
+type AgentEntry = { id?: string; sessionId?: string; pid?: number; cwd?: string; kind?: string; startedAt?: number };
+
+// process.ppid(부모 프로세스, 즉 이 MCP 서버를 자식으로 띄운 claude 세션 자신)와 pid가 일치하는
+// 항목을 `claude agents --json` 결과에서 찾는다 — 그 항목이 바로 "나를 실행시킨 세션"이다.
+async function findCallingAgent(): Promise<AgentEntry | null> {
   try {
-    leads = JSON.parse(fs.readFileSync(leadsPath, 'utf-8'));
-  } catch (err) {
-    return { error: `leads.json을 읽지 못했습니다: ${err instanceof Error ? err.message : String(err)}` };
+    const agents = await execAgentsJson() as AgentEntry[];
+    return agents.find(a => a.pid === process.ppid) ?? null;
+  } catch {
+    return null;
   }
-  const lead = leads.find(l => l.mcpToken === token);
-  if (!lead) return { error: '이 팀장의 leads.json 레코드를 찾을 수 없습니다 — 아직 등록되기 전이거나 삭제된 것 같습니다.' };
+}
+
+function readLeads(): LeadRecord[] {
+  try {
+    return JSON.parse(fs.readFileSync(LEADS_PATH, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+function writeLeads(leads: LeadRecord[]): void {
+  fs.mkdirSync(path.dirname(LEADS_PATH), { recursive: true });
+  const tmpPath = `${LEADS_PATH}.${process.pid}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(leads, null, 2), 'utf-8');
+  fs.renameSync(tmpPath, LEADS_PATH);
+}
+
+async function resolveCallingLead(): Promise<{ lead: LeadRecord } | { error: string }> {
+  const agent = await findCallingAgent();
+  if (!agent || !agent.sessionId) {
+    return {
+      error: '이 MCP 서버를 실행 중인 claude 세션을 claude agents --json 목록에서 찾지 못했습니다 — ' +
+        '--bg로 뜬 세션이 아니거나, 방금 시작돼서 아직 목록에 반영되지 않았을 수 있습니다(몇 초 후 다시 시도해보세요).',
+    };
+  }
+  const lead = readLeads().find(l => l.sessionId === agent.sessionId);
+  if (!lead) {
+    return {
+      error: '이 세션은 아직 팀장으로 등록되지 않았습니다 — 먼저 mcp__team-monitor__register_as_lead 툴을 ' +
+        '호출해 스스로를 등록한 뒤 다시 시도하세요.',
+    };
+  }
   return { lead };
 }
 
@@ -126,7 +167,7 @@ server.registerTool(
     },
   },
   async ({ targetDir, instruction, label, role, model }) => {
-    const leadResult = loadLeadFromEnv();
+    const leadResult = await resolveCallingLead();
     if ('error' in leadResult) return errorResult(leadResult.error);
     const { lead } = leadResult;
 
@@ -193,6 +234,63 @@ server.registerTool(
         text: `팀원을 생성하고 등록했습니다. memberId: ${memberId}, 이름: ${label}, 역할: ${role || '(없음)'}, 디렉토리: ${resolvedTarget}`,
       }],
     };
+  },
+);
+
+server.registerTool(
+  'register_as_lead',
+  {
+    title: '이 세션을 팀장으로 등록',
+    description: [
+      '지금 이 claude 세션 자신을 Claude Team Monitor의 팀장으로 등록한다. 이 앱(Electron/Tauri)을',
+      '거치지 않고 터미널에서 곧바로 /team-lead 스킬로 시작한 세션은 처음엔 등록이 안 되어 있어서',
+      'spawn_team_member가 "아직 등록되지 않았다"는 에러를 돌려준다 — 그때 이 툴을 먼저 한 번',
+      '호출해 스스로를 등록해라. 이미 등록되어 있으면(이 앱을 통해 시작됐거나, 이전에 이미 이',
+      '툴을 호출한 경우) 아무것도 바꾸지 않고 그대로 성공을 반환한다.',
+    ].join(' '),
+    inputSchema: {
+      approvedMembers: z.array(z.string()).optional().describe(
+        '선택: 이 팀장이 팀원을 띄워도 되는 디렉토리(절대 경로) 목록. 생략하면 빈 목록으로 시작한다 ' +
+        '— 팀원이 필요해지면 SKILL.md의 "새 팀원 승인 요청" 절차로 그때그때 채워도 된다.',
+      ),
+    },
+  },
+  async ({ approvedMembers }) => {
+    const agent = await findCallingAgent();
+    if (!agent || !agent.sessionId || !agent.id) {
+      return errorResult(
+        '이 세션을 claude agents --json 목록에서 찾지 못했습니다 — --bg로 뜬 세션이 아니거나, 방금 ' +
+        '시작돼서 아직 목록에 반영되지 않았을 수 있습니다(몇 초 후 다시 시도해보세요).',
+      );
+    }
+    if (agent.kind !== 'background') {
+      return errorResult('interactive(사람이 직접 타이핑하는) 세션은 팀장으로 등록할 수 없습니다 — claude --bg로 띄운 세션만 지원합니다.');
+    }
+    const existing = readLeads().find(l => l.sessionId === agent.sessionId);
+    if (existing) {
+      return { content: [{ type: 'text' as const, text: `이미 팀장으로 등록되어 있습니다(id: ${existing.id}).` }] };
+    }
+    const newLead: LeadRecord = {
+      id: agent.id,
+      sessionId: agent.sessionId,
+      targetDir: agent.cwd ?? process.cwd(),
+      launchedAt: agent.startedAt ?? Date.now(),
+      approvedMembers: approvedMembers ?? [],
+      internalId: crypto.randomUUID(),
+    };
+    // 위 findCallingAgent/readLeads 동안 다른 팀장의 등록/변경이 leads.json에 먼저 반영됐을 수
+    // 있다 — 쓰기 직전에 다시 읽어서 최신 상태 위에 얹는다(main.ts의 여러 스폰 경로와 같은 패턴).
+    const latestLeads = readLeads();
+    if (latestLeads.some(l => l.sessionId === agent.sessionId)) {
+      return { content: [{ type: 'text' as const, text: `이미 팀장으로 등록되어 있습니다(id: ${agent.id}).` }] };
+    }
+    latestLeads.push(newLead);
+    try {
+      writeLeads(latestLeads);
+    } catch (err) {
+      return errorResult(`등록에 실패했습니다: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return { content: [{ type: 'text' as const, text: `팀장으로 등록했습니다(id: ${agent.id}, 디렉토리: ${newLead.targetDir}).` }] };
   },
 );
 
