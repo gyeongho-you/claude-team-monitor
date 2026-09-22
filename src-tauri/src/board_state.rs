@@ -162,6 +162,28 @@ pub fn prune_missing_keys<T>(map: &mut HashMap<String, T>, current_ids: &HashSet
     map.retain(|k, _| current_ids.contains(k));
 }
 
+// migrateLastKnownLiveLeadRow(main.ts, 오늘 Electron에서 실사용 재현 후 신규 추가) 포팅 —
+// last_known_live_lead_row는 팀장의 짧은 id를 키로 캐시한다. resume_lead/restart_lead가 그 id를
+// 바꾸는 순간부터, live_rows::get_live_session_rows_inner가 다음 폴링에서 claude agents --json으로
+// 그 새 id를 실제 살아있다고 확인할 때까지는 이 캐시가 여전히 "옛 id" 밑에만 있다. 그 사이 도는
+// 폴링은 이 팀장을 옛 id로도(agents 스냅샷에 없음) 새 id로도(캐시에 아직 없음) 못 찾아 rows에서
+// 통째로 빠뜨리고, 렌더러가 "선택된 팀장이 없어졌다"고 오판해 다른(아무) 온라인 팀장으로 화면을
+// 튕겨버릴 수 있다 — 오늘 Electron main.ts에서 실사용으로 재현·수정된 것과 완전히 같은 사고다.
+// id가 바뀌는 바로 그 자리(resume.rs/lead_lifecycle.rs가 leads.json에 새 id를 쓰는 지점)에서
+// 캐시도 새 id로 함께 옮겨두면, agents 스냅샷이 따라잡을 때까지의 그 짧은 틈에도 옛 스냅숏을
+// 새 id로 계속 보여줄 수 있다. 캐시에 옛 id 밑 항목이 아예 없으면(한 번도 라이브로 안 잡혔던
+// 경우 등) 조용히 아무 일도 안 한다 — 안전한 no-op.
+pub fn migrate_last_known_live_lead_row(old_id: &str, new_id: &str) {
+    if old_id == new_id {
+        return;
+    }
+    let mut guard = state().lock().unwrap();
+    if let Some(mut row) = guard.last_known_live_lead_row.remove(old_id) {
+        row.agent.id = Some(new_id.to_string());
+        guard.last_known_live_lead_row.insert(new_id.to_string(), row);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +224,78 @@ mod tests {
         prune_missing_keys(&mut map, &current);
         assert!(map.contains_key("a"));
         assert!(!map.contains_key("b"));
+    }
+
+    fn fake_row_for_migration_test(id: &str, internal_id: &str) -> crate::live_rows::SessionRow {
+        crate::live_rows::SessionRow {
+            agent: crate::agents_json::AgentEntry {
+                id: Some(id.to_string()),
+                pid: None,
+                cwd: String::new(),
+                kind: "background".to_string(),
+                started_at: None,
+                session_id: "migrate-test-session".to_string(),
+                name: None,
+                status: Some("idle".to_string()),
+                state: None,
+                waiting_for: None,
+            },
+            project_name: "test-project".to_string(),
+            preview: None,
+            is_lead: true,
+            lead_id: None,
+            role: None,
+            label: None,
+            offline: false,
+            internal_id: Some(internal_id.to_string()),
+            auto_stall_nudge: None,
+            secret: None,
+        }
+    }
+
+    // migrate_last_known_live_lead_row — resume_lead/restart_lead가 짧은 id를 바꾸는 순간, 캐시된
+    // 스냅숏도 옛 id에서 새 id로 옮겨지고 그 안의 agent.id도 함께 갱신돼야 한다(다른 필드는 그대로
+    // 보존).
+    #[test]
+    fn migrate_last_known_live_lead_row_moves_cache_entry_to_new_id() {
+        let old_id = "migrate-test-old-id";
+        let new_id = "migrate-test-new-id";
+
+        struct Cleanup(&'static str, &'static str);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let mut guard = state().lock().unwrap();
+                guard.last_known_live_lead_row.remove(self.0);
+                guard.last_known_live_lead_row.remove(self.1);
+            }
+        }
+        let _cleanup = Cleanup(old_id, new_id);
+
+        state().lock().unwrap().last_known_live_lead_row.insert(old_id.to_string(), fake_row_for_migration_test(old_id, "migrate-test-internal"));
+
+        migrate_last_known_live_lead_row(old_id, new_id);
+
+        let guard = state().lock().unwrap();
+        assert!(guard.last_known_live_lead_row.get(old_id).is_none(), "옛 id 밑 항목은 지워져야 한다");
+        let migrated = guard.last_known_live_lead_row.get(new_id).expect("새 id 밑으로 옮겨져야 한다");
+        assert_eq!(migrated.agent.id.as_deref(), Some(new_id), "옮긴 행의 내부 agent.id도 새 id로 갱신돼야 한다");
+        assert_eq!(migrated.internal_id.as_deref(), Some("migrate-test-internal"), "다른 필드는 그대로 보존돼야 한다");
+    }
+
+    // 캐시에 옛 id 항목이 아예 없으면(한 번도 라이브로 안 잡혔던 경우 등) 조용히 아무 일도 안 해야
+    // 한다 — 안전한 no-op.
+    #[test]
+    fn migrate_last_known_live_lead_row_is_noop_when_no_cache_entry_exists() {
+        migrate_last_known_live_lead_row("migrate-test-missing-old", "migrate-test-missing-new");
+        let guard = state().lock().unwrap();
+        assert!(guard.last_known_live_lead_row.get("migrate-test-missing-new").is_none());
+    }
+
+    // old_id == new_id면(호출부가 이미 걸러야 하지만) 이중 방어로 아무 일도 안 해야 한다 — 패닉만
+    // 안 나면 통과.
+    #[test]
+    fn migrate_last_known_live_lead_row_is_noop_when_ids_are_equal() {
+        migrate_last_known_live_lead_row("migrate-test-same-id", "migrate-test-same-id");
     }
 
     // 이번 서브청크(α)에서 새로 추가한 세 필드가 BoardState 하나의 Mutex 밑에서 정상적으로
