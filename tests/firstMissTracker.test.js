@@ -64,8 +64,24 @@ test('trackFirstMiss: graceMs<=0이면 처음 놓친 순간(map에 기록이 아
   // 지금은 graceMs<=0이면 처음 보는 순간에도(map에 기록이 없어도) 바로 expired를 반환한다.
   const map = new Map();
   assert.equal(trackFirstMiss(map, false, 'a', 1000, 0), 'expired');
-  assert.equal(map.get('a'), 1000); // 기록 자체는 남는다 — 다시 present가 되기 전까지 계속 expired가 나와야 한다
+  assert.equal(map.get('a'), 0); // now가 아니라 0으로 기록돼야 한다(아래 테스트가 그 이유)
   assert.equal(trackFirstMiss(map, false, 'a', 1001, 0), 'expired');
+});
+
+test('trackFirstMiss: graceMs=0으로 만료된 뒤, 다음 폴링에서 graceMs가 원래 유예로 늘어나도 계속 expired여야 한다(회귀 재현)', () => {
+  // 실측 UI 재검증(2026-09-23)으로 발견된 회귀: 위 수정이 firstMissAt을 now로 기록했더니,
+  // hasCompletedFirstPoll이 true로 바뀌어 graceMs가 LEAD_OFFLINE_GRACE_MS(3분 이상)로 늘어나는
+  // 바로 다음 폴링에서, "방금 기록한 now" 기준으로 그 큰 유예를 다시 재는 바람에 within-grace로
+  // 되돌아갔다 — 앱 재시작 후 화면에 잠깐 보였다가 다시 사라지는 것으로 재현됨(Tauri 재검증
+  // UI 테스트에서 t=97~220초 구간에 재발).
+  // now는 실제 운영 환경처럼 Date.now() 규모(현실적인 epoch ms)여야 한다 — firstMissAt을 0으로
+  // 기록하는 이 수정은 "now가 충분히 커서 now-0이 어떤 grace_ms보다도 크다"는 전제에 기대기
+  // 때문에, 테스트에서도 작은 상대값(예: 1000)을 쓰면 이 전제가 깨져 오히려 회귀를 못 잡는다.
+  const base = 1_790_000_000_000;
+  const map = new Map();
+  assert.equal(trackFirstMiss(map, false, 'a', base, 0), 'expired'); // 앱 재시작 직후 첫 폴링
+  assert.equal(trackFirstMiss(map, false, 'a', base + 4_000, 214_000), 'expired'); // 다음 폴링부터 원래 유예로 복귀
+  assert.equal(trackFirstMiss(map, false, 'a', base + 300_000, 214_000), 'expired');
 });
 
 test('pruneMissingKeys: currentIds에 없는 키만 지운다', () => {
