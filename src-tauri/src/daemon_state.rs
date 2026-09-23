@@ -102,6 +102,33 @@ pub fn get_chat_unresolvable_detail_command(short_id: String) -> Option<String> 
     read_chat_unresolvable_block_detail_in(&jobs_dir(), &short_id)
 }
 
+// 워크스페이스 신뢰(trust) 승인이 안 된 디렉토리에서 claude --bg를 띄우면(readiness 하드 블락을
+// 경고로 완화한 뒤부터 실제로 일어날 수 있음 — lead_lifecycle.rs의 launch_team_lead/restart_lead
+// readiness 주석 참고) 세션이 시작 단계 트러스트 다이얼로그에서 그대로 멈춘다 — 헤드리스라 아무도
+// 그 다이얼로그를 눌러줄 수 없어서 영원히 안 풀린다. 이 상태 자체를 우회/자동승인하는 건 절대
+// 안 된다(사용자 확인: "허용 안 받은 첫 디렉토리 접근은 원래 멈춰야 되는거야" — 이건 보안 게이트고
+// 그대로 둬야 한다). 이 함수는 그 멈춤 자체를 없애는 게 아니라, "멈췄다는 사실을 앱이 놓치지 않고
+// 알아채서 정리"하는 용도다 — 실측 확인된 job state.json 형태: {"state":"working","detail":"stuck
+// on a startup dialog","tempo":"blocked","needs":"open this session to continue setup"}(state가
+// "blocked"가 아니라 "working"이라 위 read_chat_unresolvable_block_detail_in의 state=="blocked"
+// 조건과는 안 맞는다 — 그래서 별도 함수로 뺐다. state/tempo는 안 보고 detail 문구만으로 좁게
+// 매칭한다 — 오탐보다 미탐이 덜 위험하다).
+fn is_stuck_on_startup_dialog_in(jobs_dir: &Path, short_id: &str) -> bool {
+    if !is_safe_id(short_id) {
+        return false;
+    }
+    let Ok(raw) = std::fs::read_to_string(state_json_path(jobs_dir, short_id)) else { return false };
+    let Ok(data) = serde_json::from_str::<serde_json::Value>(&raw) else { return false };
+    data.get("detail")
+        .and_then(|d| d.as_str())
+        .map(|d| d.to_lowercase().contains("stuck on a startup dialog"))
+        .unwrap_or(false)
+}
+
+pub fn is_stuck_on_startup_dialog(short_id: &str) -> bool {
+    is_stuck_on_startup_dialog_in(&jobs_dir(), short_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,6 +213,52 @@ mod tests {
         let dir = temp_jobs_dir("unrelated");
         write_state(&dir, "job1", r#"{"state":"blocked","detail":"어떤 다른 이유로 멈춤"}"#);
         assert!(read_chat_unresolvable_block_detail_in(&dir, "job1").is_none(), "알려진 패턴이 아니면 None이어야 한다(오탐보다 미탐이 낫다는 판단)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_stuck_on_startup_dialog_rejects_unsafe_short_id() {
+        let dir = temp_jobs_dir("stuck-unsafe");
+        assert!(!is_stuck_on_startup_dialog_in(&dir, "../escape"));
+    }
+
+    #[test]
+    fn is_stuck_on_startup_dialog_matches_real_captured_shape_despite_state_being_working_not_blocked() {
+        // 실측 확인된 그대로: state가 "blocked"가 아니라 "working"이고, tempo가 "blocked"다 — 이
+        // 함수는 그 두 필드를 안 보고 detail 문구만 본다.
+        let dir = temp_jobs_dir("stuck-real-shape");
+        write_state(
+            &dir,
+            "job1",
+            r#"{"state":"working","detail":"stuck on a startup dialog","tempo":"blocked","needs":"open this session to continue setup"}"#,
+        );
+        assert!(is_stuck_on_startup_dialog_in(&dir, "job1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_stuck_on_startup_dialog_is_case_insensitive() {
+        let dir = temp_jobs_dir("stuck-case");
+        write_state(&dir, "job1", r#"{"detail":"Stuck On A Startup Dialog"}"#);
+        assert!(is_stuck_on_startup_dialog_in(&dir, "job1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_stuck_on_startup_dialog_false_when_detail_missing_or_unrelated() {
+        let dir = temp_jobs_dir("stuck-unrelated");
+        write_state(&dir, "job1", r#"{"state":"blocked","detail":"could not refresh your login"}"#);
+        assert!(!is_stuck_on_startup_dialog_in(&dir, "job1"));
+        write_state(&dir, "job2", r#"{"state":"working"}"#);
+        assert!(!is_stuck_on_startup_dialog_in(&dir, "job2"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn is_stuck_on_startup_dialog_false_on_malformed_json() {
+        let dir = temp_jobs_dir("stuck-malformed");
+        write_state(&dir, "job1", "이건 JSON이 아님");
+        assert!(!is_stuck_on_startup_dialog_in(&dir, "job1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

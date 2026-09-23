@@ -746,6 +746,7 @@ mod tests {
             internal_id: Some("internal-1".to_string()),
             auto_stall_nudge: None,
             secret: None,
+            startup_warning: None,
         }];
         let alerts = vec![sample_alert("a", "internal-1"), sample_alert("b", "internal-unknown")];
         let result = attach_lead_ids(alerts, &leads);

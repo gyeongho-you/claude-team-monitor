@@ -22,6 +22,9 @@ use crate::agents_json::fetch_agents_typed_async;
 use crate::board_state::{migrate_last_known_live_lead_row, state as board_state};
 use crate::claude_readiness::{check_directory_claude_ready, claude_not_ready_message};
 use crate::concurrency::queue_lead_operation;
+use crate::daemon_state::is_stuck_on_startup_dialog;
+use crate::live_rows::SessionRow;
+use std::collections::HashSet;
 use crate::logging::log_critical;
 use crate::long_prompt_guard::resolve_long_prompt;
 use crate::paths::{member_templates_path, members_dir, requests_dir, skill_dest_dir, skill_src_path, team_member_server_js_path};
@@ -415,6 +418,58 @@ pub async fn end_lead_work_command(lead_id: String) -> EndLeadWorkOutcome {
 }
 
 // ---------------------------------------------------------------------------------------------
+// cleanupLeadsStuckOnStartupDialog(main.ts) — 워크스페이스 신뢰(trust) 다이얼로그에 멈춘 팀장 감지+정리.
+// ---------------------------------------------------------------------------------------------
+
+/// cleanupLeadsStuckOnStartupDialog(main.ts)와 동일. `leads`는 호출부(get_live_session_rows_inner)가
+/// 이미 들고 있는 배열을 그대로 받아서 그 자리에서 mutate한다 — 그래야 이 함수가 심어둔
+/// startup_warning이 같은 폴링 사이클 안에서 곧바로 이어지는 compute_offline_leads/build_offline_rows가
+/// 보는 것과 정확히 같은 데이터를 가리켜서, 이번 폴링 결과에 바로 반영된다. 디스크 반영은
+/// with_leads_lock으로 별도 처리한다(그 시점의 최신 상태 위에 얹어야 다른 동시 쓰기를 안 덮어쓴다 —
+/// E-1/E-2와 같은 이유).
+pub async fn cleanup_leads_stuck_on_startup_dialog(live_lead_rows: &[SessionRow], leads: &mut Vec<LeadRecord>) -> HashSet<String> {
+    let stuck_ids: HashSet<String> = live_lead_rows
+        .iter()
+        .filter(|row| row.is_lead)
+        .filter_map(|row| row.agent.id.clone())
+        .filter(|id| is_stuck_on_startup_dialog(id))
+        .collect();
+    if stuck_ids.is_empty() {
+        return stuck_ids;
+    }
+    for id in &stuck_ids {
+        log_critical(&format!(
+            "[cleanup_leads_stuck_on_startup_dialog] 팀장 {id}가 워크스페이스 신뢰 승인 다이얼로그에 멈춰있어 정리합니다 — 그 디렉토리에서 터미널로 claude를 한 번 실행해 승인해야 합니다."
+        ));
+        stop_session(id.clone()).await;
+        board_state().lock().unwrap().lead_first_miss_at.insert(id.clone(), 0);
+    }
+    let warning_for = |target_dir: &str| -> String {
+        format!(
+            "\"{target_dir}\"에서 claude 최초 실행 승인(워크스페이스 신뢰)이 안 돼 있어 헤드리스 세션이 시작 단계에서 멈춰 자동으로 정리했습니다 — 그 디렉토리에서 터미널로 claude를 한 번 실행해 뜨는 승인창을 눌러준 뒤 다시 시도하세요."
+        )
+    };
+    for lead in leads.iter_mut() {
+        if stuck_ids.contains(&lead.id) {
+            lead.startup_warning = Some(warning_for(&lead.target_dir));
+        }
+    }
+    let stuck_ids_for_lock = stuck_ids.clone();
+    with_leads_lock(move |latest_leads| {
+        let mut dirty = false;
+        for lead in latest_leads.iter_mut() {
+            if stuck_ids_for_lock.contains(&lead.id) {
+                lead.startup_warning = Some(warning_for(&lead.target_dir));
+                dirty = true;
+            }
+        }
+        (dirty, ())
+    })
+    .await;
+    stuck_ids
+}
+
+// ---------------------------------------------------------------------------------------------
 // launchTeamLead(main.ts) — 브랜드 뉴 팀장을 새로 띄운다.
 // ---------------------------------------------------------------------------------------------
 
@@ -469,6 +524,7 @@ pub async fn launch_team_lead(target_dir: String, instruction: String, label: Op
         internal_id: Some(uuid::Uuid::new_v4().to_string()),
         auto_stall_nudge: None,
         secret: Some(secret),
+        startup_warning: None,
     };
     with_leads_lock(move |leads| {
         leads.push(record);
@@ -511,6 +567,7 @@ pub async fn adopt_lead(short_id: String) -> Option<String> {
         internal_id: Some(uuid::Uuid::new_v4().to_string()),
         auto_stall_nudge: None,
         secret: None,
+        startup_warning: None,
     };
     with_leads_lock(move |leads| {
         leads.push(record);
@@ -573,6 +630,7 @@ pub async fn fork_session_as_lead(session_id: String, cwd: String) -> Option<Str
         internal_id: Some(uuid::Uuid::new_v4().to_string()),
         auto_stall_nudge: None,
         secret: None,
+        startup_warning: None,
     };
     with_leads_lock(move |latest_leads| {
         latest_leads.push(record);
@@ -872,6 +930,7 @@ mod tests {
             internal_id: Some(internal_id.to_string()),
             auto_stall_nudge: None,
             secret: None,
+            startup_warning: None,
         }
     }
 
