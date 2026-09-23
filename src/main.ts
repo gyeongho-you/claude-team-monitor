@@ -231,6 +231,7 @@ type SessionRow = AgentEntry & {
   // 채워진다 — 렌더러가 채팅창에 "재시도 중 (n/m)"으로 보여준다.
   resumeRetrying?: { attempt: number; max: number };
   secret?: boolean; // 팀장·팀원 카드 공통: LeadRecord.secret/MemberRecord.secret을 그대로 반영 — 🔒 표시용
+  startupWarning?: string; // 팀장 카드일 때만: LeadRecord.startupWarning 그대로 반영 — 히스토리 카드에 경고로 표시
 };
 
 type TranscriptEntry = { time: string; prompt: string; answer: string };
@@ -316,6 +317,13 @@ type LeadRecord = {
   // 이유로(resumeSpawnWithRetry 주석 참고), 세션이 이미 시작 시점에 물려받은 설정을 그대로 쓴다.
   // 사용자가 팀장 카드에서 직접 켠다.
   secret?: boolean;
+  // claude 세션이 워크스페이스 신뢰(trust) 승인이 안 된 디렉토리에서 시작 단계 다이얼로그에
+  // 멈춰버려서(claude CLI 자체 job state.json의 detail: "stuck on a startup dialog") 이 앱이
+  // 감지 즉시 stopSession으로 정리한 경우, 왜 이 팀장이 온라인으로 안 넘어가고 바로 히스토리로
+  // 갔는지 설명하는 문구. 신뢰 승인 자체는 앱이 대신 해줄 수 없다(사람이 그 디렉토리에서
+  // 터미널로 claude를 한 번 실행해 승인창을 눌러야 함) — 그래서 우회하지 않고, "왜 멈췄는지"만
+  // 사용자에게 명확히 보여준다(buildSessionRowsInternal 참고).
+  startupWarning?: string;
 };
 
 // 'dir-approval': 사전 승인 안 된 디렉토리에 팀원을 새로 띄우고 싶을 때(requestedDir 사용).
@@ -1432,6 +1440,7 @@ function buildLeadRecordRow(l: LeadRecord, offline: boolean): { row: SessionRow;
     internalId: l.internalId,
     autoStallNudge: l.autoStallNudge,
     secret: l.secret,
+    startupWarning: l.startupWarning,
   };
   return { row, aiTitleUpdated };
 }
@@ -1627,7 +1636,20 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
   const members = reconcileMemberIds(agents, loadMembers());
   const memberMap = new Map(members.map(m => [m.memberId, m]));
 
-  const liveRows = computeLiveRows(agents, leads, leadIds, memberMap);
+  const liveRowsRaw = computeLiveRows(agents, leads, leadIds, memberMap);
+  // 워크스페이스 신뢰 다이얼로그에 멈춘 팀장은 정리하고, 이번 폴링 결과에서도 빼서(그대로 두면
+  // 다음 폴링에 히스토리로 넘어가기 전까지 한 틱 더 "작업 중"으로 잘못 보인다) 곧바로 히스토리로
+  // 넘어가는 것처럼 보이게 한다.
+  const stuckOnStartupDialogIds = await cleanupLeadsStuckOnStartupDialog(liveRowsRaw, leads);
+  const liveRows = stuckOnStartupDialogIds.size
+    ? liveRowsRaw.filter(r => !r.id || !stuckOnStartupDialogIds.has(r.id))
+    : liveRowsRaw;
+  // agentIdSet은 이 함수 맨 위(stopSession 호출보다 훨씬 전)에 뜬 스냅샷이라 방금 정리한 프로세스가
+  // 아직 "살아있는 것"으로 남아있다 — 이대로 두면 바로 아래 computeOfflineLeads가 isPresent=true로
+  // 오판해서, 방금 leadFirstMissAt에 심어둔 0(즉시 만료용)을 present 분기에서 그냥 지워버리고
+  // 다음 폴링부터 원래 유예(LEAD_OFFLINE_GRACE_MS)를 처음부터 다시 물게 된다. 실제로 방금
+  // stopSession으로 죽였으니 이 스냅샷에서도 지워서 현실과 맞춘다.
+  stuckOnStartupDialogIds.forEach(id => agentIdSet.delete(id));
   liveRows.filter(r => r.isLead).forEach(r => lastKnownLiveLeadRow.set(r.id!, r));
   notifyLeadsOfFinishedMembers(liveRows, leads);
   deliverPendingNotices(agents, leads);
@@ -2858,6 +2880,59 @@ function readChatUnresolvableBlockDetail(shortId: string): string | null {
 }
 
 ipcMain.handle('get-chat-unresolvable-detail', (_e, shortId: string) => readChatUnresolvableBlockDetail(shortId));
+
+// 워크스페이스 신뢰(trust) 승인이 안 된 디렉토리에서 claude --bg를 띄우면(readiness 하드 블락을
+// 경고로 완화한 뒤부터 실제로 일어날 수 있음, 실측 확인: 2026-09-23 Tauri UI 재검증) 세션이
+// 시작 단계 트러스트 다이얼로그에서 그대로 멈춘다 — 헤드리스라 아무도 그 다이얼로그를 눌러줄 수
+// 없어서 영원히 안 풀린다. 이 상태 자체를 우회/자동승인하는 건 절대 안 된다(사용자 확인:
+// "허용 안 받은 첫 디렉토리 접근은 원래 멈춰야 되는거야" — 이건 보안 게이트고 그대로 둬야 한다).
+// 이 함수는 그 멈춤 자체를 없애는 게 아니라, "멈췄다는 사실을 앱이 놓치지 않고 알아채서 정리"하는
+// 용도다 — 실측 확인된 job state.json 형태: {"state":"working","detail":"stuck on a startup
+// dialog","tempo":"blocked","needs":"open this session to continue setup"}(state가 "blocked"가
+// 아니라 "working"이라 위 readChatUnresolvableBlockDetail의 state==='blocked' 조건과는 안
+// 맞는다 — 그래서 별도 함수로 뺐다). detail 문구만으로 좁게 매칭한다(오탐보다 미탐이 덜 위험).
+const STUCK_ON_STARTUP_DIALOG_DETAIL_PATTERN = /stuck on a startup dialog/i;
+
+function isStuckOnStartupDialog(shortId: string): boolean {
+  if (!isSafeId(shortId)) return false;
+  try {
+    const raw = fs.readFileSync(path.join(JOBS_DIR, shortId, 'state.json'), 'utf-8');
+    const data = JSON.parse(raw);
+    return typeof data?.detail === 'string' && STUCK_ON_STARTUP_DIALOG_DETAIL_PATTERN.test(data.detail);
+  } catch {
+    return false;
+  }
+}
+
+// 폴링마다 지금 온라인인 팀장들 중 위 상태에 걸린 게 있으면 즉시 정리한다 — 그대로 두면 카드가
+// 영원히 "작업 중"으로만 보여서, 사용자가 왜 이 팀장이 대답이 없는지 알 방법이 없다(실사용 재현:
+// 재검증 UI 테스트에서 카드가 120초 넘게 status-blocked로 고정돼있었음). stopSession으로 정리하고,
+// leadFirstMissAt을 0으로 미리 채워(endLeadWork와 같은 패턴) 다음 폴링에 곧바로 히스토리로
+// 넘어가게 하며, leads.json에 사유를 남겨 히스토리 카드에서 "왜 멈췄는지" 보이게 한다.
+// leads는 호출부(buildSessionRowsInternal)가 이미 들고 있는 배열을 그대로 받아서 그 자리에서
+// mutate한다(다시 loadLeads()로 새로 읽지 않는다) — 그래야 이 함수가 심어둔 startupWarning이
+// 같은 폴링 사이클 안에서 곧바로 이어지는 computeOfflineLeads/buildOfflineRows가 보는 것과
+// 정확히 같은 객체 참조를 가리켜서, 이번 폴링 결과에 바로 반영된다(따로 읽으면 별개의 사본이라
+// 반영이 한 폴링 늦어진다).
+async function cleanupLeadsStuckOnStartupDialog(liveLeadRows: SessionRow[], leads: LeadRecord[]): Promise<Set<string>> {
+  const stuck = liveLeadRows.filter(row => row.isLead && !!row.id && isStuckOnStartupDialog(row.id));
+  const stuckIds = new Set(stuck.map(row => row.id!));
+  if (!stuck.length) return stuckIds;
+  for (const row of stuck) {
+    logCritical(`[cleanupLeadsStuckOnStartupDialog] 팀장 ${row.id}(${row.internalId ?? 'internalId 없음'})가 워크스페이스 신뢰 승인 다이얼로그에 멈춰있어 정리합니다 — 그 디렉토리에서 터미널로 claude를 한 번 실행해 승인해야 합니다.`);
+    await stopSession(row.id!);
+    leadFirstMissAt.set(row.id!, 0);
+  }
+  let dirty = false;
+  for (const lead of leads) {
+    if (stuckIds.has(lead.id)) {
+      lead.startupWarning = `"${lead.targetDir}"에서 claude 최초 실행 승인(워크스페이스 신뢰)이 안 돼 있어 헤드리스 세션이 시작 단계에서 멈춰 자동으로 정리했습니다 — 그 디렉토리에서 터미널로 claude를 한 번 실행해 뜨는 승인창을 눌러준 뒤 다시 시도하세요.`;
+      dirty = true;
+    }
+  }
+  if (dirty) saveLeads(leads);
+  return stuckIds;
+}
 
 // claude CLI에는 이미 생성(응답) 중인 세션에 중간에 끼어들어 입력만 추가하는 기능이 없다(claude
 // --help로 확인) — 개입할 수 있는 유일한 수단인 stop→resume은 하던 응답을 그대로 끊어버린다. 그래서
