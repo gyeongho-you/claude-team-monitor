@@ -98,6 +98,7 @@ mod tests {
             internal_id: Some(internal_id.to_string()),
             auto_stall_nudge: None,
             secret: None,
+            startup_warning: None,
         }
     }
 

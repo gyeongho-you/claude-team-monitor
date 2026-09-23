@@ -36,6 +36,12 @@ pub struct LeadRecord {
     pub auto_stall_nudge: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret: Option<bool>,
+    // claude 세션이 워크스페이스 신뢰(trust) 승인이 안 된 디렉토리에서 시작 단계 다이얼로그에
+    // 멈춰버려서(daemon_state::is_stuck_on_startup_dialog) 이 앱이 감지 즉시 stop_session으로
+    // 정리한 경우, 왜 이 팀장이 온라인으로 안 넘어가고 바로 히스토리로 갔는지 설명하는 문구
+    // (main.ts의 LeadRecord.startupWarning과 동일).
+    #[serde(rename = "startupWarning", default, skip_serializing_if = "Option::is_none")]
+    pub startup_warning: Option<String>,
 }
 
 // 서브청크 γ(TAURI_NOTICE_QUEUE_DESIGN.md §2)부터 이 앱이 직접 팀원 등록 파일을 쓰기 시작해서
@@ -517,6 +523,7 @@ mod tests {
             internal_id: Some(internal_id.to_string()),
             auto_stall_nudge: None,
             secret: None,
+            startup_warning: None,
         }
     }
 

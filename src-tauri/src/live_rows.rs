@@ -159,6 +159,9 @@ pub struct SessionRow {
     pub auto_stall_nudge: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secret: Option<bool>,
+    // 팀장 카드일 때만: LeadRecord.startup_warning 그대로 반영 — 히스토리 카드에 경고로 표시.
+    #[serde(rename = "startupWarning", skip_serializing_if = "Option::is_none")]
+    pub startup_warning: Option<String>,
 }
 
 fn build_row(agent: AgentEntry, lead: Option<&LeadRecord>, member: Option<&MemberRecord>) -> SessionRow {
@@ -181,6 +184,7 @@ fn build_row(agent: AgentEntry, lead: Option<&LeadRecord>, member: Option<&Membe
         } else {
             member.and_then(|m| m.secret)
         },
+        startup_warning: if is_lead { lead.and_then(|l| l.startup_warning.clone()) } else { None },
         project_name,
         preview,
         is_lead,
@@ -273,6 +277,7 @@ fn build_lead_record_row(lead: &LeadRecord, offline: bool) -> SessionRow {
         internal_id: lead.internal_id.clone(),
         auto_stall_nudge: lead.auto_stall_nudge,
         secret: lead.secret,
+        startup_warning: lead.startup_warning.clone(),
     }
 }
 
@@ -482,12 +487,12 @@ pub async fn get_live_session_rows() -> Vec<SessionRow> {
 async fn get_live_session_rows_inner() -> Vec<SessionRow> {
     let now = now_ms();
     let agents = fetch_agents_typed();
-    let agent_id_set: HashSet<String> = agents.iter().filter_map(|a| a.id.clone()).collect();
+    let mut agent_id_set: HashSet<String> = agents.iter().filter_map(|a| a.id.clone()).collect();
 
     // reconcileLeadIds(main.ts:1585-1592)와 동일한 순서 — leads.json 쓰기가 필요해서
     // with_leads_lock으로 감싼다(E-1/E-2 lost-update 방지 규칙). 순수 읽기만 하던 이 함수가
     // 이번에 처음으로 leads.json에 쓰기 시작하므로 반드시 이 락을 거쳐야 한다.
-    let (leads, lead_renames) = with_leads_lock(|leads_mut| {
+    let (mut leads, lead_renames) = with_leads_lock(|leads_mut| {
         let renames = reconcile_lead_ids(&agents, leads_mut);
         let dirty = !renames.is_empty();
         (dirty, (leads_mut.clone(), renames))
@@ -512,7 +517,27 @@ async fn get_live_session_rows_inner() -> Vec<SessionRow> {
     let members = reconcile_member_ids(&agents, load_members());
     let member_by_id: HashMap<String, &MemberRecord> = members.iter().map(|m| (m.member_id.clone(), m)).collect();
 
-    let live_rows = compute_live_rows(&agents, &lead_by_id, &member_by_id);
+    let live_rows_raw = compute_live_rows(&agents, &lead_by_id, &member_by_id);
+    // 워크스페이스 신뢰 다이얼로그에 멈춘 팀장은 정리하고, 이번 폴링 결과에서도 빼서(그대로 두면
+    // 다음 폴링에 히스토리로 넘어가기 전까지 한 틱 더 "작업 중"으로 잘못 보인다) 곧바로 히스토리로
+    // 넘어가는 것처럼 보이게 한다(main.ts의 buildSessionRowsInternal과 동일한 위치/순서).
+    let stuck_on_startup_dialog_ids = crate::lead_lifecycle::cleanup_leads_stuck_on_startup_dialog(&live_rows_raw, &mut leads).await;
+    let live_rows: Vec<SessionRow> = if stuck_on_startup_dialog_ids.is_empty() {
+        live_rows_raw
+    } else {
+        live_rows_raw
+            .into_iter()
+            .filter(|r| r.agent.id.as_deref().map(|id| !stuck_on_startup_dialog_ids.contains(id)).unwrap_or(true))
+            .collect()
+    };
+    // agent_id_set은 이 함수 맨 위(stop_session 호출보다 훨씬 전)에 뜬 스냅샷이라 방금 정리한
+    // 프로세스가 아직 "살아있는 것"으로 남아있다 — 이대로 두면 바로 아래 compute_offline_leads가
+    // is_present=true로 오판해서, 방금 lead_first_miss_at에 심어둔 0(즉시 만료용)을 present 분기에서
+    // 그냥 지워버리고 다음 폴링부터 원래 유예(LEAD_OFFLINE_GRACE_MS)를 처음부터 다시 물게 된다.
+    // 실제로 방금 stop_session으로 죽였으니 이 스냅샷에서도 지워서 현실과 맞춘다.
+    for id in &stuck_on_startup_dialog_ids {
+        agent_id_set.remove(id);
+    }
 
     // liveRows.filter(isLead).forEach(...)와 동일 — 다음 폴링에서 이 팀장이 그레이스 구간에
     // 들어가면 이 스냅숏을 그대로 재사용한다.
@@ -877,6 +902,7 @@ mod tests {
             internal_id: Some("fake-internal-id".to_string()),
             auto_stall_nudge: None,
             secret: None,
+            startup_warning: None,
         }
     }
 
