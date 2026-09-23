@@ -15,6 +15,7 @@
       <button class="tab-btn" data-tab="settings">팀장/팀원 셋팅</button>
       <button class="tab-btn" data-tab="cleanup">세션 정리</button>
     </nav>
+    <button id="help-btn" title="도움말 — 화면별 기능 안내">?</button>
     <div id="app-settings-wrap">
       <button id="app-settings-btn" title="정체 감시 설정">⚙</button>
       <div id="app-settings-panel" hidden>
@@ -267,6 +268,51 @@
     </div>
     <p class="form-hint">지금 이 디렉토리에서 커밋+푸시를 지시하면 포함될 변경사항입니다(git 미커밋 상태 그대로). 파일을 누르면 diff를 볼 수 있습니다.</p>
     <div id="file-list-content"></div>
+  </div>
+
+  <div id="help-panel" class="modal-panel" hidden>
+    <div class="section-header">
+      <h2>도움말</h2>
+      <button id="help-close-btn">닫기</button>
+    </div>
+    <p class="form-hint">화면별로 어떤 기능이고 어떻게 쓰는지 정리했습니다. 스크린샷은 실제 화면을 그대로 캡처한 것입니다.</p>
+    <div id="help-content" class="help-content">
+      <section class="help-section">
+        <h3>1. 작업 탭 — 팀장 카드와 채팅</h3>
+        <img src="help/01-work-tab.png" alt="작업 탭" />
+        <p>지금 떠있는 팀장이 카드로 보입니다. 카드를 누르면 오른쪽에 그 팀장과의 대화창이 열립니다. 카드 위쪽 배지로 상태(idle/busy/blocked/온라인 여부)와 시크릿 모드(🔒) 여부를 바로 알 수 있고, 이름표를 눌러 라벨을 바로 바꿀 수도 있습니다. 대화창 아래 입력창으로 메시지를 보내면, 팀장이 바쁠 땐 자동으로 대기열에 쌓였다가 한가해지면 전달됩니다.</p>
+      </section>
+      <section class="help-section">
+        <h3>2. 새 팀장 띄우기</h3>
+        <img src="help/02-launch-form.png" alt="새 팀장 시작 폼" />
+        <p>"+ 새 팀장" 버튼을 누르면 뜨는 폼입니다. 작업할 디렉토리(사전에 즐겨찾기로 등록해둔 것 중 선택), 구분용 이름, 실제로 시킬 지시문을 입력합니다. 시크릿 모드를 켜면 daily-journal 같은 사용자 단위 기록(user-level hook)이 아예 남지 않는 팀장으로 뜹니다. 처음 쓰는 디렉토리라면 워크스페이스 신뢰(trust) 승인이 필요할 수 있는데, 이 경우 앱이 자동으로 감지해서 정리하고 이유를 알려줍니다.</p>
+      </section>
+      <section class="help-section">
+        <h3>3. 채팅 안에서 찾기(Ctrl+F)</h3>
+        <img src="help/03-chat-find.png" alt="채팅 찾기 기능" />
+        <p>대화창에 포커스가 있을 때 Ctrl+F를 누르면 찾기 바가 뜹니다. 검색어를 입력하면 일치하는 부분이 전부 하이라이트되고, 다음/이전 버튼(또는 Enter/Shift+Enter)으로 이동합니다. X 버튼이나 Esc로 닫으면 검색어도 함께 초기화됩니다.</p>
+      </section>
+      <section class="help-section">
+        <h3>4. 히스토리 탭 — 지난 작업 이어하기</h3>
+        <img src="help/04-history-tab.png" alt="히스토리 탭" />
+        <p>지금은 오프라인인(껐거나 재시작 대기 중인) 팀장들이 여기 모입니다. 카드를 누르면 작업 탭으로 이동해 그 팀장과의 대화를 그대로 이어갈 수 있고(메시지를 보내면 자동으로 다시 깨어남), "새 작업 시작"을 누르면 이전 대화 없이 완전히 새로 시작할 수도 있습니다. 삭제 버튼은 이 앱의 추적 기록만 지우고, 실제 대화 파일은 건드리지 않습니다.</p>
+      </section>
+      <section class="help-section">
+        <h3>5. 팀장/팀원 셋팅 탭 — 즐겨찾기와 템플릿</h3>
+        <img src="help/05-settings-tab.png" alt="팀장/팀원 셋팅 탭" />
+        <p>자주 쓰는 작업 디렉토리를 즐겨찾기로 등록해두면 새 팀장/팀원을 띄울 때 목록에서 바로 고를 수 있습니다. 팀원 템플릿은 "이 디렉토리엔 항상 이 역할·이 지시로 팀원을 붙인다" 같은 프리셋입니다 — 사전승인 체크박스를 켜두면 팀장이 승인 요청 없이 바로 그 디렉토리에 팀원을 띄울 수 있습니다. 오른쪽 위 톱니바퀴(⚙)에서는 정체(방치) 감지 기준 시간을 조정할 수 있습니다.</p>
+      </section>
+      <section class="help-section">
+        <h3>6. 세션 정리 탭</h3>
+        <img src="help/06-cleanup-tab.png" alt="세션 정리 탭" />
+        <p>지금 떠있는 모든 백그라운드 세션(좀비 세션 포함)을 팀장/팀원/미등록으로 태그해 보여줍니다. 팀장이 팀원을 만들어놓고 등록을 깜빡한 경우 "미등록(추정 팀원)"으로 표시되며, 등록 버튼으로 바로 정식 등록할 수 있습니다. 더 이상 필요 없는 세션은 종료 버튼으로 바로 끌 수 있습니다.</p>
+      </section>
+      <section class="help-section">
+        <h3>7. 승인 요청 응답하기</h3>
+        <img src="help/07-approval-request.png" alt="승인 요청 카드" />
+        <p>팀장이 사전승인 안 된 디렉토리에 팀원을 만들고 싶거나, 사용자가 직접 추가한 팀원을 종료하고 싶을 때 이 요청 카드가 뜹니다. 승인/거부 버튼을 누르면 그 결정이 팀장에게 그대로 전달됩니다.</p>
+      </section>
+    </div>
   </div>
 
   <script src="lib/status.js"></script>

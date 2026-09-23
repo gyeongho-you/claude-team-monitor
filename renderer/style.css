@@ -66,7 +66,10 @@ header h1 { font-size: 15px; margin: 0; }
 #theme-toggle-btn { background: transparent; border: 1px solid var(--border-2); font-size: 14px; padding: 3px 8px; }
 #last-updated { color: var(--text-faint); font-size: 11px; }
 
-#app-settings-wrap { position: relative; margin-left: auto; }
+/* 오른쪽 끝으로 밀어내는 auto-margin은 이 그룹(도움말/설정/테마) 중 맨 앞인 help-btn에 준다 —
+   app-settings-wrap에 있던 걸 여기로 옮겼다(help-btn을 그 앞에 추가했으므로). */
+#help-btn { background: transparent; border: 1px solid var(--border-2); font-size: 14px; padding: 3px 8px; margin-left: auto; }
+#app-settings-wrap { position: relative; }
 #app-settings-btn { background: transparent; border: 1px solid var(--border-2); font-size: 14px; padding: 3px 8px; }
 #app-settings-panel {
   position: absolute;
@@ -259,6 +262,20 @@ body.modal-open { overflow: hidden; }
   margin-top: 0;
 }
 #file-list-panel { width: 720px; }
+/* file-list-panel과 같은 이유(스크롤해도 닫기 버튼이 안 사라지게)로 헤더를 고정한다. */
+#help-panel { width: 760px; }
+#help-panel .section-header {
+  margin-bottom: 8px;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--surface);
+}
+.help-content { display: flex; flex-direction: column; gap: 20px; }
+.help-section h3 { margin: 0 0 8px; font-size: 13px; color: var(--accent-2); }
+.help-section img { width: 100%; border: 1px solid var(--border-2); border-radius: 4px; display: block; margin-bottom: 8px; }
+.help-section p { margin: 0; color: var(--text-soft); font-size: 12px; line-height: 1.6; }
+.help-section + .help-section { border-top: 1px solid var(--border); padding-top: 16px; }
 /* .modal-panel 자체도 스크롤 컨테이너(overflow-y:auto)라서, 안에 있는 이 헤더(닫기 버튼 포함)도
    .diff-back-btn과 똑같이 스크롤하면 같이 밀려 올라가 사라진다 — 같은 패턴이라 같이 고정한다.
    배경색이 부모(.modal-panel)와 같아서, sticky 기준선(top:0) 위 패딩 영역과 자연스럽게 이어진다. */

@@ -127,7 +127,10 @@ const historyDeletePanelEl = document.getElementById('history-delete-panel');
 const historyDeleteInfoEl = document.getElementById('history-delete-info');
 const historyDeleteConfirmBtn = document.getElementById('history-delete-confirm-btn');
 const historyDeleteCancelBtn = document.getElementById('history-delete-cancel-btn');
-const ALL_MODAL_PANELS = () => [restartLeadPanelEl, endWorkPanelEl, fileListPanelEl, cleanupStopPanelEl, historyDeletePanelEl];
+const helpBtn = document.getElementById('help-btn');
+const helpPanelEl = document.getElementById('help-panel');
+const helpCloseBtn = document.getElementById('help-close-btn');
+const ALL_MODAL_PANELS = () => [restartLeadPanelEl, endWorkPanelEl, fileListPanelEl, cleanupStopPanelEl, historyDeletePanelEl, helpPanelEl];
 
 // "새 작업 시작"/"작업 종료"/"변경 파일" 같은 확인창·상세창은 대화창 아래쪽에 인라인으로 뜨면
 // 스크롤 밖이라 눈에 안 띄어서(사용자 피드백), 화면 가운데 팝업(모달)으로 띄운다 — 배경을
@@ -235,6 +238,8 @@ fileListContentEl.addEventListener('click', e => {
 });
 
 fileListCloseBtn.addEventListener('click', () => hideModal(fileListPanelEl));
+helpBtn.addEventListener('click', () => showModal(helpPanelEl));
+helpCloseBtn.addEventListener('click', () => hideModal(helpPanelEl));
 const launchFormPanelEl = document.getElementById('launch-form-panel');
 const cancelFormBtn = document.getElementById('cancel-form-btn');
 const adoptFormPanelEl = document.getElementById('adopt-form-panel');
