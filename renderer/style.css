@@ -738,6 +738,9 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
   font-size: 12px;
 }
 .history-hint { margin-top: 6px; color: var(--text-dim); font-size: 10px; font-style: italic; }
+/* 워크스페이스 신뢐 승인 없이 스폰됐다가 시작 다이얼로그에 멈춰 자동 정리된 팀장 전용 경고 —
+   왜 이 팀장이 온라인으로 못 넘어갔는지 사용자에게 명확히 보여준다. */
+.history-startup-warning { margin-top: 6px; color: var(--warning); font-size: 11px; }
 .history-risk { display: inline-block; font-size: 10px; border-radius: 8px; padding: 0 6px; margin-left: 6px; }
 .history-risk.risk-mid { background: #5a4a2a; color: #dcaa3c; }
 .history-risk.risk-high { background: #5a2a2a; color: #f19999; }
