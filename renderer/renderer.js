@@ -694,6 +694,13 @@ async function syncQueuedMessagesWithTranscript(leadId, transcript) {
         // 배달이 막 시작된 시점 — 이 시점까지 쌓인 기록은 전부 "이미 지나간 것"으로 보고 매칭
         // 대상에서 뺀다(아래 baseline 설명 참고).
         if (item.transcriptBaselineLen === undefined) item.transcriptBaselineLen = transcript.length;
+        // item.createdAt은 사용자가 이 메시지를 "처음 보낸"(대기열에 들어가기 전) 시각이라 —
+        // 대기열에서 30초 넘게 기다리다 막 배달이 시작된 항목은 이 시점에 이미 IN_FLIGHT_STUCK_MS를
+        // 넘겨서, isStuck 판정(아래 renderQueuedTurnsHtml)이 "방금 막 시작했는데" 먹통이라고
+        // 오판해 재시도/삭제 버튼이 잠깐 반짝 떴다 사라지는 버그로 이어졌다(실사용 지적: "대기에서
+        // 작업중으로 변할 때 잠깐 재시도 버튼이 뜬다"). in-flight로 전환되는 지금 이 순간을
+        // "응답을 기다리기 시작한 시각"으로 다시 잡아야 한다.
+        item.createdAt = Date.now();
       }
     }
   }
