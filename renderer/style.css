@@ -263,7 +263,19 @@ body.modal-open { overflow: hidden; }
 }
 #file-list-panel { width: 720px; }
 /* file-list-panel과 같은 이유(스크롤해도 닫기 버튼이 안 사라지게)로 헤더를 고정한다. */
-#help-panel { width: 760px; }
+/* .modal-panel(테두리 둥근 모서리 + overflow-y:auto 스크롤 컨테이너)이 스크롤과 둥근 모서리를
+   동시에 갖고 있으면, 안의 sticky 헤더가 스크롤될 때 그 배경이 둥근 모서리 클리핑을 무시하고
+   그대로 사각형으로 삐져나와 모서리에 배경(어두운 backdrop)이 뚫린 것처럼 보인다(실사용 확인).
+   그래서 #help-panel 자체는 스크롤을 멈추고(overflow:hidden) 둥근 모서리 클리핑만 담당하게 하고,
+   실제 스크롤(패딩 포함)은 안쪽 .modal-scroll-inner로 옮겨서 sticky 헤더가 삐져나올 모서리 자체가
+   없게 만든다. */
+#help-panel { width: 760px; padding: 0; overflow: hidden; }
+#help-panel .modal-scroll-inner {
+  max-height: 80vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 16px;
+}
 #help-panel .section-header {
   margin-bottom: 8px;
   position: sticky;
