@@ -143,14 +143,21 @@ pub fn track_first_miss(map: &mut HashMap<String, i64>, is_present: bool, id: &s
     }
     match map.get(id) {
         None => {
-            map.insert(id.to_string(), now);
             // grace_ms<=0은 "유예 없이 즉시 만료"를 의도한 호출(예: 앱 재시작 직후 첫 폴링, 또는
             // endLeadWork가 확정 종료를 알리려고 유예를 건너뛰는 경우)인데, 이 id를 처음 보는
             // 순간이면(map에 아직 기록이 없으면) 항상 FirstMiss만 반환해서 grace_ms를 사실상 무시하고
-            // 있었다 — 그 다음 폴링부터는 has_completed_first_poll이 이미 true라 원래 유예
-            // (LEAD_OFFLINE_GRACE_MS, 3분 이상)가 적용돼, "즉시 만료"를 의도했던 호출이 실제로는
-            // 다음 폴링까지 grace_ms=0을 전혀 못 써보고 전체 유예를 그대로 물게 됐다(실측 UI
-            // 테스트에서 죽은 팀장이 앱 재시작 후 ~217초 동안 어느 탭에도 안 보이는 것으로 재현됨).
+            // 있었다(실측 UI 테스트에서 죽은 팀장이 앱 재시작 후 ~217초 동안 어느 탭에도 안 보이는
+            // 것으로 재현됨).
+            //
+            // 1차 수정(grace_ms<=0이면 Expired 반환)만으로는 부족했다 — first_miss_at을 now로
+            // 기록해버리면, 바로 다음 폴링부터 has_completed_first_poll이 true가 돼 grace_ms가
+            // 원래 유예(LEAD_OFFLINE_GRACE_MS, 3분 이상)로 늘어나는데, 그 큰 유예를 "방금 기록한
+            // now" 기준으로 다시 재는 바람에 now-first_miss_at(수 초)<grace_ms가 성립해 WithinGrace로
+            // 되돌아간다 — endLeadWork(main.ts의 leadFirstMissAt.set(id,0))와 정확히 같은 이유로,
+            // 여기서도 now 대신 0(아주 오래 전)을 기록해야 이후 어떤 grace_ms가 오더라도 다시
+            // 유예 안으로 들어가지 않는다(실측 UI 재검증에서 첫 폴링엔 정상 해소됐다가 t=97~220초
+            // 구간에 다시 공백이 재현되는 것으로 확인, 원인을 여기로 추적함).
+            map.insert(id.to_string(), if grace_ms <= 0 { 0 } else { now });
             if grace_ms <= 0 {
                 FirstMissResult::Expired
             } else {
@@ -237,8 +244,27 @@ mod tests {
     fn zero_grace_expires_immediately_even_on_first_sighting() {
         let mut map = HashMap::new();
         assert_eq!(track_first_miss(&mut map, false, "lead-a", 1_000, 0), FirstMissResult::Expired);
-        assert_eq!(map.get("lead-a"), Some(&1_000));
+        assert_eq!(map.get("lead-a"), Some(&0)); // now가 아니라 0으로 기록돼야 한다(아래 테스트가 그 이유)
         assert_eq!(track_first_miss(&mut map, false, "lead-a", 1_001, 0), FirstMissResult::Expired);
+    }
+
+    // 실측 UI 재검증(2026-09-23)으로 발견된 회귀: 위 수정이 first_miss_at을 now로 기록했더니,
+    // has_completed_first_poll이 true로 바뀌어 grace_ms가 LEAD_OFFLINE_GRACE_MS(3분 이상)로
+    // 늘어나는 바로 다음 폴링에서, "방금 기록한 now" 기준으로 그 큰 유예를 다시 재는 바람에
+    // WithinGrace로 되돌아갔다 — 앱 재시작 후 화면에 잠깐 보였다가 다시 사라지는 것으로 재현됨.
+    #[test]
+    fn zero_grace_expiry_stays_expired_even_after_grace_grows_on_a_later_poll() {
+        // now는 실제 운영 환경처럼 Date.now() 규모(현실적인 epoch ms)여야 한다 — first_miss_at을
+        // 0으로 기록하는 이 수정은 "now가 충분히 커서 now-0이 어떤 grace_ms보다도 크다"는 전제에
+        // 기대기 때문에, 테스트에서도 작은 상대값(예: 1_000)을 쓰면 이 전제가 깨져 회귀를 못 잡는다.
+        let base: i64 = 1_790_000_000_000;
+        let mut map = HashMap::new();
+        // 앱 재시작 직후 첫 폴링: grace_ms=0으로 즉시 만료.
+        assert_eq!(track_first_miss(&mut map, false, "lead-a", base, 0), FirstMissResult::Expired);
+        // has_completed_first_poll이 true로 바뀌어 그 다음 폴링부터는 원래 유예(3분 이상)가 온다 —
+        // 그래도 여전히 Expired여야 한다(이미 기록이 0이라 어떤 실제 시각을 넣어도 유예 안에 못 든다).
+        assert_eq!(track_first_miss(&mut map, false, "lead-a", base + 4_000, 214_000), FirstMissResult::Expired);
+        assert_eq!(track_first_miss(&mut map, false, "lead-a", base + 300_000, 214_000), FirstMissResult::Expired);
     }
 
     #[test]

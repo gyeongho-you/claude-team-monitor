@@ -19,14 +19,19 @@ function trackFirstMiss(map, isPresent, id, now, graceMs) {
   }
   const firstMissAt = map.get(id);
   if (firstMissAt === undefined) {
-    map.set(id, now);
     // graceMs<=0은 "유예 없이 즉시 만료"를 의도한 호출(앱 시작 직후 첫 폴링, endLeadWork의 확정
     // 종료 등)인데, 이 id를 처음 보는 순간이면 항상 'first-miss'만 반환해서 graceMs를 사실상
-    // 무시하고 있었다 — 다음 폴링부터는 hasCompletedFirstPoll이 이미 true라 원래 유예
-    // (LEAD_OFFLINE_GRACE_MS, 3분 이상)가 그대로 적용돼, "즉시 만료"를 의도한 호출이 전체 유예를
-    // 그대로 물게 된다(Tauri 포팅본의 실측 UI 테스트로 재현·확인 — 죽은 팀장이 앱 재시작 후
-    // ~217초 동안 어느 탭에도 안 보임. Rust로 옮겨진 동일 로직에서 먼저 발견됐지만 이 원본 함수의
-    // 버그다).
+    // 무시하고 있었다(Tauri 포팅본의 실측 UI 테스트로 재현·확인 — 죽은 팀장이 앱 재시작 후 ~217초
+    // 동안 어느 탭에도 안 보임).
+    //
+    // 1차 수정(graceMs<=0이면 'expired' 반환)만으로는 부족했다 — firstMissAt을 now로 기록해버리면,
+    // 바로 다음 폴링부터 hasCompletedFirstPoll이 true가 돼 graceMs가 원래 유예
+    // (LEAD_OFFLINE_GRACE_MS, 3분 이상)로 늘어나는데, 그 큰 유예를 "방금 기록한 now" 기준으로
+    // 다시 재는 바람에 now-firstMissAt(수 초)<graceMs가 성립해 'within-grace'로 되돌아간다 —
+    // endLeadWork(leadFirstMissAt.set(id,0))와 정확히 같은 이유로, 여기서도 now 대신 0(아주 오래
+    // 전)을 기록해야 이후 어떤 graceMs가 오더라도 다시 유예 안으로 들어가지 않는다(Tauri 재검증
+    // UI 테스트에서 첫 폴링엔 정상 해소됐다가 잠시 후 다시 공백이 재현되는 것으로 확인).
+    map.set(id, graceMs <= 0 ? 0 : now);
     return graceMs <= 0 ? 'expired' : 'first-miss';
   }
   if (now - firstMissAt < graceMs) {
