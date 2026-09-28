@@ -569,7 +569,7 @@ function formatRawSessionTimestamp(iso: string | undefined): string {
 const rawSessionTranscriptCache = new Map<string, { mtimeMs: number; entries: TranscriptEntry[] }>();
 
 function getCachedRawSessionTranscript(cwd: string, sessionId: string): TranscriptEntry[] {
-  const file = path.join(PROJECTS_DIR, encodeProjectDirName(cwd), `${sessionId}.jsonl`);
+  const file = sessionFilePath(cwd, sessionId);
   let mtimeMs: number;
   try {
     mtimeMs = fs.statSync(file).mtimeMs;
@@ -591,7 +591,7 @@ function getCachedRawSessionTranscript(cwd: string, sessionId: string): Transcri
 // 사람이 보낸 프롬프트가 아니므로 건너뛴다 — 그 외(문자열이거나 text 블록이 있는 경우)는 새 턴의
 // 시작으로 보고, 그 다음에 오는 assistant 메시지들의 text 블록을 모아 답변으로 짝짓는다.
 function readRawSessionTranscript(cwd: string, sessionId: string): TranscriptEntry[] {
-  const file = path.join(PROJECTS_DIR, encodeProjectDirName(cwd), `${sessionId}.jsonl`);
+  const file = sessionFilePath(cwd, sessionId);
   let lines: string[];
   try {
     if (!fs.existsSync(file)) return [];
@@ -653,7 +653,7 @@ function fillMissingTranscriptFromRawSession(journalEntries: TranscriptEntry[], 
     return raw.length ? raw : journalEntries;
   }
 
-  const file = path.join(PROJECTS_DIR, encodeProjectDirName(cwd), `${sessionId}.jsonl`);
+  const file = sessionFilePath(cwd, sessionId);
   let stat: fs.Stats;
   try {
     stat = fs.statSync(file);
@@ -735,9 +735,35 @@ function encodeProjectDirName(cwd: string): string {
   return cwd.replace(/[^A-Za-z0-9]/g, '-');
 }
 
+// 팀장이 team-lead 스킬로 git worktree에 들어가서 작업하면(EnterWorktree, 흔한 패턴), claude CLI
+// 자신의 원본 세션 파일은 실제로 작업 중인 worktree 하위 디렉토리까지 포함해 인코딩된 폴더에
+// 남는다(실측 확인: "<원래 cwd 인코딩>--claude-worktrees-<이름>" 폴더). 그런데 leads.json의
+// targetDir은 팀장을 처음 띄울 때 등록한 원래 디렉토리 그대로라 이 worktree 접미사를 모른다 —
+// 그 결과 원본 파일을 못 찾아서 daily-journal 기록만 신뢰하게 되는데, 지금 턴이 아직 안 끝나(Stop
+// 훅 전) daily-journal에 아무것도 안 남은 동안은 채팅창이 그 사이 진행 상황을 전혀 못 보여준다
+// (실사용 재현: 업무가 들어가도 그걸 인지 못 하고 "먹통일 수 있습니다"로 오판). 원래 경로가
+// 없으면 이 worktree 접미사가 붙은 폴더들 중 이 세션 파일을 가진 걸 찾아서 대신 쓴다 — 접두사를
+// "--claude-worktrees-"까지 정확히 요구해서, 이름 뒤쪽이 우연히 겹치는 무관한 다른 프로젝트
+// 폴더를 잘못 집는 일이 없게 한다.
+function sessionFilePath(cwd: string, sessionId: string): string {
+  const prefix = encodeProjectDirName(cwd);
+  const filename = `${sessionId}.jsonl`;
+  const expected = path.join(PROJECTS_DIR, prefix, filename);
+  if (fs.existsSync(expected)) return expected;
+  const worktreePrefix = `${prefix}--claude-worktrees-`;
+  try {
+    for (const name of fs.readdirSync(PROJECTS_DIR)) {
+      if (!name.startsWith(worktreePrefix)) continue;
+      const candidate = path.join(PROJECTS_DIR, name, filename);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  } catch { /* PROJECTS_DIR 자체가 없으면 그냥 원래 경로로 폴백 */ }
+  return expected;
+}
+
 function getSessionAiTitle(sessionId: string, cwd: string): string | null {
   try {
-    const file = path.join(PROJECTS_DIR, encodeProjectDirName(cwd), `${sessionId}.jsonl`);
+    const file = sessionFilePath(cwd, sessionId);
     if (!fs.existsSync(file)) return null;
     const content = fs.readFileSync(file, 'utf-8');
     let title: string | null = null;

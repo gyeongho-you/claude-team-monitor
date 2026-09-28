@@ -45,8 +45,41 @@ fn parse_journal_time_loose(time: &str) -> Option<i64> {
     }
 }
 
+// 팀장이 team-lead 스킬로 git worktree에 들어가서 작업하면(EnterWorktree, 흔한 패턴), claude
+// CLI 자신의 원본 세션 파일은 실제로 작업 중인 worktree 하위 디렉토리까지 포함해 인코딩된 폴더에
+// 남는다(실측 확인: "<원래 cwd 인코딩>--claude-worktrees-<이름>" 폴더). 그런데 leads.json의
+// targetDir은 팀장을 처음 띄울 때 등록한 원래 디렉토리 그대로라 이 worktree 접미사를 모른다 —
+// 그 결과 원본 파일을 못 찾아서(fill_missing_transcript_from_raw_session_at이 fail-open으로
+// daily-journal 기록만 신뢰) 지금 턴이 아직 안 끝나(Stop 훅 전) daily-journal에 아무것도 안 남은
+// 동안은 채팅창이 그 사이 진행 상황을 전혀 못 보여준다(실사용 재현: 업무가 들어가도 그걸 인지 못
+// 하고 "먹통일 수 있습니다"로 오판). 원래 경로가 없으면 이 worktree 접미사가 붙은 폴더들 중 이
+// 세션 파일을 가진 걸 찾아서 대신 쓴다 — 접두사를 "--claude-worktrees-"까지 정확히 요구해서, 이름
+// 뒤쪽이 우연히 겹치는 무관한 다른 프로젝트 폴더를 잘못 집는 일이 없게 한다.
 fn session_file_path(cwd: &str, session_id: &str) -> PathBuf {
-    projects_dir().join(encode_project_dir_name(cwd)).join(format!("{session_id}.jsonl"))
+    session_file_path_in(&projects_dir(), cwd, session_id)
+}
+
+fn session_file_path_in(projects_dir: &Path, cwd: &str, session_id: &str) -> PathBuf {
+    let prefix = encode_project_dir_name(cwd);
+    let filename = format!("{session_id}.jsonl");
+    let expected = projects_dir.join(&prefix).join(&filename);
+    if expected.exists() {
+        return expected;
+    }
+    let worktree_prefix = format!("{prefix}--claude-worktrees-");
+    if let Ok(entries) = std::fs::read_dir(projects_dir) {
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else { continue };
+            if !name.starts_with(&worktree_prefix) {
+                continue;
+            }
+            let candidate = entry.path().join(&filename);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    expected
 }
 
 fn text_blocks(content: &serde_json::Value) -> Vec<String> {
@@ -343,5 +376,53 @@ mod tests {
         let last = TranscriptEntry { time: "2026-09-17 03:05".to_string(), prompt: "[알림] 반복".to_string(), answer: String::new() };
         let idx = find_last_matching_raw_index(&last, &raw);
         assert_eq!(idx, 1, "03:00짜리(인덱스 1)가 03:05와 가장 가까워야 한다");
+    }
+
+    fn temp_projects_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("claude_team_monitor_test_projects_{tag}_{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn session_file_path_in_uses_direct_folder_when_it_exists() {
+        let dir = temp_projects_dir("direct");
+        let direct = dir.join("C--Users-x-g1cl-mgt");
+        std::fs::create_dir_all(&direct).unwrap();
+        std::fs::write(direct.join("sess1.jsonl"), "").unwrap();
+
+        let result = session_file_path_in(&dir, "C:\\Users\\x\\g1cl-mgt", "sess1");
+        assert_eq!(result, direct.join("sess1.jsonl"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_file_path_in_falls_back_to_worktree_suffixed_folder() {
+        // 팀장이 git worktree로 들어가서 작업하면(EnterWorktree), 원본 세션 파일은 원래 cwd
+        // 폴더가 아니라 "<원래 cwd 인코딩>--claude-worktrees-<이름>" 폴더에 남는다 — leads.json의
+        // targetDir은 원래 디렉토리 그대로라 직접 조합한 경로엔 파일이 없다.
+        let dir = temp_projects_dir("worktree");
+        let worktree_dir = dir.join("C--Users-x-g1cl-mgt--claude-worktrees-keen-painting-walrus");
+        std::fs::create_dir_all(&worktree_dir).unwrap();
+        std::fs::write(worktree_dir.join("sess1.jsonl"), "").unwrap();
+
+        let result = session_file_path_in(&dir, "C:\\Users\\x\\g1cl-mgt", "sess1");
+        assert_eq!(result, worktree_dir.join("sess1.jsonl"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn session_file_path_in_ignores_unrelated_folder_with_similar_prefix() {
+        // "g1cl-mgt2" 같은 무관한 다른 프로젝트 폴더가 우연히 같은 문자열로 시작한다고 해서
+        // 잘못 집으면 안 된다 — 접두사가 정확히 "--claude-worktrees-"로 이어질 때만 인정한다.
+        let dir = temp_projects_dir("unrelated");
+        let unrelated_dir = dir.join("C--Users-x-g1cl-mgt2");
+        std::fs::create_dir_all(&unrelated_dir).unwrap();
+        std::fs::write(unrelated_dir.join("sess1.jsonl"), "").unwrap();
+
+        let result = session_file_path_in(&dir, "C:\\Users\\x\\g1cl-mgt", "sess1");
+        assert_eq!(result, dir.join("C--Users-x-g1cl-mgt").join("sess1.jsonl"), "무관한 폴더를 집으면 안 되고, 못 찾았으니 원래 기대 경로로 폴백해야 한다");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
