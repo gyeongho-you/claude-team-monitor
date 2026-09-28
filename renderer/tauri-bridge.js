@@ -187,8 +187,8 @@
   }
 
   // ---- 채팅(알림 큐) ----
-  async function sendToLead(leadId, message) {
-    return invoke('send_to_lead_command', { leadId, message });
+  async function sendToLead(leadId, message, priority) {
+    return invoke('send_to_lead_command', { leadId, message, priority: !!priority });
   }
 
   async function cancelQueuedMessage(leadId, noticeId) {

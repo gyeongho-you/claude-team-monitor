@@ -130,7 +130,15 @@ const historyDeleteCancelBtn = document.getElementById('history-delete-cancel-bt
 const helpBtn = document.getElementById('help-btn');
 const helpPanelEl = document.getElementById('help-panel');
 const helpCloseBtn = document.getElementById('help-close-btn');
-const ALL_MODAL_PANELS = () => [restartLeadPanelEl, endWorkPanelEl, fileListPanelEl, cleanupStopPanelEl, historyDeletePanelEl, helpPanelEl];
+const prioritySendPanelEl = document.getElementById('priority-send-panel');
+const prioritySendInstructionEl = document.getElementById('priority-send-instruction');
+const prioritySendConfirmBtn = document.getElementById('priority-send-confirm-btn');
+const prioritySendCancelBtn = document.getElementById('priority-send-cancel-btn');
+const prioritySendStatusEl = document.getElementById('priority-send-status');
+const ALL_MODAL_PANELS = () => [restartLeadPanelEl, endWorkPanelEl, fileListPanelEl, cleanupStopPanelEl, historyDeletePanelEl, helpPanelEl, prioritySendPanelEl];
+// 우선 전달 모달이 지금 누구 앞으로 뜬 건지 — 배너 버튼을 누른 시점의 리드 id를 기억해뒀다가
+// 확인 버튼을 눌렀을 때(그 사이 selectedLeadId가 바뀌었을 수 있으므로) 그 리드로 정확히 보낸다.
+let prioritySendLeadId = null;
 
 // "새 작업 시작"/"작업 종료"/"변경 파일" 같은 확인창·상세창은 대화창 아래쪽에 인라인으로 뜨면
 // 스크롤 밖이라 눈에 안 띄어서(사용자 피드백), 화면 가운데 팝업(모달)으로 띄운다 — 배경을
@@ -785,7 +793,14 @@ function computeBusyBannerHtml(row) {
   const ownStatus = row && !row.offline ? getStatus(row) : '';
   const isBusy = ownStatus === 'busy';
   const waitingOnMember = !isBusy && !!row && (ownStatus === 'idle' || ownStatus === 'done') && hasBusyMember(row.id);
-  if (isBusy) return '<div class="chat-working">● 작업 중...</div>';
+  if (isBusy) {
+    return `
+      <div class="chat-working">
+        <span>● 작업 중...</span>
+        <button class="priority-send-btn" data-priority-send="${escapeHtml(row.id)}" title="큐에 넣지 않고, 지금 하던 작업을 중단시키고 바로 전달합니다">⚡ 지금 바로 전달</button>
+      </div>
+    `;
+  }
   if (waitingOnMember) return '<div class="chat-working">⏳ 팀원 작업 대기중...</div>';
   return '';
 }
@@ -1944,8 +1959,48 @@ workTabEl.addEventListener('click', async e => {
     } finally {
       await refreshBoardNow();
     }
+    return;
+  }
+  const prioritySendBtn = e.target.closest('[data-priority-send]');
+  if (prioritySendBtn) {
+    e.stopPropagation();
+    prioritySendLeadId = prioritySendBtn.dataset.prioritySend;
+    prioritySendInstructionEl.value = '';
+    prioritySendStatusEl.textContent = '';
+    showModal(prioritySendPanelEl);
   }
 }, true);
+
+prioritySendCancelBtn.addEventListener('click', () => {
+  hideModal(prioritySendPanelEl);
+  prioritySendLeadId = null;
+});
+
+prioritySendConfirmBtn.addEventListener('click', async () => {
+  const leadId = prioritySendLeadId;
+  const message = prioritySendInstructionEl.value.trim();
+  if (!leadId || !message) return;
+  prioritySendConfirmBtn.disabled = true;
+  prioritySendStatusEl.textContent = '지금 하던 작업을 중단하고 전달하는 중...';
+  try {
+    const result = await window.api.sendToLead(leadId, message, true);
+    if (result && result.status === 'sent') {
+      hideModal(prioritySendPanelEl);
+      prioritySendLeadId = null;
+      if (selectedLeadId === leadId) await renderChat();
+    } else if (result && result.status === 'attach-open') {
+      prioritySendStatusEl.textContent = '터미널에서 직접 열어둔 창이 있어서 지금은 못 보냅니다 — 그 터미널을 닫고 다시 시도하세요.';
+    } else if (result && result.status === 'not-found') {
+      prioritySendStatusEl.textContent = '팀장을 찾을 수 없습니다(이미 삭제됐을 수 있음).';
+    } else {
+      prioritySendStatusEl.textContent = '전달에 실패했습니다.';
+    }
+  } catch (err) {
+    prioritySendStatusEl.textContent = `전달 중 오류가 발생했습니다: ${errMsg(err)}`;
+  } finally {
+    prioritySendConfirmBtn.disabled = false;
+  }
+});
 
 // 3초 폴링을 기다리지 않고 지금 바로 보드를 다시 그린다 — 카드의 새로고침/삭제 버튼에서 쓴다.
 async function refreshBoardNow() {

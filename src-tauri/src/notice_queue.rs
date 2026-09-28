@@ -550,7 +550,7 @@ pub enum SendToLeadResult {
 }
 
 #[tauri::command]
-pub async fn send_to_lead_command(lead_id: String, message: String) -> SendToLeadResult {
+pub async fn send_to_lead_command(lead_id: String, message: String, priority: bool) -> SendToLeadResult {
     let Some(lead) = load_leads().into_iter().find(|l| l.id == lead_id) else {
         return SendToLeadResult::NotFound;
     };
@@ -566,7 +566,10 @@ pub async fn send_to_lead_command(lead_id: String, message: String) -> SendToLea
     let agents = fetch_agents_typed_async().await;
     let agent = agents.iter().find(|a| a.id.as_deref() == Some(lead_id.as_str()));
     let is_busy = agent.map(is_lead_too_busy_to_interrupt).unwrap_or(false);
-    if is_busy {
+    // priority(우선 전달)는 사용자가 화면에서 "지금 하던 작업은 중단됩니다"라는 경고를 보고 명시적
+    //으로 확인한 뒤에만 켜진다(renderer.js의 우선 전달 모달) — 그래서 busy여도 큐로 돌리지 않고
+    // stop→resume 경로(resume_via_queue, blocked/idle 배달과 완전히 같은 안전장치)로 바로 태운다.
+    if is_busy && !priority {
         let id = queue_lead_notice(&internal_id, &message, NoticeOrigin::User).await;
         return SendToLeadResult::Queued { id };
     }

@@ -37,7 +37,7 @@ contextBridge.exposeInMainWorld('api', {
   getChatUnresolvableDetail: (shortId: string) => ipcRenderer.invoke('get-chat-unresolvable-detail', shortId),
   getChangedFiles: (cwd: string) => ipcRenderer.invoke('get-changed-files', cwd),
   getFileDiff: (cwd: string, file: string) => ipcRenderer.invoke('get-file-diff', cwd, file),
-  sendToLead: (leadId: string, message: string) => ipcRenderer.invoke('send-to-lead', leadId, message),
+  sendToLead: (leadId: string, message: string, priority?: boolean) => ipcRenderer.invoke('send-to-lead', leadId, message, !!priority),
   cancelQueuedMessage: (leadId: string, noticeId: string) => ipcRenderer.invoke('cancel-queued-message', leadId, noticeId),
   deleteLeadHistory: (internalId: string) => ipcRenderer.invoke('delete-lead-history', internalId),
   getPendingNoticeIds: (leadId: string) => ipcRenderer.invoke('get-pending-notice-ids', leadId),

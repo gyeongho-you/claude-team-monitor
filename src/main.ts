@@ -2940,7 +2940,7 @@ async function cleanupLeadsStuckOnStartupDialog(liveLeadRows: SessionRow[], lead
 // 패턴으로 메시지를 큐(pendingNotices)에 원문 그대로 쌓아둔 뒤, buildSessionRows의 폴링이 그 팀장의
 // idle/blocked 전환을 감지했을 때 자동으로 resumeLead에 전달하게 한다. "끊지 않고 대기시켰다가
 // idle 되면 전달"이 지금 이 CLI로 가능한 최선이다.
-ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string) => {
+ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string, priority?: boolean) => {
   const lead = loadLeads().find(l => l.id === leadId);
   if (!lead) return { status: 'not-found' as const };
 
@@ -2962,7 +2962,10 @@ ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string) => {
   // (stop 성공 여부를 확인하고 실패하면 resume 자체를 포기함) 여기서는 busy만 큐로 돌리면 된다 —
   // 다만 "busy"는 status만이 아니라 isLeadTooBusyToInterrupt로 판정한다(위 주석 참고).
   const isBusy = !!agent && isLeadTooBusyToInterrupt(agent);
-  if (isBusy) {
+  // priority(우선 전달)는 사용자가 화면에서 "지금 하던 작업은 중단됩니다" 경고를 보고 명시적으로
+  // 확인한 뒤에만 켜진다(renderer.js의 우선 전달 모달) — busy여도 큐로 돌리지 않고 아래 stop→resume
+  // 경로(blocked/idle 배달과 완전히 같은 안전장치)로 바로 태운다.
+  if (isBusy && !priority) {
     const noticeId = queueLeadNotice(lead.internalId, message, 'user');
     return { status: 'queued' as const, id: noticeId };
   }

@@ -398,6 +398,9 @@ mark.find-match-current { background: var(--accent-2); color: #fff; }
   margin-bottom: 8px;
 }
 .chat-working {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   color: var(--warning);
   font-size: 12px;
   margin-top: 6px;
@@ -407,6 +410,16 @@ mark.find-match-current { background: var(--accent-2); color: #fff; }
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
+.priority-send-btn {
+  font-size: 11px;
+  padding: 2px 8px;
+  background: #5a2a2a;
+  color: #fff;
+  border: 1px solid #833;
+  border-radius: 3px;
+}
+.priority-send-btn:hover { background: #6a3232; }
+.priority-send-warning { color: var(--warning); }
 .chat-turn { margin-bottom: 10px; }
 .chat-turn .chat-time { color: var(--text-dim); font-size: 10px; }
 .chat-turn .chat-prompt { color: var(--accent-3); margin: 2px 0; white-space: pre-wrap; }
