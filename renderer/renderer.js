@@ -788,7 +788,7 @@ function computeBusyBannerHtml(row) {
   // 재시도용 재spawn 전) 사용자가 "채팅이 안 간다"고 오해하기 딱 좋은 타이밍이다.
   if (row && row.resumeRetrying) {
     const { attempt, max } = row.resumeRetrying;
-    return `<div class="chat-working">🔄 재연결 재시도 중 (${attempt}/${max})...</div>`;
+    return `<div class="chat-working"><span class="chat-working-text">🔄 재연결 재시도 중 (${attempt}/${max})...</span></div>`;
   }
   const ownStatus = row && !row.offline ? getStatus(row) : '';
   const isBusy = ownStatus === 'busy';
@@ -796,12 +796,12 @@ function computeBusyBannerHtml(row) {
   if (isBusy) {
     return `
       <div class="chat-working">
-        <span>● 작업 중...</span>
+        <span class="chat-working-text">● 작업 중...</span>
         <button class="priority-send-btn" data-priority-send="${escapeHtml(row.id)}" title="큐에 넣지 않고, 지금 하던 작업을 중단시키고 바로 전달합니다">⚡ 지금 바로 전달</button>
       </div>
     `;
   }
-  if (waitingOnMember) return '<div class="chat-working">⏳ 팀원 작업 대기중...</div>';
+  if (waitingOnMember) return '<div class="chat-working"><span class="chat-working-text">⏳ 팀원 작업 대기중...</span></div>';
   return '';
 }
 

@@ -401,9 +401,11 @@ mark.find-match-current { background: var(--accent-2); color: #fff; }
   display: flex;
   align-items: center;
   gap: 10px;
-  color: var(--warning);
   font-size: 12px;
   margin-top: 6px;
+}
+.chat-working-text {
+  color: var(--warning);
   animation: pulse-text 1.4s ease-in-out infinite;
 }
 @keyframes pulse-text {
