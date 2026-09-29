@@ -1629,8 +1629,13 @@ function reconcileMemberIds(agents: AgentEntry[], members: MemberRecord[]): Memb
 // 지울 방법이 없는 알림으로 영구히 남는 사고가 있었다(실사용 재현: g1cl-mgt가 e2e 작업 중
 // .claude/worktrees/e2e-consolidated-report로 옮겨간 사례). 그래서 실제 spawn 대상이 될 수 있는
 // 디렉토리만 검사한다.
+// 팀장 시작이 승인 미완료로 실패하면 leads.json에 레코드가 만들어지기 전에 끝나서 아래 집합에 아예
+// 안 들어간다 — 그 디렉토리를 기억해뒀다가 배너 후보에 합친다(open-terminal-for-approval도 이 목록에
+// 있는 디렉토리만 허용한다). 승인이 확인되면 computeUnapprovedDirs가 알아서 지운다.
+const failedLaunchDirs = new Set<string>();
+
 function computeUnapprovedDirs(leads: LeadRecord[]): { dir: string; reason: string }[] {
-  const dirs = new Set<string>();
+  const dirs = new Set<string>(failedLaunchDirs);
   for (const lead of leads) {
     dirs.add(lead.targetDir);
     lead.approvedMembers.forEach(dir => dirs.add(dir));
@@ -1639,6 +1644,7 @@ function computeUnapprovedDirs(leads: LeadRecord[]): { dir: string; reason: stri
   for (const dir of dirs) {
     const readiness = checkDirectoryClaudeReady(dir);
     if (!readiness.ready) result.push({ dir, reason: readiness.reason! });
+    else failedLaunchDirs.delete(dir);
   }
   return result;
 }
@@ -2441,6 +2447,7 @@ async function launchTeamLead(targetDir: string, instruction: string, label?: st
   );
   if (!id) {
     if (!readiness.ready) {
+      failedLaunchDirs.add(targetDir);
       return { error: `팀장 세션 시작에 실패했습니다 — "${targetDir}"에서 ${readiness.reason} 이게 원인일 수 있습니다. 그 디렉토리에서 터미널로 claude를 한 번 실행해 승인창을 눌러준 뒤 다시 시도해보세요.` };
     }
     return { error: `claude --bg가 ${RUN_CLAUDE_TIMEOUT_MS / 1000}초 안에 새 세션 시작을 확인해주지 못했습니다(타임아웃 또는 "backgrounded" 표시를 못 찾음) — 터미널을 직접 열어 claude --version, claude --bg가 정상 동작하는지 확인해보세요(CLI 미설치·PATH 문제·로그인 만료가 흔한 원인입니다).` };

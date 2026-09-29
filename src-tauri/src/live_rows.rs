@@ -630,9 +630,31 @@ pub struct UnapprovedDir {
 // 디렉토리(팀장 자신의 targetDir + 사전승인된 팀원 디렉토리)만 모아서, claude 최초 실행 승인
 // (checkDirectoryClaudeReady)이 안 된 곳을 화면에 알림으로 띄우는 데 쓴다. main.ts의 Set과 동일하게
 // 삽입 순서를 보존한 채 중복을 제거한다(순서가 결과에 영향을 주진 않지만 원본 동작을 그대로 옮긴다).
+// 팀장 시작이 승인 미완료로 실패하면 leads.json에 레코드가 만들어지기 전에 끝나서 위 집합에 아예
+// 안 들어간다 — 그 디렉토리를 여기에 기억해뒀다가 배너 후보에 합친다(렌더러에서만 임시로 띄우면 3초
+// 폴링에 사라지고, open-terminal-for-approval도 서버가 이 목록에 있는 디렉토리만 허용한다).
+// 승인이 확인되면(check_directory_claude_ready) compute_unapproved_dirs가 알아서 지운다.
+fn failed_launch_dirs() -> &'static std::sync::Mutex<Vec<String>> {
+    static DIRS: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+    DIRS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+pub(crate) fn record_failed_launch_dir(dir: &str) {
+    let mut dirs = failed_launch_dirs().lock().unwrap_or_else(|e| e.into_inner());
+    if !dirs.iter().any(|d| d == dir) {
+        dirs.push(dir.to_string());
+    }
+}
+
 pub(crate) fn compute_unapproved_dirs(leads: &[LeadRecord]) -> Vec<UnapprovedDir> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut dirs: Vec<String> = Vec::new();
+    let remembered: Vec<String> = failed_launch_dirs().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    for dir in &remembered {
+        if seen.insert(dir.clone()) {
+            dirs.push(dir.clone());
+        }
+    }
     for lead in leads {
         if seen.insert(lead.target_dir.clone()) {
             dirs.push(lead.target_dir.clone());
@@ -647,6 +669,7 @@ pub(crate) fn compute_unapproved_dirs(leads: &[LeadRecord]) -> Vec<UnapprovedDir
         .filter_map(|dir| {
             let readiness = check_directory_claude_ready(&dir);
             if readiness.ready {
+                failed_launch_dirs().lock().unwrap_or_else(|e| e.into_inner()).retain(|d| d != &dir);
                 None
             } else {
                 Some(UnapprovedDir { reason: readiness.reason.unwrap_or_default(), dir })
@@ -1008,6 +1031,17 @@ mod tests {
         assert!(result.iter().any(|r| r.dir == "C:\\definitely-not-trusted-dir-xyz"));
         assert!(result.iter().any(|r| r.dir == "C:\\another-untrusted-dir-xyz"));
         assert!(result.iter().all(|r| !r.reason.is_empty()));
+    }
+
+    // 팀장 시작이 승인 미완료로 실패하면 leads.json에 레코드가 없어도 그 디렉토리가 배너 후보에
+    // 들어가야 한다(open-terminal-for-approval도 이 목록에 있는 디렉토리만 허용).
+    #[test]
+    fn compute_unapproved_dirs_includes_dir_of_failed_lead_launch_without_any_lead_record() {
+        let dir = "C:\\failed-launch-untrusted-dir-xyz";
+        record_failed_launch_dir(dir);
+        let result = compute_unapproved_dirs(&[]);
+        failed_launch_dirs().lock().unwrap_or_else(|e| e.into_inner()).retain(|d| d != dir);
+        assert!(result.iter().any(|r| r.dir == dir), "{result:?}");
     }
 
     #[test]

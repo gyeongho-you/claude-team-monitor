@@ -495,6 +495,7 @@ pub async fn launch_team_lead(target_dir: String, instruction: String, label: Op
     let flags = FreshLaunchArgs::new().secret(secret).into_flags();
     let Some(id) = run_claude_bg(flags, resolve_long_prompt(&prompt), target_dir.clone()).await else {
         if !readiness.ready {
+            crate::live_rows::record_failed_launch_dir(&target_dir);
             return LaunchTeamLeadOutcome::Failure {
                 error: format!(
                     "팀장 세션 시작에 실패했습니다 — \"{target_dir}\"에서 {} 이게 원인일 수 있습니다. 그 디렉토리에서 터미널로 claude를 한 번 실행해 승인창을 눌러준 뒤 다시 시도해보세요.",
