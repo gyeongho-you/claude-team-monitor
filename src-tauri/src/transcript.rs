@@ -97,6 +97,25 @@ fn text_blocks(content: &serde_json::Value) -> Vec<String> {
 // 섞인 배열일 수 있다. tool_result만 있는 user 메시지는 도구 실행 결과일 뿐 사람이 보낸 프롬프트가
 // 아니므로 건너뛴다 — 그 외(문자열이거나 text 블록이 있는 경우)는 새 턴의 시작으로 보고, 그 다음에
 // 오는 assistant 메시지들의 text 블록을 모아 답변으로 짝짓는다.
+// 원본 세션 파일은 수~수십 MB까지 커질 수 있어서(실측 21MB) 3초 폴링마다 통째로 다시 파싱하면
+// 부담이 크다 — mtime이 그대로면 파싱 결과를 재사용한다(main.ts getCachedRawSessionTranscript와 동일).
+fn read_raw_session_transcript_cached(file: &Path) -> Vec<TranscriptEntry> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::SystemTime;
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, Vec<TranscriptEntry>)>>> = OnceLock::new();
+    let Ok(mtime) = std::fs::metadata(file).and_then(|m| m.modified()) else { return Vec::new() };
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some((cached_mtime, entries)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(file) {
+        if *cached_mtime == mtime {
+            return entries.clone();
+        }
+    }
+    let entries = read_raw_session_transcript_from_file(file);
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(file.to_path_buf(), (mtime, entries.clone()));
+    entries
+}
+
 fn read_raw_session_transcript_from_file(file: &Path) -> Vec<TranscriptEntry> {
     let Ok(content) = std::fs::read_to_string(file) else { return Vec::new() };
 
@@ -191,7 +210,7 @@ fn find_last_matching_raw_index(last_entry: &TranscriptEntry, raw_entries: &[Tra
 // 필요 없이 mtime만으로 확인) 새로 쌓인 턴이 없다는 뜻이니 그냥 넘어간다(비용 절감).
 fn fill_missing_transcript_from_raw_session_at(journal_entries: Vec<TranscriptEntry>, file: &Path) -> Vec<TranscriptEntry> {
     if journal_entries.is_empty() {
-        let raw = read_raw_session_transcript_from_file(file);
+        let raw = read_raw_session_transcript_cached(file);
         return if raw.is_empty() { journal_entries } else { raw };
     }
 
@@ -207,7 +226,7 @@ fn fill_missing_transcript_from_raw_session_at(journal_entries: Vec<TranscriptEn
         }
     }
 
-    let raw_entries = read_raw_session_transcript_from_file(file);
+    let raw_entries = read_raw_session_transcript_cached(file);
     if raw_entries.is_empty() {
         return journal_entries;
     }
@@ -237,7 +256,36 @@ pub(crate) fn get_transcript(project_name: &str, session_id: &str, cwd: &str) ->
         .filter(|e| e.session_id == session_id)
         .map(|e| TranscriptEntry { time: e.time, prompt: e.prompt, answer: e.answer })
         .collect();
-    fill_missing_transcript_from_raw_session_at(journal_entries, &session_file_path(cwd, session_id))
+    let file = session_file_path(cwd, session_id);
+    let filled = fill_missing_transcript_from_raw_session_at(journal_entries, &file);
+    enrich_answers_from_raw_session_at(filled, &file)
+}
+
+// enrichAnswersFromRawSession(main.ts)과 동일 — daily-journal의 answer는 Stop 훅이 넘겨주는 그
+// 턴의 "마지막 assistant 메시지 한 조각"이라, 도구 호출 사이사이의 설명이나(저널이 턴 도중에
+// 기록된 경우) 그 뒤에 이어진 최종 답변이 빠질 수 있다. 원본 쪽 답변이 더 길면 그쪽으로 교체한다.
+// 이게 없어서 터미널엔 나온 최종 답변이 채팅창에는 안 뜨는 일이 있었다(실사용 재현).
+fn enrich_answers_from_raw_session_at(entries: Vec<TranscriptEntry>, file: &Path) -> Vec<TranscriptEntry> {
+    if entries.is_empty() {
+        return entries;
+    }
+    let raw_entries = read_raw_session_transcript_cached(file);
+    if raw_entries.is_empty() {
+        return entries;
+    }
+    entries
+        .into_iter()
+        .map(|mut entry| {
+            let idx = find_last_matching_raw_index(&entry, &raw_entries);
+            if idx >= 0 {
+                let raw_answer = &raw_entries[idx as usize].answer;
+                if raw_answer.chars().count() > entry.answer.chars().count() {
+                    entry.answer = raw_answer.clone();
+                }
+            }
+            entry
+        })
+        .collect()
 }
 
 /// getLeadTranscript(main.ts:2638-2643) IPC — 팀장과의 "대화" 패널용 전체 왕복 기록.
@@ -376,6 +424,26 @@ mod tests {
         let last = TranscriptEntry { time: "2026-09-17 03:05".to_string(), prompt: "[알림] 반복".to_string(), answer: String::new() };
         let idx = find_last_matching_raw_index(&last, &raw);
         assert_eq!(idx, 1, "03:00짜리(인덱스 1)가 03:05와 가장 가까워야 한다");
+    }
+
+    #[test]
+    fn enrich_replaces_stale_journal_answer_with_longer_raw_answer() {
+        // 저널은 턴 도중("지금 확인할게.")에 기록됐는데, 원본엔 그 뒤 도구 실행과 최종 답변까지 이어진 경우.
+        let path = std::env::temp_dir().join(format!("claude_team_monitor_test_enrich_{}.jsonl", uuid::Uuid::new_v4()));
+        let lines = [
+            r#"{"type":"user","timestamp":"2026-09-29T01:48:00Z","message":{"content":"확인하고있지..?"}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"지금 확인할게."}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"확인했어. 최종 답변 본문입니다."}]}}"#,
+        ];
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let raw_time = format_raw_session_timestamp(Some("2026-09-29T01:48:00Z"));
+        let journal = vec![TranscriptEntry { time: raw_time, prompt: "확인하고있지..?".to_string(), answer: "지금 확인할게.".to_string() }];
+
+        let result = enrich_answers_from_raw_session_at(journal, &path);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].answer.contains("최종 답변 본문"), "{:?}", result[0].answer);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     fn temp_projects_dir(tag: &str) -> PathBuf {
