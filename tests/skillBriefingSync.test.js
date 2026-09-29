@@ -17,6 +17,24 @@ const skillText = fs.readFileSync(SKILL_PATH, 'utf-8');
 const MCP_SERVER_PATH = path.join(__dirname, '..', 'src', 'mcp', 'teamMemberServer.ts');
 const mcpServerSrc = fs.readFileSync(MCP_SERVER_PATH, 'utf-8');
 
+test('SKILL.md가 팀원 후속 지시를 SendMessage 기준으로 안내하고, 팀장 자신에게 stop 금지 규칙은 유지한다', () => {
+  assert.ok(skillText.includes('SendMessage(to:'));
+  assert.ok(skillText.includes('notify_when_idle: true'));
+  assert.ok(skillText.includes('네 자신(팀장)의 짧은 id에는 절대 쓰지 마라'));
+});
+
+test('spawn_team_member가 --name으로 고유 이름을 붙이고 그 이름을 결과로 돌려준다', () => {
+  assert.ok(mcpServerSrc.includes("'--name', sendName"));
+  assert.ok(mcpServerSrc.includes('SendMessage 이름: ${sendName}'));
+});
+
+test('팀원 브리핑에 끼어든 메시지를 ACK로 확인하는 규칙이 있다(JS·Rust 양쪽)', () => {
+  const { TEAM_MEMBER_BRIEFING } = require('../src/lib/teamMemberBriefing');
+  assert.ok(TEAM_MEMBER_BRIEFING.includes('ACK: '));
+  const rustSrc = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'lead_lifecycle.rs'), 'utf-8');
+  assert.ok(rustSrc.includes('ACK: '));
+});
+
 test('SKILL.md가 팀원 생성 시 mcp__team-monitor__spawn_team_member 툴 사용을 명시한다', () => {
   assert.ok(skillText.includes('mcp__team-monitor__spawn_team_member'));
 });

@@ -204,8 +204,12 @@ server.registerTool(
       console.error(`[teamMemberServer] ${claudeNotReadyMessage(resolvedTarget, readiness.reason!)} (경고만 하고 spawn은 계속 시도합니다)`);
     }
 
+    // 실측(2026-09-29): 팀원은 제목이 생성되기 전(약 10~20초)엔 ListAgents에 프롬프트 원문(잘림)으로만
+    // 떠서 SendMessage로 주소를 못 잡고, 제목은 프롬프트 기반이라 겹칠 수 있으며, ref는 호출마다
+    // 바뀐다. --name으로 고유한 이름을 주면 스폰 몇 초 뒤부터 그 이름으로 바로 SendMessage가 된다.
+    const sendName = `tm-${crypto.randomBytes(4).toString('hex')}`;
     const memberId = await runClaudeBg(
-      ['--bg', ...modelArgs, ...(lead.secret ? SECRET_MODE_CLI_ARGS : []), resolveLongPrompt(prompt)],
+      ['--bg', '--name', sendName, ...modelArgs, ...(lead.secret ? SECRET_MODE_CLI_ARGS : []), resolveLongPrompt(prompt)],
       resolvedTarget,
     );
     if (!memberId) {
@@ -231,7 +235,7 @@ server.registerTool(
     return {
       content: [{
         type: 'text' as const,
-        text: `팀원을 생성하고 등록했습니다. memberId: ${memberId}, 이름: ${label}, 역할: ${role || '(없음)'}, 디렉토리: ${resolvedTarget}`,
+        text: `팀원을 생성하고 등록했습니다. memberId: ${memberId}, 이름: ${label}, 역할: ${role || '(없음)'}, 디렉토리: ${resolvedTarget}, SendMessage 이름: ${sendName} (스폰 직후 몇 초는 ListAgents에 아직 안 보일 수 있다)`,
       }],
     };
   },
