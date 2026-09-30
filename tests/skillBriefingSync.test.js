@@ -17,6 +17,11 @@ const skillText = fs.readFileSync(SKILL_PATH, 'utf-8');
 const MCP_SERVER_PATH = path.join(__dirname, '..', 'src', 'mcp', 'teamMemberServer.ts');
 const mcpServerSrc = fs.readFileSync(MCP_SERVER_PATH, 'utf-8');
 
+test('SKILL.md가 다른 저장소 병렬 작업은 서브에이전트가 아니라 팀원으로 시키라고 하고, 서브에이전트를 띄워놓고 턴을 끝내지 말라고 한다', () => {
+  assert.ok(skillText.includes('다른 저장소를 읽거나 고치는 병렬 작업은 `Agent` 도구(서브에이전트)가 아니라 반드시 팀원'));
+  assert.ok(skillText.includes('서브에이전트를 띄워놓고 턴을 끝내지 마라'));
+});
+
 test('SKILL.md가 팀원 후속 지시를 SendMessage 기준으로 안내하고, 팀장 자신에게 stop 금지 규칙은 유지한다', () => {
   assert.ok(skillText.includes('SendMessage(to:'));
   assert.ok(skillText.includes('notify_when_idle: true'));
