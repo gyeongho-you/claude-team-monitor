@@ -435,6 +435,8 @@ mark.find-match-current { background: var(--accent-2); color: #fff; }
 /* 큐 자동 재시도를 다 쓰고 포기한 항목 — 흐릿한 chat-pending과 달리 눈에 띄게 경고색으로 구분해서
    "아직 대기 중"이 아니라 "수동 개입이 필요함"임을 알린다. */
 .chat-turn .chat-answer.chat-pending-exhausted { color: var(--warning); font-style: normal; border-left-color: var(--warning); }
+/* 전송이 거절된 항목(kind==='failed') 아래에 붙는 사유 — 사용자가 재시도/삭제할 때까지 남는다. */
+.chat-send-error { color: #f14c4c; font-size: 12px; margin: 2px 0 8px 12px; }
 /* 대기열 항목의 취소 버튼 — #restart-cancel-btn/#end-work-cancel-btn 등 다른 보조 취소 버튼과
    같은 크기(기본 button 크기 그대로)로 맞춘다. */
 .chat-turn .cancel-queued-btn { margin-left: 6px; background: var(--border-2); color: var(--text); font-style: normal; }

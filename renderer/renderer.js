@@ -725,6 +725,8 @@ async function syncQueuedMessagesWithTranscript(leadId, transcript) {
       item.exhausted = remainingQueuedIds.get(item.id);
       return true;
     }
+    // 전송이 거절된 항목은 트랜스크립트에 나타날 일이 없다 — 사용자가 재시도/삭제할 때까지 그대로 둔다.
+    if (item.kind === 'failed') return true;
     // 이 항목을 처음 보는 순간(즉시전송으로 push된 직후 첫 렌더)의 transcript 길이를 기준선으로
     // 고정한다 — 그 이후로는 절대 다시 계산하지 않는다. 항상 최신 transcript.length로 다시 계산하면
     // "아직 응답이 안 와서 길이가 그대로인" 정상적인 경우와 구별이 안 된다.
@@ -839,6 +841,13 @@ function renderQueuedTurnsHtml(leadId) {
       : item.kind === 'queued'
         ? '팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.'
         : (isStuck ? '⚠️ 응답이 오래 걸리고 있습니다 — 먹통일 수 있습니다.' : '응답을 기다리는 중...');
+    // 전송 자체가 거절된 항목(kind==='failed') — 예전엔 빨간 안내를 chatTranscriptEl에 직접 끼워 넣었는데
+    // 3초 폴링의 innerHTML 재렌더에 곧바로 지워져서 뭐가 문제인지 알아볼 새도 없이 사라졌다. 항목을
+    // pendingChatTurns에 남겨서 사용자가 직접 재시도/삭제할 때까지 유지하고, 사유는 그 아래에 빨간 글씨로 보여준다.
+    if (item.kind === 'failed') {
+      const failedBtns = ` <button class="cancel-queued-btn" data-retry-stuck="${escapeHtml(item.id)}" data-retry-lead="${escapeHtml(leadId)}">재시도</button> <button class="cancel-queued-btn" data-delete-stuck="${escapeHtml(item.id)}" data-delete-lead="${escapeHtml(leadId)}">삭제</button>`;
+      return `<div class="chat-turn"><div class="chat-prompt">▸ ${escapeHtml(item.message)}</div><div class="chat-answer chat-pending chat-pending-exhausted">전달되지 않았습니다.${failedBtns}</div><div class="chat-send-error">${escapeHtml(item.failedReason || '전송에 실패했습니다.')}</div></div>`;
+    }
     const answerClass = item.exhausted ? 'chat-answer chat-pending chat-pending-exhausted' : 'chat-answer chat-pending';
     const actionBtnHtml = item.kind === 'queued'
       ? ` <button class="cancel-queued-btn" data-cancel-queued="${escapeHtml(item.id)}" data-cancel-lead="${escapeHtml(leadId)}">취소</button>`
@@ -1273,9 +1282,8 @@ async function sendMessageToLead(leadId, message) {
     const result = await window.api.sendToLead(leadId, message);
     if (!result || result.status === 'not-found') {
       // 오프라인 팀장을 이어하려다 실패한 경우(세션 만료 등) 여기서 걸린다 — 조용히 넘어가지 않는다.
-      removePendingChatTurn(leadId, localId);
-      await renderChat(); // pendingChatTurns에서 지운 in-flight 항목을 화면에서도 지운다
-      chatTranscriptEl.insertAdjacentHTML('beforeend', '<p style="color:#f14c4c">이어하기에 실패했습니다 — 세션이 만료됐거나 claude CLI 실행에 문제가 있을 수 있습니다.</p>');
+      updatePendingChatTurn(leadId, localId, { kind: 'failed', failedReason: '이어하기에 실패했습니다 — 세션이 만료됐거나 claude CLI 실행에 문제가 있을 수 있습니다.' });
+      await renderChat();
       return;
     }
     if (result.status === 'attach-open') {
@@ -1283,18 +1291,16 @@ async function sendMessageToLead(leadId, message) {
       // 붙어있는 걸 감지하고 stop→resume 자체를 시도하지 않은 경우 — 그대로 보냈다간 attach의
       // 독립적인 재연결과 경합해서 세션이 갈라질 수 있다(실사용 재현). 'failed'와 달리 원인을
       // 정확히 알 수 있으니 그대로 알려준다.
-      removePendingChatTurn(leadId, localId);
+      updatePendingChatTurn(leadId, localId, { kind: 'failed', failedReason: '터미널이 열려있어서 보낼 수 없습니다 — 이 팀장에 연결된 터미널 창(터미널에서 직접 열기)을 닫은 뒤 "재시도"를 누르세요.' });
       await renderChat();
-      chatTranscriptEl.insertAdjacentHTML('beforeend', '<p style="color:#f14c4c">이 팀장에 연결된 터미널 창(터미널에서 직접 열기)이 아직 열려있어 보내지 않았습니다 — 그 터미널을 닫고 다시 시도하세요.</p>');
       return;
     }
     if (result.status === 'failed') {
       // main.ts의 resumeLead가 null을 반환한 경우(정지 실패 등으로 resume 자체를 포기) — 예전엔
       // 이걸 'sent'로 뭉뚱그려서 selectedLeadId가 null로 덮어써지며 대화창이 조용히 사라지는 것처럼
       // 보이는 버그가 있었다. 'not-found'와 같은 방식으로 명확히 실패를 알린다.
-      removePendingChatTurn(leadId, localId);
+      updatePendingChatTurn(leadId, localId, { kind: 'failed', failedReason: '전송에 실패했습니다 — 팀장 세션을 정지하지 못해 재개를 포기했습니다. 잠시 후 "재시도"를 눌러보세요.' });
       await renderChat();
-      chatTranscriptEl.insertAdjacentHTML('beforeend', '<p style="color:#f14c4c">전송에 실패했습니다 — 팀장 세션을 정지하지 못해 재개를 포기했습니다. 잠시 후 다시 시도해보세요.</p>');
       return;
     }
     if (result.status === 'queued') {
@@ -1324,9 +1330,8 @@ async function sendMessageToLead(leadId, message) {
     // 이건 selectedLeadId가 바뀌었든 아니든 항상 호출해야 한다(카드 목록 자체는 항상 최신이어야 함).
     await refreshBoardNow();
   } catch (err) {
-    removePendingChatTurn(leadId, localId);
-    await renderChat(); // pendingChatTurns에서 지운 in-flight 항목을 화면에서도 지운다
-    chatTranscriptEl.insertAdjacentHTML('beforeend', `<p style="color:#f14c4c">이어하기 중 오류가 발생했습니다: ${escapeHtml(errMsg(err))}</p>`);
+    updatePendingChatTurn(leadId, localId, { kind: 'failed', failedReason: `이어하기 중 오류가 발생했습니다: ${errMsg(err)}` });
+    await renderChat();
   } finally {
     if (affectsSendBtn) chatSendBtn.textContent = chatSendBtnDefaultLabel;
     busyLeadIds.delete(leadId);
