@@ -1960,6 +1960,9 @@ const MEMBER_SPAWN_TOOL_NAME = `mcp__${MEMBER_SPAWN_MCP_SERVER_NAME}__spawn_team
 // 이 앱이 띄운 세션은 이미 등록된 채로 시작하니 보통 쓸 일이 없지만, 혹시 모를 상황(등록이
 // 누락된 채로 남는 경우 등)을 위해 같이 화이트리스트해둔다.
 const MEMBER_REGISTER_TOOL_NAME = `mcp__${MEMBER_SPAWN_MCP_SERVER_NAME}__register_as_lead`;
+// 다른 팀장을 사용자가 붙인 이름표로 찾아 SendMessage 주소를 얻는 읽기 전용 툴 — 승인 안 해두면
+// 백그라운드 세션이라 권한 프롬프트에 영구히 막히므로 같이 화이트리스트한다.
+const MEMBER_LIST_LEADS_TOOL_NAME = `mcp__${MEMBER_SPAWN_MCP_SERVER_NAME}__list_leads`;
 
 // 예전엔 이 함수가 스폰 직전에 발급한 토큰(mcpToken)을 env로 실어 보냈다 — 이제 MCP 서버가
 // process.ppid로 자기 자신을 identify하므로(teamMemberServer.ts의 resolveCallingLead 참고) 더 이상
@@ -1973,7 +1976,7 @@ function buildMemberSpawnCliArgs(): string[] {
       },
     },
   };
-  return ['--mcp-config', JSON.stringify(config), '--allowedTools', `${MEMBER_SPAWN_TOOL_NAME},${MEMBER_REGISTER_TOOL_NAME}`];
+  return ['--mcp-config', JSON.stringify(config), '--allowedTools', `${MEMBER_SPAWN_TOOL_NAME},${MEMBER_REGISTER_TOOL_NAME},${MEMBER_LIST_LEADS_TOOL_NAME}`];
 }
 
 // 실측 확인(2026-09-18): --setting-sources project,local로 띄우면(즉 user-level 설정을 안 읽으면)

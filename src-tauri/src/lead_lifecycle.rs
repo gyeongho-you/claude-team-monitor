@@ -142,6 +142,9 @@ const MEMBER_SPAWN_TOOL_NAME: &str = "mcp__team-monitor__spawn_team_member";
 // 누락된 채로 남는 경우 등)을 위해 같이 화이트리스트해둔다(main.ts의 buildMemberSpawnCliArgs와
 // 동일한 이유).
 const MEMBER_REGISTER_TOOL_NAME: &str = "mcp__team-monitor__register_as_lead";
+// 다른 팀장을 사용자가 붙인 이름표로 찾아 SendMessage 주소를 얻는 읽기 전용 툴 — 승인 안 해두면
+// 백그라운드 세션이라 권한 프롬프트에 영구히 막히므로 같이 화이트리스트한다(main.ts와 동일).
+const MEMBER_LIST_LEADS_TOOL_NAME: &str = "mcp__team-monitor__list_leads";
 
 // 예전엔 이 함수가 스폰 직전에 발급한 토큰(mcp_token)을 env로 실어 보냈다 — 이제 MCP 서버가
 // process.ppid로 자기 자신을 identify하므로(teamMemberServer.ts의 resolveCallingLead 참고) 더
@@ -161,7 +164,7 @@ pub fn build_member_spawn_cli_args() -> Vec<String> {
         "--mcp-config".to_string(),
         config.to_string(),
         "--allowedTools".to_string(),
-        format!("{MEMBER_SPAWN_TOOL_NAME},{MEMBER_REGISTER_TOOL_NAME}"),
+        format!("{MEMBER_SPAWN_TOOL_NAME},{MEMBER_REGISTER_TOOL_NAME},{MEMBER_LIST_LEADS_TOOL_NAME}"),
     ]
 }
 
@@ -766,6 +769,7 @@ mod tests {
         let tools = &flags[pos + 1];
         assert!(tools.contains("mcp__team-monitor__spawn_team_member"));
         assert!(tools.contains("mcp__team-monitor__register_as_lead"));
+        assert!(tools.contains("mcp__team-monitor__list_leads"));
     }
 
     #[test]

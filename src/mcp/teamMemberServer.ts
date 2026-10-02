@@ -49,6 +49,8 @@ type LeadRecord = {
   approvedMembers: string[];
   internalId: string;
   secret?: boolean;
+  label?: string;
+  aiTitle?: string;
 };
 
 // main.ts의 SECRET_MODE_CLI_ARGS와 정확히 같은 값이다 — 시크릿 팀장이 만드는 팀원도 daily-journal
@@ -61,7 +63,7 @@ function errorResult(text: string) {
   return { content: [{ type: 'text' as const, text }], isError: true as const };
 }
 
-type AgentEntry = { id?: string; sessionId?: string; pid?: number; cwd?: string; kind?: string; startedAt?: number };
+type AgentEntry = { id?: string; sessionId?: string; pid?: number; cwd?: string; kind?: string; startedAt?: number; name?: string; status?: string; state?: string };
 
 // process.ppid(부모 프로세스, 즉 이 MCP 서버를 자식으로 띄운 claude 세션 자신)와 pid가 일치하는
 // 항목을 `claude agents --json` 결과에서 찾는다 — 그 항목이 바로 "나를 실행시킨 세션"이다.
@@ -295,6 +297,55 @@ server.registerTool(
       return errorResult(`등록에 실패했습니다: ${err instanceof Error ? err.message : String(err)}`);
     }
     return { content: [{ type: 'text' as const, text: `팀장으로 등록했습니다(id: ${agent.id}, 디렉토리: ${newLead.targetDir}).` }] };
+  },
+);
+
+server.registerTool(
+  'list_leads',
+  {
+    title: '다른 팀장 목록 조회',
+    description: [
+      'Claude Team Monitor에 등록된 팀장들의 목록을 돌려준다 — 사용자가 앱에서 붙인 이름표(label),',
+      '디렉토리, 지금 실행 중인지, 그리고 SendMessage로 그 팀장에게 메시지를 보낼 때 쓸 "주소"를',
+      '담는다. 다른 팀장과 소통해야 할 때(사용자가 "OO 팀장한테 전해줘"라고 했을 때 등) ListAgents의',
+      '자동 생성 제목(이름표와 다르다)으로 찾지 말고 이 툴로 이름표를 보고 찾아라. 주소는 호출한 그',
+      '순간의 값이다(팀장이 재시작되거나 제목이 바뀌면 달라진다) — 보내기 직전에 다시 조회해라.',
+    ].join(' '),
+    inputSchema: {
+      includeOffline: z.boolean().optional().describe('오프라인(지금 안 떠있는) 팀장도 목록에 포함할지. 기본 false.'),
+    },
+  },
+  async ({ includeOffline }) => {
+    const me = await findCallingAgent();
+    let agents: AgentEntry[];
+    try {
+      agents = await execAgentsJson() as AgentEntry[];
+    } catch {
+      return errorResult('claude agents --json을 읽지 못했습니다 — 잠시 후 다시 시도하세요.');
+    }
+    const nameCounts = new Map<string, number>();
+    for (const a of agents) if (a.name) nameCounts.set(a.name, (nameCounts.get(a.name) ?? 0) + 1);
+
+    const lines: string[] = [];
+    for (const lead of readLeads()) {
+      const live = agents.find(a => a.sessionId === lead.sessionId);
+      if (!live && !includeOffline) continue;
+      const isMe = !!me && !!live && live.sessionId === me.sessionId;
+      const dirName = path.basename(lead.targetDir);
+      const title = lead.label?.trim() || lead.aiTitle || '(이름표 없음)';
+      let address: string;
+      if (!live) address = '오프라인 — SendMessage 불가';
+      else if (isMe) address = '바로 너 자신 — 자기 자신에게 보내지 마라';
+      else if (!live.name) address = '이름 없음 — 지금은 주소를 못 잡는다';
+      else if ((nameCounts.get(live.name) ?? 0) > 1) address = `"${live.name}" (이름이 중복돼서 정확히 지목 불가 — 사용자에게 확인해라)`;
+      else address = `to: "${live.name}"`;
+      const status = live ? (live.status || live.state || '?') : '-';
+      lines.push(`- ${title} | 디렉토리: ${dirName} (${lead.targetDir}) | 상태: ${status}${lead.secret ? ' | 시크릿 모드' : ''} | 주소: ${address}`);
+    }
+    if (lines.length === 0) {
+      return { content: [{ type: 'text' as const, text: '조회된 팀장이 없습니다.' }] };
+    }
+    return { content: [{ type: 'text' as const, text: `등록된 팀장 ${lines.length}명:\n${lines.join('\n')}` }] };
   },
 );
 

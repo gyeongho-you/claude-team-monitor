@@ -17,6 +17,16 @@ const skillText = fs.readFileSync(SKILL_PATH, 'utf-8');
 const MCP_SERVER_PATH = path.join(__dirname, '..', 'src', 'mcp', 'teamMemberServer.ts');
 const mcpServerSrc = fs.readFileSync(MCP_SERVER_PATH, 'utf-8');
 
+test('list_leads 툴이 MCP 서버에 있고, SKILL.md가 안내하며, 앱이 팀장에게 허용한다(JS·Rust 양쪽)', () => {
+  assert.ok(mcpServerSrc.includes("'list_leads'"));
+  assert.ok(skillText.includes('mcp__team-monitor__list_leads'));
+  assert.ok(skillText.includes('한 번 보내고 끝내라'));
+  const mainSrc = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.ts'), 'utf-8');
+  assert.ok(mainSrc.includes('MEMBER_LIST_LEADS_TOOL_NAME}`];') || mainSrc.includes('${MEMBER_LIST_LEADS_TOOL_NAME}'));
+  const rustSrc = fs.readFileSync(path.join(__dirname, '..', 'src-tauri', 'src', 'lead_lifecycle.rs'), 'utf-8');
+  assert.ok(rustSrc.includes('mcp__team-monitor__list_leads'));
+});
+
 test('SKILL.md가 다른 저장소 병렬 작업은 서브에이전트가 아니라 팀원으로 시키라고 하고, 서브에이전트를 띄워놓고 턴을 끝내지 말라고 한다', () => {
   assert.ok(skillText.includes('다른 저장소를 읽거나 고치는 병렬 작업은 `Agent` 도구(서브에이전트)가 아니라 반드시 팀원'));
   assert.ok(skillText.includes('서브에이전트를 띄워놓고 턴을 끝내지 마라'));
