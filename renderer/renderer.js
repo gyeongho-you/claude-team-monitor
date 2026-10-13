@@ -704,6 +704,9 @@ async function syncQueuedMessagesWithTranscript(leadId, transcript) {
       if (item.kind === 'queued' && !remainingQueuedIds.has(item.id)) {
         item.kind = 'in-flight';
         item.matchBySubstring = true;
+        // 큐 배달은 팀장이 idle일 때만 시작되므로, 이 시점 이후 팀장이 busy면 이 메시지를 처리 중인 것이다.
+        item.delivered = true;
+        item.deliveredAt = Date.now();
         // 배달이 막 시작된 시점 — 이 시점까지 쌓인 기록은 전부 "이미 지나간 것"으로 보고 매칭
         // 대상에서 뺀다(아래 baseline 설명 참고).
         if (item.transcriptBaselineLen === undefined) item.transcriptBaselineLen = transcript.length;
@@ -826,8 +829,17 @@ const IN_FLIGHT_STUCK_MS = 30000;
 function renderQueuedTurnsHtml(leadId) {
   const list = pendingChatTurns.get(leadId) || [];
   const now = Date.now();
+  // 전송이 성공해서(resume이 세션을 깨움) 팀장이 지금 "작업 중"이면, 메시지는 이미 세션에 들어가 처리되는
+  // 중이다 — 트랜스크립트에 아직 안 보이는 건 daily-journal이 턴이 끝나는 Stop 훅에서야 기록하기 때문이지
+  // 먹통이어서가 아니다(실측: 연달아 도는 팀장은 보낸 프롬프트의 85%가 30초 시점에 앱에 안 보인다).
+  // 예전엔 이걸 구분 못 해서 대답하는 도중에도 재시도/삭제가 떴다. 전송 호출 자체가 30초 넘게 안 끝났거나,
+  // 전송은 됐는데 팀장이 busy가 아닌 채로 30초가 지났을 때만 먹통으로 본다.
+  const leadRow = lastRows.find(r => r.isLead && r.id === leadId);
+  const leadBusy = !!leadRow && !leadRow.offline && getStatus(leadRow) === 'busy';
   return list.map(item => {
-    const isStuck = item.kind === 'in-flight' && typeof item.createdAt === 'number' && (now - item.createdAt) > IN_FLIGHT_STUCK_MS;
+    const stuckSince = typeof item.deliveredAt === 'number' ? item.deliveredAt : item.createdAt;
+    const processingNow = !!item.delivered && leadBusy;
+    const isStuck = item.kind === 'in-flight' && typeof stuckSince === 'number' && (now - stuckSince) > IN_FLIGHT_STUCK_MS && !processingNow;
     // exhausted(큐 자동 재시도를 MAX_NOTICE_DELIVERY_ATTEMPTS회 다 쓰고 포기한 상태)는 일반
     // 'queued'와 구분해서 보여준다 — 안 그러면 사실상 다시 안 풀리는 메시지가 "완료되면
     // 자동으로 전달됩니다"라고 계속 표시돼서 사용자가 영구 미배달을 알 수 없었다. "터미널에서
@@ -840,7 +852,7 @@ function renderQueuedTurnsHtml(leadId) {
       ? '자동 재시도가 모두 실패해 전달을 멈췄습니다. 아래 취소 버튼으로 지우고 다시 보내보세요 — 계속 반복되면 "새 작업 시작"으로 세션을 새로 띄우세요.'
       : item.kind === 'queued'
         ? '팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.'
-        : (isStuck ? '⚠️ 응답이 오래 걸리고 있습니다 — 먹통일 수 있습니다.' : '응답을 기다리는 중...');
+        : (isStuck ? '⚠️ 응답이 오래 걸리고 있습니다 — 먹통일 수 있습니다.' : (processingNow ? '팀장이 응답을 작성하는 중...' : '응답을 기다리는 중...'));
     // 전송 자체가 거절된 항목(kind==='failed') — 예전엔 빨간 안내를 chatTranscriptEl에 직접 끼워 넣었는데
     // 3초 폴링의 innerHTML 재렌더에 곧바로 지워져서 뭐가 문제인지 알아볼 새도 없이 사라졌다. 항목을
     // pendingChatTurns에 남겨서 사용자가 직접 재시도/삭제할 때까지 유지하고, 사유는 그 아래에 빨간 글씨로 보여준다.
@@ -1314,6 +1326,9 @@ async function sendMessageToLead(leadId, message) {
       await refreshBoardNow();
       return;
     }
+    // 여기까지 왔으면 resume이 성공해서 메시지가 세션에 들어갔다 — renderQueuedTurnsHtml이 "처리 중"과
+    // "먹통"을 가르는 근거다. movePendingChatTurns 전에(옛 id 밑에 있을 때) 표시해야 한다.
+    updatePendingChatTurn(leadId, localId, { delivered: true, deliveredAt: Date.now() });
     // resumeLead가 다른 짧은 id로 깨어날 수 있다(main.ts resumeLead 주석 참고) — 반영하지 않으면
     // 대화창 선택이 풀려서 방금 보낸 대화가 사라진 것처럼 보인다. pendingChatTurns는 사용자가 그
     // 사이 어디로 이동했든 항상 새 id 밑으로 옮긴다(대기 중이던 메시지 자체는 새 id로 계속
