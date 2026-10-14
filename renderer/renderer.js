@@ -1741,10 +1741,23 @@ function formatPreview(preview, promptLen, answerLen) {
   return `${truncateForPreview(preview.prompt, promptLen)}\n→ ${truncateForPreview(preview.answer, answerLen)}`;
 }
 
+// 마지막으로 대화한 시각(ms) — daily-journal의 마지막 기록 시각이 있으면 그걸, 없으면(저널이 한 번도
+// 안 남은 세션) 시작 시각을 쓴다. 히스토리 정렬과 만료 위험 배지가 같은 기준을 쓴다. 알 수 없으면 0.
+function historyLastActiveMs(row) {
+  const journalMs = row.preview?.time ? new Date(row.preview.time.replace(' ', 'T')).getTime() : NaN;
+  // 저널이 안 남는 세션(시크릿 모드 등)은 preview가 없다 — 세션 원본 파일의 마지막 수정 시각(lastActiveAt)이
+  // 대신 마지막 대화 시각을 알려준다. 둘 다 있으면 더 늦은 쪽(저널은 분 단위라 파일 시각이 더 정확하다).
+  const fileMs = typeof row.lastActiveAt === 'number' ? row.lastActiveAt : NaN;
+  const best = Math.max(Number.isNaN(journalMs) ? 0 : journalMs, Number.isNaN(fileMs) ? 0 : fileMs);
+  if (best) return best;
+  const startedMs = new Date(row.startedAt).getTime();
+  return Number.isNaN(startedMs) ? 0 : startedMs;
+}
+
 function historyRiskBadge(row) {
-  const lastActive = row.preview?.time ? new Date(row.preview.time.replace(' ', 'T')) : new Date(row.startedAt);
-  if (isNaN(lastActive.getTime())) return '';
-  const days = Math.floor((Date.now() - lastActive.getTime()) / 86400000);
+  const lastActiveMs = historyLastActiveMs(row);
+  if (!lastActiveMs) return '';
+  const days = Math.floor((Date.now() - lastActiveMs) / 86400000);
   if (days > 30) return `<span class="history-risk risk-high">${days}일 전 — 만료됐을 수 있음</span>`;
   if (days > 20) return `<span class="history-risk risk-mid">${days}일 전 — 곧 만료 위험</span>`;
   return '';
@@ -1771,7 +1784,10 @@ function renderHistoryCard(row) {
 let historyDeleteTargetId = null;
 
 function renderHistory() {
-  const offlineLeads = lastRows.filter(r => r.isLead && r.offline);
+  // 만든 순서(leads.json 기록 순서)가 아니라 가장 최근에 대화한 팀장이 위로 오게 정렬한다. 같은 시각이면
+  // 원래 순서를 유지한다(Array.prototype.sort는 안정 정렬).
+  const offlineLeads = lastRows.filter(r => r.isLead && r.offline)
+    .sort((a, b) => historyLastActiveMs(b) - historyLastActiveMs(a));
   historyListEl.innerHTML = offlineLeads.length
     ? offlineLeads.map(renderHistoryCard).join('')
     : '<div class="empty-hint">이전에 작업한 팀장이 없습니다.</div>';

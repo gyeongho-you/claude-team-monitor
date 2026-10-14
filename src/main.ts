@@ -232,6 +232,7 @@ type SessionRow = AgentEntry & {
   resumeRetrying?: { attempt: number; max: number };
   secret?: boolean; // 팀장·팀원 카드 공통: LeadRecord.secret/MemberRecord.secret을 그대로 반영 — 🔒 표시용
   startupWarning?: string; // 팀장 카드일 때만: LeadRecord.startupWarning 그대로 반영 — 히스토리 카드에 경고로 표시
+  lastActiveAt?: number; // 팀장 히스토리 행일 때만: 세션 원본 파일의 마지막 수정 시각(ms) — 저널이 안 남는 세션도 최근 대화순 정렬에 쓴다
 };
 
 type TranscriptEntry = { time: string; prompt: string; answer: string };
@@ -1468,6 +1469,9 @@ function buildLeadRecordRow(l: LeadRecord, offline: boolean): { row: SessionRow;
     secret: l.secret,
     startupWarning: l.startupWarning,
   };
+  if (offline) {
+    try { row.lastActiveAt = fs.statSync(sessionFilePath(l.targetDir, l.sessionId)).mtimeMs; } catch { /* 파일이 없으면 생략 */ }
+  }
   return { row, aiTitleUpdated };
 }
 

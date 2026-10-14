@@ -301,6 +301,7 @@ mod tests {
             auto_stall_nudge: None,
             secret: None,
             startup_warning: None,
+            last_active_at: None,
         }
     }
 

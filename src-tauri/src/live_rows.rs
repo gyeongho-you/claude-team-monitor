@@ -162,6 +162,10 @@ pub struct SessionRow {
     // 팀장 카드일 때만: LeadRecord.startup_warning 그대로 반영 — 히스토리 카드에 경고로 표시.
     #[serde(rename = "startupWarning", skip_serializing_if = "Option::is_none")]
     pub startup_warning: Option<String>,
+    // 팀장 히스토리 행일 때만: 세션 원본 파일의 마지막 수정 시각(ms). daily-journal 기록이 없는 세션(시크릿
+    // 모드 등)도 "가장 최근에 대화한 순" 정렬에 쓸 수 있게 한다.
+    #[serde(rename = "lastActiveAt", skip_serializing_if = "Option::is_none")]
+    pub last_active_at: Option<i64>,
 }
 
 fn build_row(agent: AgentEntry, lead: Option<&LeadRecord>, member: Option<&MemberRecord>) -> SessionRow {
@@ -185,6 +189,7 @@ fn build_row(agent: AgentEntry, lead: Option<&LeadRecord>, member: Option<&Membe
             member.and_then(|m| m.secret)
         },
         startup_warning: if is_lead { lead.and_then(|l| l.startup_warning.clone()) } else { None },
+        last_active_at: None,
         project_name,
         preview,
         is_lead,
@@ -278,6 +283,7 @@ fn build_lead_record_row(lead: &LeadRecord, offline: bool) -> SessionRow {
         auto_stall_nudge: lead.auto_stall_nudge,
         secret: lead.secret,
         startup_warning: lead.startup_warning.clone(),
+        last_active_at: if offline { crate::transcript::session_last_modified_ms(&lead.target_dir, &lead.session_id) } else { None },
     }
 }
 

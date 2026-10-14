@@ -59,6 +59,13 @@ fn session_file_path(cwd: &str, session_id: &str) -> PathBuf {
     session_file_path_in(&projects_dir(), cwd, session_id)
 }
 
+/// 팀장 세션 원본 파일의 마지막 수정 시각(ms) — daily-journal 기록이 없는 세션(시크릿 모드 등)도
+/// "마지막으로 대화한 시각"을 알 수 있게 하는 보조 기준이다(히스토리 정렬용). 파일이 없으면 None.
+pub(crate) fn session_last_modified_ms(cwd: &str, session_id: &str) -> Option<i64> {
+    let modified = std::fs::metadata(session_file_path(cwd, session_id)).ok()?.modified().ok()?;
+    modified.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_millis() as i64)
+}
+
 fn session_file_path_in(projects_dir: &Path, cwd: &str, session_id: &str) -> PathBuf {
     let prefix = encode_project_dir_name(cwd);
     let filename = format!("{session_id}.jsonl");
