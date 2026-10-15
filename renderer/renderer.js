@@ -767,10 +767,8 @@ async function syncQueuedMessagesWithTranscript(leadId, transcript) {
     // "아직 응답이 안 와서 길이가 그대로인" 정상적인 경우와 구별이 안 된다.
     if (item.transcriptBaselineLen === undefined) item.transcriptBaselineLen = transcript.length;
     const newEntries = transcript.slice(item.transcriptBaselineLen);
-    const delivered = item.matchBySubstring
-      ? newEntries.some(t => t.prompt.includes(item.message))
-      : newEntries.some(t => t.prompt === item.message);
-    return !delivered;
+    // 4000자 넘는 긴 메시지는 파일 안내문으로 바뀌어 기록에 남는다 — lib/chatDelivery.js 참고.
+    return !isChatItemDelivered(item, newEntries);
   });
   if (stillPending.length === currentList.length) return;
   if (stillPending.length) pendingChatTurns.set(leadId, stillPending);
