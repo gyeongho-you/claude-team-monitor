@@ -531,6 +531,7 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 .section-header > div { display: flex; gap: 6px; }
 
 /* --- 작업 탭: 팀원 모니터링·관리 --- */
+#subagent-section { padding-bottom: 20px; }
 #member-section { border-top: 1px solid var(--border); padding-top: 16px; }
 .member-row { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; }
 

@@ -505,16 +505,18 @@ function setSelectValuePreserving(selectEl, options, preferredValue) {
   }
 }
 
-// 팀원 칸 바로 위의 "서브에이전트" 칸 — 팀장이 임의로 띄운 서브에이전트가 돌고 있을 때만 보인다(읽기 전용).
+// 팀원 칸 바로 위의 "서브에이전트" 칸 — 선택된 팀장이 임의로 띄운 서브에이전트가 돌고 있을 때만 보인다(읽기 전용).
 // 이름은 파일에서 추정한 거라 개수보다 적을 수 있다 — 모자란 만큼은 이름 없는 카드로 채워 개수를 맞춘다.
-// 권한 확인 대기로 멈춰 있으면(waitingFor==='permission prompt') 팀장의 서브에이전트 전부를 빨간 카드로 표시한다.
+// 권한 확인 대기로 멈춰 있으면(waitingFor==='permission prompt') 그 팀장의 서브에이전트 전부를 빨간 카드로 표시한다.
 const subagentSectionEl = document.getElementById('subagent-section');
 const subagentRowEl = document.getElementById('subagent-row');
 const subagentCountEl = document.getElementById('subagent-count');
 
 function renderSubagentSection() {
   const cards = [];
-  lastRows.filter(r => r.isLead && !r.offline && r.subagents && r.subagents.count > 0).forEach(lead => {
+  // 팀원 칸과 같은 이유로 지금 선택된 팀장 것만 보여준다(새 팀장을 만드는 중엔 선택된 팀장이 없으니 비운다).
+  const isCreatingLead = getEffectiveLeadMode() !== 'none';
+  lastRows.filter(r => !isCreatingLead && r.isLead && r.id === selectedLeadId && !r.offline && r.subagents && r.subagents.count > 0).forEach(lead => {
     const blocked = lead.waitingFor === 'permission prompt';
     const leadName = lead.label || lead.projectName;
     const names = lead.subagents.names || [];
