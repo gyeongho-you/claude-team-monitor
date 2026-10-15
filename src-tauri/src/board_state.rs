@@ -302,6 +302,7 @@ mod tests {
             secret: None,
             startup_warning: None,
             last_active_at: None,
+            subagents: None,
         }
     }
 

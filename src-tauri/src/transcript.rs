@@ -55,7 +55,7 @@ fn parse_journal_time_loose(time: &str) -> Option<i64> {
 // 하고 "먹통일 수 있습니다"로 오판). 원래 경로가 없으면 이 worktree 접미사가 붙은 폴더들 중 이
 // 세션 파일을 가진 걸 찾아서 대신 쓴다 — 접두사를 "--claude-worktrees-"까지 정확히 요구해서, 이름
 // 뒤쪽이 우연히 겹치는 무관한 다른 프로젝트 폴더를 잘못 집는 일이 없게 한다.
-fn session_file_path(cwd: &str, session_id: &str) -> PathBuf {
+pub(crate) fn session_file_path(cwd: &str, session_id: &str) -> PathBuf {
     session_file_path_in(&projects_dir(), cwd, session_id)
 }
 

@@ -513,6 +513,18 @@ function hasBusyMember(leadId) {
   return lastRows.some(r => !r.isLead && r.leadId === leadId && getStatus(r) === 'busy');
 }
 
+// 팀장이 띄운 서브에이전트가 돌고 있을 때 카드에 보여줄 한 줄(읽기 전용). 이름은 파일에서 추정한 거라
+// 개수보다 적을 수 있어 모자란 만큼은 "외 N개"로 표시한다. 권한 확인 때문에 멈춰 있으면 그것도 알린다.
+function subagentLine(row) {
+  const sa = row.subagents;
+  if (row.offline || !sa || !sa.count) return '';
+  const names = (sa.names || []).slice(0, 2);
+  const rest = sa.count - names.length;
+  const list = names.length ? `: ${names.join(', ')}${rest > 0 ? ` 외 ${rest}개` : ''}` : '';
+  const blocked = row.waitingFor === 'permission prompt' ? ' — 권한 확인 대기' : '';
+  return `<div class="subagent-line">🤖 서브에이전트 ${sa.count}개 실행 중${list}${blocked}</div>`;
+}
+
 function renderLeadCard(row) {
   const ownStatus = row.offline ? '' : getStatus(row);
   const waitingOnMember = !row.offline && (ownStatus === 'idle' || ownStatus === 'done') && hasBusyMember(row.id);
@@ -527,6 +539,7 @@ function renderLeadCard(row) {
         <span>${escapeHtml(statusLabel)}</span>
       </div>
       ${row.name ? `<div class="lead-topic">${escapeHtml(row.name)}</div>` : ''}
+      ${subagentLine(row)}
       <div class="meta">${escapeHtml(row.cwd)}</div>
       ${row.offline ? '<div class="offline-hint">메시지를 보내면 다시 이어집니다</div>' : ''}
       <div class="actions">

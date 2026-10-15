@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as crypto from 'crypto';
 import { exec, execFile, spawn } from 'child_process';
 import { trackFirstMiss, pruneMissingKeys } from './lib/firstMissTracker';
+import { liveSubagents } from './lib/subagents';
 import { resolveWithinCwd, isSafeId } from './lib/pathGuard';
 import { getStatus } from '../renderer/lib/status';
 import { writeJsonFileAtomic } from './lib/jsonFile';
@@ -232,6 +233,7 @@ type SessionRow = AgentEntry & {
   resumeRetrying?: { attempt: number; max: number };
   secret?: boolean; // 팀장·팀원 카드 공통: LeadRecord.secret/MemberRecord.secret을 그대로 반영 — 🔒 표시용
   startupWarning?: string; // 팀장 카드일 때만: LeadRecord.startupWarning 그대로 반영 — 히스토리 카드에 경고로 표시
+  subagents?: { count: number; names: string[] }; // 살아있는 팀장 카드일 때만: 팀장이 띄운 서브에이전트가 지금 돌고 있으면 개수·이름(읽기 전용 표시용)
   lastActiveAt?: number; // 팀장 히스토리 행일 때만: 세션 원본 파일의 마지막 수정 시각(ms) — 저널이 안 남는 세션도 최근 대화순 정렬에 쓴다
 };
 
@@ -1083,6 +1085,7 @@ function computeLiveRows(
         internalId: isLead ? lead?.internalId : undefined,
         autoStallNudge: isLead ? lead?.autoStallNudge : undefined,
         secret: isLead ? lead?.secret : member?.secret,
+        subagents: isLead ? liveSubagents(JOBS_DIR, a.id!, sessionFilePath(a.cwd, a.sessionId)) ?? undefined : undefined,
       };
     });
 }

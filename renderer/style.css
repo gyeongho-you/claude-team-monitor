@@ -184,6 +184,7 @@ section h2, .section-header h2 { font-size: 12px; text-transform: uppercase; col
 .lead-label-input::placeholder { color: var(--text-muted); font-weight: 400; }
 .session-card .meta { color: var(--text-faint); font-size: 11px; margin-top: 2px; word-break: break-all; }
 .session-card .lead-topic { color: var(--accent-2); font-size: 11px; margin-top: 2px; }
+.session-card .subagent-line { color: var(--text-soft); font-size: 11px; margin-top: 3px; }
 .session-card .preview {
   margin-top: 6px;
   color: var(--text-soft);

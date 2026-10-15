@@ -5,6 +5,7 @@ mod claude_bg_output;
 mod claude_readiness;
 mod concurrency;
 mod daemon_state;
+mod subagents;
 mod favorites;
 mod git_diff;
 mod json_file;
