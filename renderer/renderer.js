@@ -505,29 +505,42 @@ function setSelectValuePreserving(selectEl, options, preferredValue) {
   }
 }
 
+// 팀원 칸 바로 위의 "서브에이전트" 칸 — 팀장이 임의로 띄운 서브에이전트가 돌고 있을 때만 보인다(읽기 전용).
+// 이름은 파일에서 추정한 거라 개수보다 적을 수 있다 — 모자란 만큼은 이름 없는 카드로 채워 개수를 맞춘다.
+// 권한 확인 대기로 멈춰 있으면(waitingFor==='permission prompt') 팀장의 서브에이전트 전부를 빨간 카드로 표시한다.
+const subagentSectionEl = document.getElementById('subagent-section');
+const subagentRowEl = document.getElementById('subagent-row');
+const subagentCountEl = document.getElementById('subagent-count');
+
+function renderSubagentSection() {
+  const cards = [];
+  lastRows.filter(r => r.isLead && !r.offline && r.subagents && r.subagents.count > 0).forEach(lead => {
+    const blocked = lead.waitingFor === 'permission prompt';
+    const leadName = lead.label || lead.projectName;
+    const names = lead.subagents.names || [];
+    for (let i = 0; i < lead.subagents.count; i++) {
+      const title = names[i] || '(이름 확인 중)';
+      cards.push(`
+        <div class="session-card subagent-card ${blocked ? 'status-blocked' : 'status-busy'}">
+          <div class="top-line">
+            <span title="${escapeHtml(title)}">${escapeHtml(title)}</span>
+            <span>${blocked ? '⚠ 권한 확인 대기' : '● 작업 중'}</span>
+          </div>
+          <div class="member-of">소속 팀장: ${escapeHtml(leadName)}</div>
+        </div>`);
+    }
+  });
+  subagentSectionEl.hidden = cards.length === 0;
+  subagentCountEl.textContent = cards.length ? String(cards.length) : '';
+  subagentRowEl.innerHTML = cards.join('');
+}
+
 // ---------------- 작업 탭: 팀장 ----------------
 
 // 팀장이 idle/완료 상태여도, 자기 팀원이 아직 작업 중이면 실제로는 "끝난 게" 아니라 그 결과를
 // 기다리는 중이다 — 완료/대기 중이라고 뜨면 사용자가 "아 끝났나보다" 하고 놓치기 쉬우니 구분한다.
 function hasBusyMember(leadId) {
   return lastRows.some(r => !r.isLead && r.leadId === leadId && getStatus(r) === 'busy');
-}
-
-// 팀장이 띄운 서브에이전트가 돌고 있을 때 카드에 보여줄 한 줄(읽기 전용). 이름은 파일에서 추정한 거라
-// 개수보다 적을 수 있어 모자란 만큼은 "외 N개"로 표시한다. 권한 확인 때문에 멈춰 있으면 그것도 알린다.
-function subagentLine(row) {
-  const sa = row.subagents;
-  if (row.offline || !sa || !sa.count) return '';
-  const blocked = row.waitingFor === 'permission prompt';
-  const names = (sa.names || []).slice(0, 4);
-  const rest = sa.count - names.length;
-  const items = names.map(n => `<div class="subagent-item">${escapeHtml(n)}</div>`).join('')
-    + (rest > 0 ? `<div class="subagent-item subagent-more">${names.length ? '외 ' : ''}${rest}개 더</div>` : '');
-  return `
-    <div class="subagent-box ${blocked ? 'blocked' : ''}">
-      <div class="subagent-head">${blocked ? '⚠ 서브에이전트 권한 확인 대기' : '🤖 서브에이전트 작업 중'} <span class="subagent-count">${sa.count}</span></div>
-      ${items}
-    </div>`;
 }
 
 function renderLeadCard(row) {
@@ -544,7 +557,6 @@ function renderLeadCard(row) {
         <span>${escapeHtml(statusLabel)}</span>
       </div>
       ${row.name ? `<div class="lead-topic">${escapeHtml(row.name)}</div>` : ''}
-      ${subagentLine(row)}
       <div class="meta">${escapeHtml(row.cwd)}</div>
       ${row.offline ? '<div class="offline-hint">메시지를 보내면 다시 이어집니다</div>' : ''}
       <div class="actions">
@@ -1954,6 +1966,7 @@ function renderBoard(rows) {
 // 다시 그릴 수 있다. 버튼 클릭 리스너는 아래 workTabEl 위임 하나로 처리하므로 여기서 매번
 // 새로 안 걸어도 된다(그래서 이 함수를 몇 번을 다시 불러도 리스너가 중복되지 않는다).
 function renderMemberRow() {
+  renderSubagentSection();
   const leadLabelById = new Map(lastRows.filter(r => r.isLead).map(l => [l.id, l.label || l.projectName]));
   const members = lastRows.filter(r => !r.isLead);
   // 팀장을 바꿔도 팀원 목록이 그대로 다 보이면, 지금 보는 게 어느 팀장 소속 팀원인지 헷갈린다 —

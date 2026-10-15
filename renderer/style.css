@@ -184,25 +184,10 @@ section h2, .section-header h2 { font-size: 12px; text-transform: uppercase; col
 .lead-label-input::placeholder { color: var(--text-muted); font-weight: 400; }
 .session-card .meta { color: var(--text-faint); font-size: 11px; margin-top: 2px; word-break: break-all; }
 .session-card .lead-topic { color: var(--accent-2); font-size: 11px; margin-top: 2px; }
-/* 팀장이 띄운 서브에이전트 — 팀원 카드처럼 눈에 띄게(주황 테두리 + 작업 중 깜빡임), 권한 대기면 빨강 */
-.session-card .subagent-box {
-  margin-top: 6px;
-  padding: 6px 8px;
-  background: var(--surface-2);
-  border: 1px solid var(--border-2);
-  border-left: 4px solid var(--warning);
-  border-radius: 4px;
-  animation: pulse-busy 1.6s ease-in-out infinite;
-}
-.session-card .subagent-box.blocked { border-left-color: var(--danger); animation: none; }
-.session-card .subagent-head { font-size: 12px; font-weight: 600; color: var(--warning); }
-.session-card .subagent-box:not(.blocked) .subagent-head { animation: pulse-text 1.4s ease-in-out infinite; }
-.session-card .subagent-box.blocked .subagent-head { color: var(--danger); }
-.session-card .subagent-count { background: var(--warning); color: #1e1e1e; border-radius: 9px; padding: 0 7px; margin-left: 4px; }
-.session-card .subagent-box.blocked .subagent-count { background: var(--danger); color: #fff; }
-.session-card .subagent-item { font-size: 11px; color: var(--text-soft); margin-top: 3px; padding-left: 10px; position: relative; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.session-card .subagent-item::before { content: '▸'; position: absolute; left: 0; color: var(--text-muted); }
-.session-card .subagent-more { color: var(--text-muted); font-style: italic; }
+/* 서브에이전트 칸 — 팀원 카드와 같은 모양, 작업 중은 깜빡이는 주황 테두리(session-card.status-busy), 권한 대기는 빨강 */
+.session-card.subagent-card { width: 220px; }
+.subagent-count { background: var(--warning); color: #1e1e1e; border-radius: 9px; padding: 0 8px; margin-left: 4px; font-size: 12px; }
+.session-card.subagent-card .top-line > span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-card .preview {
   margin-top: 6px;
   color: var(--text-soft);
