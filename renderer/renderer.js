@@ -518,11 +518,16 @@ function hasBusyMember(leadId) {
 function subagentLine(row) {
   const sa = row.subagents;
   if (row.offline || !sa || !sa.count) return '';
-  const names = (sa.names || []).slice(0, 2);
+  const blocked = row.waitingFor === 'permission prompt';
+  const names = (sa.names || []).slice(0, 4);
   const rest = sa.count - names.length;
-  const list = names.length ? `: ${names.join(', ')}${rest > 0 ? ` 외 ${rest}개` : ''}` : '';
-  const blocked = row.waitingFor === 'permission prompt' ? ' — 권한 확인 대기' : '';
-  return `<div class="subagent-line">🤖 서브에이전트 ${sa.count}개 실행 중${list}${blocked}</div>`;
+  const items = names.map(n => `<div class="subagent-item">${escapeHtml(n)}</div>`).join('')
+    + (rest > 0 ? `<div class="subagent-item subagent-more">${names.length ? '외 ' : ''}${rest}개 더</div>` : '');
+  return `
+    <div class="subagent-box ${blocked ? 'blocked' : ''}">
+      <div class="subagent-head">${blocked ? '⚠ 서브에이전트 권한 확인 대기' : '🤖 서브에이전트 작업 중'} <span class="subagent-count">${sa.count}</span></div>
+      ${items}
+    </div>`;
 }
 
 function renderLeadCard(row) {
