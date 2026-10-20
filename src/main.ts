@@ -6,6 +6,7 @@ import * as crypto from 'crypto';
 import { exec, execFile, spawn } from 'child_process';
 import { trackFirstMiss, pruneMissingKeys } from './lib/firstMissTracker';
 import { liveSubagents } from './lib/subagents';
+import { hasNoLiveProcess } from './lib/ghostAgent';
 import { resolveWithinCwd, isSafeId } from './lib/pathGuard';
 import { getStatus } from '../renderer/lib/status';
 import { writeJsonFileAtomic } from './lib/jsonFile';
@@ -2241,8 +2242,17 @@ async function resumeLead(internalId: string, message: string): Promise<string |
     let stopped = await stopSession(current.id);
     if (!stopped) stopped = await stopSession(current.id);
     if (!stopped) {
-      logCritical(`[resumeLead] 팀장 ${internalId}(${current.id}) 정지에 실패해 세션 포크 위험이 있어 resume을 중단합니다.`);
-      return null;
+      // 정지 대상(실행 중인 프로세스)이 아예 없는 유령 항목이면 정지 실패는 포크 위험이 아니다 —
+      // lib/ghostAgent.js 주석 참고. 프로세스가 있거나 확인이 안 되면 기존대로 중단한다.
+      let noLiveProcess = false;
+      try {
+        noLiveProcess = hasNoLiveProcess((await fetchAgentsStrict()).find(a => a.id === current.id));
+      } catch { /* 확인 불가 → fail-closed */ }
+      if (!noLiveProcess) {
+        logCritical(`[resumeLead] 팀장 ${internalId}(${current.id}) 정지에 실패해 세션 포크 위험이 있어 resume을 중단합니다.`);
+        return null;
+      }
+      logCritical(`[resumeLead] 팀장 ${internalId}(${current.id}) 정지에는 실패했지만 실행 중인 프로세스가 없는 항목이라(pid/status 없음) 정지 없이 resume을 진행합니다.`);
     }
     // stopSession이 성공(claude agents --json에서 사라짐)을 확인해도 곧바로 --resume을 걸면
     // "source session ... not found"로 크래시하는 사고가 실사용 중 여러 번 났다(2026-09-17, 두

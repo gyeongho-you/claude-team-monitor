@@ -622,6 +622,30 @@ fn apply_resume_session_update(
     true
 }
 
+// resume 직전 `claude stop`이 실패했을 때, 정지할 대상(실행 중인 프로세스)이 없는 "유령" 항목인지
+// 판정한다(src/lib/ghostAgent.js와 같은 규칙).
+//
+// 배경(실측 2026-10-20, g1cl-mgt-leader): 세션이 유휴 60분으로 데몬에 의해 종료 처리돼도 그 job의
+// state.json이 비종료 상태(blocked 등)로 남아 있으면, 데몬이 없을 때 `claude agents`는 프로세스 없이
+// 그 파일만 보고 항목을 계속 목록에 올린다(pid/status가 없다). 한편 마지막 세션이 정리되면 데몬도 5초
+// 뒤 스스로 내려가는데, 데몬이 없으면 `claude stop`은 "couldn't confirm ... the background service may
+// be restarting"(exit 1)로 영구 실패하고(재시도·대기로도 안 풀린다, 데몬을 되살리는 건 --bg spawn뿐),
+// 앱은 포크 위험 때문에 resume을 중단해서 서로 물려 영영 resume이 안 됐다.
+// 프로세스가 없는 항목은 정지할 것도 포크될 것도 없다 — 정지 없이 --resume을 걸면 같은 짧은 id로
+// 깨어나는 것을 실측 확인했다. 반대로 살아있는(blocked 포함) 세션은 항상 pid와 status를 가진다 —
+// 과거 포크 사고(blocked 팀장에 stop이 실패한 채 resume)는 이쪽이라 반드시 계속 막아야 한다.
+fn is_ghost_agent(agent: &crate::agents_json::AgentEntry) -> bool {
+    agent.pid.is_none() && agent.status.is_none()
+}
+
+/// 목록에서 사라졌거나 유령 항목이면 true. 목록 조회 자체가 실패하면(확인 불가) fail-closed로 false.
+async fn has_no_live_process(id: &str) -> bool {
+    match fetch_agents_typed_strict().await {
+        Ok(agents) => agents.iter().find(|a| a.id.as_deref() == Some(id)).map_or(true, is_ghost_agent),
+        Err(_) => false,
+    }
+}
+
 /// resumeLead(main.ts)와 동일. 호출부(resume_lead_command)가 queue_lead_operation으로 감싸야
 /// 한다 — 이 함수 스스로는 직렬화를 강제하지 않는다(main.ts 원본과 같은 책임 분리).
 pub async fn resume_lead(internal_id: String, message: String) -> Option<String> {
@@ -647,11 +671,20 @@ pub async fn resume_lead(internal_id: String, message: String) -> Option<String>
             stopped = stop_session(current.id.clone()).await;
         }
         if !stopped {
-            log_critical(&format!(
-                "[resumeLead] 팀장 {internal_id}({}) 정지에 실패해 세션 포크 위험이 있어 resume을 중단합니다.",
-                current.id
-            ));
-            return None;
+            // 정지 대상(실행 중인 프로세스)이 아예 없는 유령 항목이면 정지 실패는 포크 위험이 아니다 —
+            // is_ghost_agent 주석 참고. 프로세스가 있거나 확인이 안 되면 기존대로 중단한다.
+            if has_no_live_process(&current.id).await {
+                log_critical(&format!(
+                    "[resumeLead] 팀장 {internal_id}({}) 정지에는 실패했지만 실행 중인 프로세스가 없는 항목이라(pid/status 없음) 정지 없이 resume을 진행합니다.",
+                    current.id
+                ));
+            } else {
+                log_critical(&format!(
+                    "[resumeLead] 팀장 {internal_id}({}) 정지에 실패해 세션 포크 위험이 있어 resume을 중단합니다.",
+                    current.id
+                ));
+                return None;
+            }
         }
         // A-2: 정확한 방지 효과는 불확실하지만 해될 게 없는 짧은 유예(main.ts 주석과 동일한
         // 판단) — 진짜 안전장치는 아래 resume_spawn_with_retry의 크래시 감지+재시도다.
@@ -717,6 +750,36 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicI64, Ordering};
     use std::sync::Mutex as StdMutex;
+
+    fn agent(pid: Option<i64>, status: Option<&str>, state: Option<&str>) -> crate::agents_json::AgentEntry {
+        crate::agents_json::AgentEntry {
+            id: Some("c728206b".to_string()),
+            pid,
+            cwd: String::new(),
+            kind: "background".to_string(),
+            started_at: None,
+            session_id: String::new(),
+            name: None,
+            status: status.map(str::to_string),
+            state: state.map(str::to_string),
+            waiting_for: None,
+        }
+    }
+
+    #[test]
+    fn ghost_agent_is_listed_entry_with_neither_pid_nor_status() {
+        // 실측: 종료 처리된 뒤 state.json만 blocked로 남은 유령 항목(g1cl-mgt-leader)
+        assert!(is_ghost_agent(&agent(None, None, Some("blocked"))));
+    }
+
+    #[test]
+    fn live_sessions_are_never_ghosts_even_when_blocked() {
+        assert!(!is_ghost_agent(&agent(Some(1234), Some("busy"), Some("working"))));
+        // 권한 대기로 멈춘 살아있는 세션 — 과거 포크 사고가 난 쪽이라 반드시 막아야 한다
+        assert!(!is_ghost_agent(&agent(Some(1234), Some("waiting"), Some("blocked"))));
+        assert!(!is_ghost_agent(&agent(Some(1234), None, None)));
+        assert!(!is_ghost_agent(&agent(None, Some("idle"), None)));
+    }
 
     fn fake_lead(internal_id: &str, id: &str, session_id: &str, target_dir: &str) -> LeadRecord {
         LeadRecord {
