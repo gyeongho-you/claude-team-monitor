@@ -7,6 +7,7 @@ import { exec, execFile, spawn } from 'child_process';
 import { trackFirstMiss, pruneMissingKeys } from './lib/firstMissTracker';
 import { liveSubagents } from './lib/subagents';
 import { hasNoLiveProcess } from './lib/ghostAgent';
+import { archiveMemberFile, restoreRetiredMembers } from './lib/retiredMembers';
 import { resolveWithinCwd, isSafeId } from './lib/pathGuard';
 import { getStatus } from '../renderer/lib/status';
 import { writeJsonFileAtomic } from './lib/jsonFile';
@@ -1544,12 +1545,15 @@ function cleanupStaleMembers(members: MemberRecord[], agentIdSet: Set<string | u
     // 원인을 확정 못 했다 — 다음에 재현되면 최소한 "얼마나 오래 못 잡혔었는지"와 "그 시점에
     // 이 앱이 실제로 살아있다고 본 세션이 몇 개였는지"(시스템 부하 정황)는 바로 알 수 있게
     // 지우기 직전에 로그를 남긴다.
-    console.error(
-      `[cleanupStaleMembers] 팀원 ${m.memberId}(팀장 ${m.leadId}) 등록 파일을 정리합니다 — ` +
+    // 영구 삭제 대신 보관 폴더로 옮긴다 — 데몬이 유휴 60분 팀원을 종료 처리해 목록에서 사라져도 팀장이 나중에
+    // SendMessage로 다시 깨우면 같은 id로 살아나기 때문이다(lib/retiredMembers.js 참고). console.error는 GUI 앱에선
+    // 어디에도 안 남아서(이번 사고 때 흔적이 없었다) app.log(logCritical)에 남긴다.
+    const archived = archiveMemberFile(MEMBERS_DIR, m.memberId);
+    logCritical(
+      `[cleanupStaleMembers] 팀원 ${m.memberId}(팀장 ${m.leadId}) 등록 파일을 ${archived ? '보관 폴더(members-retired)로 옮겼습니다' : '보관하지 못해 그대로 둡니다'} — ` +
       `${firstMissAt !== undefined ? now - firstMissAt : '알 수 없음'}ms 동안 agents 스냅샷에서 못 잡힘 ` +
       `(유예 ${MEMBER_MISS_GRACE_MS}ms), 현재 살아있는 세션 수=${agentIdSet.size}`
     );
-    try { fs.unlinkSync(path.join(MEMBERS_DIR, `${m.memberId}.json`)); } catch { /* ignore */ }
   });
   // 등록 파일이 다른 경로(수동 종료 버튼 등)로 이미 사라진 memberId의 기록은 여기서 정리해야
   // Map이 무한정 자라지 않는다.
@@ -1673,7 +1677,8 @@ async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; request
       .forEach(m => registerMember({ ...m, leadId: renameMap.get(m.leadId)! }));
   }
   const leadIds = new Set(leads.map(l => l.id));
-  const members = reconcileMemberIds(agents, loadMembers());
+  // 종료 처리돼 보관된 팀원이 같은 id로 다시 살아났으면(팀장의 SendMessage 등) 등록을 되살린 뒤 정합을 맞춘다.
+  const members = reconcileMemberIds(agents, restoreRetiredMembers(MEMBERS_DIR, agents, leads, loadMembers(), logCritical));
   const memberMap = new Map(members.map(m => [m.memberId, m]));
 
   const liveRowsRaw = computeLiveRows(agents, leads, leadIds, memberMap);

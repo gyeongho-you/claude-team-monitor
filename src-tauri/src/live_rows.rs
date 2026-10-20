@@ -1,6 +1,7 @@
 use crate::agents_json::{fetch_agents_typed, AgentEntry};
 use crate::board_state::{prune_missing_keys, state, track_first_miss, FirstMissResult};
 use crate::claude_readiness::check_directory_claude_ready;
+use crate::logging::log_critical;
 use crate::member_requests::{load_pending_requests, MemberRequest};
 use crate::paths::{daily_journal_dir, projects_dir, session_edits_dir};
 use crate::session_registry::{load_leads, load_members, register_member, register_member_in, with_leads_lock, LeadRecord, MemberRecord};
@@ -439,6 +440,15 @@ pub(crate) fn reconcile_member_ids_in(dir: &std::path::Path, agents: &[AgentEntr
 // 확정 못 했다 — 다음에 재현되면 최소한 "얼마나 오래 못 잡혔었는지"와 "그 시점에 이 앱이 실제로
 // 살아있다고 본 세션이 몇 개였는지"(시스템 부하 정황)는 바로 알 수 있게 지우기 직전에 로그를
 // 남긴다(막는 방어가 아니라 다음 사고를 진단 가능하게 하는, 사후 추적용 로깅이라는 점이 특이).
+fn restore_and_log(agents: &[AgentEntry], leads: &[LeadRecord], members: Vec<MemberRecord>) -> Vec<MemberRecord> {
+    let before = members.len();
+    let restored = crate::retired_members::restore_retired_members(&crate::paths::members_dir(), agents, leads, members);
+    for m in &restored[before..] {
+        log_critical(&format!("[restore_retired_members] 보관돼 있던 팀원 {}(팀장 {})가 다시 살아나 등록을 복원했습니다.", m.member_id, m.lead_id));
+    }
+    restored
+}
+
 pub fn cleanup_stale_members(members: &[MemberRecord], agent_id_set: &HashSet<String>, now: i64) {
     cleanup_stale_members_in(&crate::paths::members_dir(), members, agent_id_set, now);
 }
@@ -457,14 +467,18 @@ pub(crate) fn cleanup_stale_members_in(dir: &std::path::Path, members: &[MemberR
             continue;
         }
         guard.member_first_miss_at.remove(&m.member_id);
-        eprintln!(
-            "[cleanup_stale_members] 팀원 {}(팀장 {}) 등록 파일을 정리합니다 — {} 동안 agents 스냅샷에서 못 잡힘(유예 {MEMBER_MISS_GRACE_MS}ms), 현재 살아있는 세션 수={}",
+        // 영구 삭제 대신 보관 폴더로 옮긴다 — 데몬이 유휴 60분 팀원을 종료 처리해 목록에서 사라져도, 팀장이 나중에
+        // SendMessage로 다시 깨우면 같은 id로 살아나기 때문이다(retired_members.rs 참고). 진단 로그는 eprintln이면 GUI 앱에선
+        // 어디에도 안 남아서(실제로 이번 사고 때 흔적이 없었다) app.log에 남긴다.
+        let archived = crate::retired_members::archive_member_file(dir, &m.member_id);
+        log_critical(&format!(
+            "[cleanup_stale_members] 팀원 {}(팀장 {}) 등록 파일을 {} — {} 동안 agents 스냅샷에서 못 잡힘(유예 {MEMBER_MISS_GRACE_MS}ms), 현재 살아있는 세션 수={}",
             m.member_id,
             m.lead_id,
+            if archived { "보관 폴더(members-retired)로 옮겼습니다" } else { "보관하지 못해 그대로 둡니다" },
             first_miss_at.map(|t| format!("{}ms", now - t)).unwrap_or_else(|| "알 수 없음".to_string()),
             agent_id_set.len(),
-        );
-        let _ = fs::remove_file(dir.join(format!("{}.json", m.member_id)));
+        ));
     }
     prune_missing_keys(&mut guard.member_first_miss_at, &current_member_ids);
 }
@@ -525,7 +539,9 @@ async fn get_live_session_rows_inner() -> Vec<SessionRow> {
     // 위에서 팀원 소속 팀장 id를 옮겨썼을 수 있으므로 다시 읽는다 — reconcile_member_ids 자체의
     // 매칭 로직(memberId/sessionId 기준)은 leadId와 무관하지만, 이후 rows/알림에 쓰일 members
     // 목록은 최신 leadId를 반영해야 한다.
-    let members = reconcile_member_ids(&agents, load_members());
+    // 종료 처리돼 보관된 팀원이 같은 id로 다시 살아났으면(팀장의 SendMessage 등) 등록을 되살린 뒤 정합을 맞춘다.
+    let members = restore_and_log(&agents, &leads, load_members());
+    let members = reconcile_member_ids(&agents, members);
     let member_by_id: HashMap<String, &MemberRecord> = members.iter().map(|m| (m.member_id.clone(), m)).collect();
 
     let live_rows_raw = compute_live_rows(&agents, &lead_by_id, &member_by_id);

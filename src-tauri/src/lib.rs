@@ -6,6 +6,7 @@ mod claude_readiness;
 mod concurrency;
 mod daemon_state;
 mod subagents;
+mod retired_members;
 mod favorites;
 mod git_diff;
 mod json_file;
