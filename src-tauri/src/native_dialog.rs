@@ -19,3 +19,16 @@ pub async fn pick_directory_command(app: AppHandle) -> Option<String> {
         _ => None,
     }
 }
+
+// 채팅 첨부용 — 여러 파일을 한 번에 고른다. 취소하면 빈 목록(pick_directory_command의 None과 같은 계약).
+#[tauri::command]
+pub async fn pick_files_command(app: AppHandle) -> Vec<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_files(move |files| {
+        let _ = tx.send(files);
+    });
+    match rx.await {
+        Ok(Some(paths)) => paths.into_iter().map(|p| p.to_string()).collect(),
+        _ => Vec::new(),
+    }
+}

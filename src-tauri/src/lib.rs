@@ -77,6 +77,7 @@ pub fn run() {
       settings::update_settings_command,
       live_rows::refresh_board_command,
       native_dialog::pick_directory_command,
+      native_dialog::pick_files_command,
       attach_terminal::open_in_terminal_command,
       attach_terminal::open_terminal_for_approval_command,
     ])

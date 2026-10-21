@@ -1283,11 +1283,69 @@ chatInputEl.addEventListener('keydown', (e) => {
   }
 });
 
+// ---------------- 채팅 첨부 ----------------
+// 선택한 팀장별로 따로 들고 있다가(다른 팀장 화면으로 가도 섞이지 않게) 전송할 때 메시지 끝에 경로로 붙인다.
+const chatAttachmentsEl = document.getElementById('chat-attachments');
+const chatAttachBtn = document.getElementById('chat-attach-btn');
+const chatAttachHintEl = document.getElementById('chat-attach-hint');
+const attachmentsByLead = new Map();
+
+function renderAttachments() {
+  const paths = (selectedLeadId && attachmentsByLead.get(selectedLeadId)) || [];
+  chatAttachmentsEl.innerHTML = paths.map((p, i) => `
+    <span class="chat-attach-chip" title="${escapeHtml(p)}">
+      <span class="chip-name">${escapeHtml(attachmentLabel(p))}</span>
+      <button data-remove-attachment="${i}" title="첨부 취소">✕</button>
+    </span>`).join('');
+  chatAttachHintEl.hidden = paths.length > 0;
+}
+
+function addAttachments(paths) {
+  if (!selectedLeadId || !paths || !paths.length) return;
+  attachmentsByLead.set(selectedLeadId, mergeAttachmentPaths(attachmentsByLead.get(selectedLeadId), paths));
+  renderAttachments();
+}
+
+chatAttachBtn.addEventListener('click', async () => {
+  try {
+    addAttachments(await window.api.pickFiles());
+  } catch (err) {
+    console.error('파일 선택 실패:', err);
+  }
+});
+
+chatAttachmentsEl.addEventListener('click', e => {
+  const btn = e.target.closest('[data-remove-attachment]');
+  if (!btn || !selectedLeadId) return;
+  const list = (attachmentsByLead.get(selectedLeadId) || []).slice();
+  list.splice(Number(btn.dataset.removeAttachment), 1);
+  if (list.length) attachmentsByLead.set(selectedLeadId, list);
+  else attachmentsByLead.delete(selectedLeadId);
+  renderAttachments();
+});
+
+// 창에 파일을 끌어다 놓으면 지금 보고 있는 팀장 대화에 첨부한다(채팅 패널이 보일 때만).
+if (window.api.onFilesDropped) {
+  window.api.onFilesDropped(paths => {
+    if (!leadChatPanelEl.hidden) addAttachments(paths);
+  });
+}
+if (window.api.onFilesDragState) {
+  window.api.onFilesDragState(active => {
+    const on = active && !leadChatPanelEl.hidden;
+    document.querySelector('.chat-input-row').classList.toggle('drop-active', on);
+    document.querySelector('.chat-attach-row').classList.toggle('drop-active', on);
+  });
+}
+
 async function sendChatMessage() {
-  if (!selectedLeadId || busyLeadIds.has(selectedLeadId) || !chatInputEl.value.trim()) return;
+  const paths = (selectedLeadId && attachmentsByLead.get(selectedLeadId)) || [];
+  if (!selectedLeadId || busyLeadIds.has(selectedLeadId) || (!chatInputEl.value.trim() && !paths.length)) return;
   const leadId = selectedLeadId;
-  const message = chatInputEl.value.trim();
+  const message = buildMessageWithAttachments(chatInputEl.value, paths);
   chatInputEl.value = '';
+  attachmentsByLead.delete(leadId);
+  renderAttachments();
   await sendMessageToLead(leadId, message);
 }
 
@@ -1967,6 +2025,7 @@ function renderBoard(rows) {
 // 새로 안 걸어도 된다(그래서 이 함수를 몇 번을 다시 불러도 리스너가 중복되지 않는다).
 function renderMemberRow() {
   renderSubagentSection();
+  renderAttachments(); // 팀장 선택이 바뀌면 그 팀장의 첨부 목록으로 바꿔 보여준다
   const leadLabelById = new Map(lastRows.filter(r => r.isLead).map(l => [l.id, l.label || l.projectName]));
   const members = lastRows.filter(r => !r.isLead);
   // 팀장을 바꿔도 팀원 목록이 그대로 다 보이면, 지금 보는 게 어느 팀장 소속 팀원인지 헷갈린다 —

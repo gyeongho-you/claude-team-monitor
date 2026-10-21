@@ -1,10 +1,24 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 contextBridge.exposeInMainWorld('api', {
   onAgentsUpdate: (callback: (payload: unknown) => void) => {
     ipcRenderer.on('agents-update', (_e, payload) => callback(payload));
   },
   pickDirectory: () => ipcRenderer.invoke('pick-directory'),
+  pickFiles: () => ipcRenderer.invoke('pick-files'),
+  // Electron은 창에 떨어뜨린 파일을 HTML5 drop으로 주고, 경로는 webUtils.getPathForFile로 얻는다.
+  onFilesDropped: (callback: (paths: string[]) => void) => {
+    // tsconfig가 DOM 타입을 안 쓰므로 필요한 모양만 직접 적는다.
+    type DropEventLike = { preventDefault(): void; dataTransfer?: { files: ArrayLike<unknown> } | null };
+    const win = globalThis as unknown as { addEventListener(type: string, cb: (e: DropEventLike) => void): void };
+    win.addEventListener('dragover', e => e.preventDefault());
+    win.addEventListener('drop', e => {
+      e.preventDefault();
+      const files = Array.from(e.dataTransfer?.files ?? []) as Parameters<typeof webUtils.getPathForFile>[0][];
+      const paths = files.map(f => webUtils.getPathForFile(f)).filter(Boolean);
+      if (paths.length) callback(paths);
+    });
+  },
   getFavorites: () => ipcRenderer.invoke('get-favorites'),
   addFavorite: (dir: string) => ipcRenderer.invoke('add-favorite', dir),
   removeFavorite: (dir: string) => ipcRenderer.invoke('remove-favorite', dir),

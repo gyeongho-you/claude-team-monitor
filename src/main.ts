@@ -2710,6 +2710,13 @@ ipcMain.handle('pick-directory', async () => {
   return result.filePaths[0];
 });
 
+// 채팅 첨부용 — 여러 파일을 한 번에 고른다(취소하면 빈 목록).
+ipcMain.handle('pick-files', async () => {
+  if (!mainWindow) return [];
+  const result = await dialog.showOpenDialog(mainWindow, { properties: ['openFile', 'multiSelections'] });
+  return result.canceled ? [] : result.filePaths;
+});
+
 ipcMain.handle('get-favorites', () => loadFavorites());
 
 ipcMain.handle('add-favorite', (_e, dir: string) => {

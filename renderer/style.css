@@ -458,6 +458,16 @@ mark.find-match-current { background: var(--accent-2); color: #fff; }
 /* 한 번의 AskUserQuestion 호출에 질문이 여러 개 실렸을 때 — 첫 질문 옆에 붙는 "+N개 더" 배지. */
 .pending-choice-extra { color: var(--text-dim); font-size: 10px; font-weight: normal; }
 .chat-input-row { display: flex; gap: 6px; }
+.chat-attach-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.chat-attach-row #chat-attach-btn { font-size: 11px; padding: 2px 8px; cursor: pointer; }
+#chat-attachments { display: flex; flex-wrap: wrap; gap: 4px; }
+.chat-attach-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 220px; background: var(--surface-2); border: 1px solid var(--border-2); border-radius: 10px; padding: 1px 4px 1px 8px; font-size: 11px; color: var(--text-soft); }
+.chat-attach-chip .chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-attach-chip button { border: none; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 11px; padding: 0 3px; }
+.chat-attach-chip button:hover { color: var(--danger); }
+#chat-attach-hint { color: var(--text-dim); font-size: 10px; }
+#chat-attach-hint[hidden] { display: none; }
+.chat-input-row.drop-active #chat-input, .chat-attach-row.drop-active { outline: 2px dashed var(--accent); }
 #chat-input { flex: 1; height: 50px; background: var(--bg); border: 1px solid var(--border-2); color: var(--text); padding: 6px; resize: vertical; }
 
 #launch-form-panel, #adopt-form-panel, #add-member-panel {

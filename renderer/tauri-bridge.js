@@ -74,6 +74,23 @@
     return invoke('pick_directory_command');
   }
 
+  // ---- 채팅 첨부 ----
+  // Tauri는 창에 떨어뜨린 파일을 HTML5 drop이 아니라 자체 이벤트(tauri://drag-drop)로 경로와 함께 준다.
+  async function pickFiles() {
+    return invoke('pick_files_command');
+  }
+  function onFilesDropped(callback) {
+    window.__TAURI__.event.listen('tauri://drag-drop', e => {
+      const paths = e && e.payload && e.payload.paths;
+      if (paths && paths.length) callback(paths);
+    });
+  }
+  function onFilesDragState(callback) {
+    window.__TAURI__.event.listen('tauri://drag-enter', () => callback(true));
+    window.__TAURI__.event.listen('tauri://drag-leave', () => callback(false));
+    window.__TAURI__.event.listen('tauri://drag-drop', () => callback(false));
+  }
+
   async function getFavorites() {
     return invoke('get_favorites_command');
   }
@@ -237,6 +254,9 @@
   const implemented = {
     onAgentsUpdate,
     pickDirectory,
+    pickFiles,
+    onFilesDropped,
+    onFilesDragState,
     getFavorites,
     addFavorite,
     removeFavorite,

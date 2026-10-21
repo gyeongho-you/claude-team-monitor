@@ -69,6 +69,11 @@
             <textarea id="chat-input" placeholder="선택한 팀장에게 메시지 보내기 (Enter로 전송, Shift+Enter 줄바꿈)"></textarea>
             <button id="chat-send-btn">전송</button>
           </div>
+          <div class="chat-attach-row">
+            <button id="chat-attach-btn" title="파일을 골라 첨부합니다. 파일을 이 창에 끌어다 놓아도 됩니다.">📎 파일 첨부</button>
+            <div id="chat-attachments"></div>
+            <span id="chat-attach-hint">첨부한 파일의 경로가 메시지와 함께 전달됩니다 (끌어다 놓기 가능)</span>
+          </div>
           <div id="restart-lead-panel" class="modal-panel" hidden>
             <p class="form-hint">지금 대화 맥락을 이어받지 않고, 같은 디렉토리에서 완전히 새 세션을 시작합니다. 이 팀장 카드(이름표)는 그대로 유지되고 내용만 새로워집니다 — 예전 대화가 필요하면 다시 못 부릅니다.</p>
             <div id="restart-pending-warning" class="pending-warning" hidden></div>
@@ -298,6 +303,7 @@
         <h3>1. 작업 탭 — 팀장 카드와 채팅</h3>
         <img src="help/01-work-tab.png" alt="작업 탭" />
         <p>지금 떠있는 팀장이 카드로 보입니다. 카드를 누르면 오른쪽에 그 팀장과의 대화창이 열립니다. 카드 위쪽 배지로 지금 상태를 바로 알 수 있습니다 — <strong>● 작업 중</strong>(실제로 작업 중), <strong>대기 중</strong>(할 일을 기다리는 중), <strong>⚠ 확인 필요</strong>(응답 없이 멈춰서 확인이 필요함), <strong>⚠ 선택지 응답 대기</strong>(팀장이 여러 선택지 중 하나를 골라달라고 멈춰있음), <strong>완료</strong>, <strong>오프라인</strong>(꺼져있거나 재시작 대기 중). 시크릿 모드로 띄운 팀장은 배지 옆에 🔒가 붙습니다(자세한 내용은 아래 "2. 새 팀장 띄우기" 참고). 이름표를 눌러 라벨을 바로 바꿀 수도 있습니다. 대화창 아래 입력창으로 메시지를 보내면, 팀장이 바쁠 땐 자동으로 대기열에 쌓였다가 한가해지면 전달됩니다.</p>
+        <p><strong>📎 파일 첨부</strong> — 입력창 아래 "📎 파일 첨부"를 누르거나 파일을 창에 끌어다 놓으면 입력창 아래에 첨부 칩이 생깁니다(✕로 취소). 전송하면 첨부한 파일의 <strong>전체 경로</strong>가 메시지 끝에 자동으로 함께 전달되므로, 경로를 일일이 찾아 붙여넣지 않아도 됩니다. 팀장은 그 경로의 파일을 직접 읽습니다(파일 내용 자체가 복사돼 가는 것은 아닙니다). 글 없이 첨부만 보내도 됩니다. 첨부는 선택한 팀장별로 따로 보관됩니다.</p>
       </section>
       <section class="help-section">
         <h3>2. 새 팀장 띄우기</h3>
@@ -337,6 +343,7 @@
   <script src="lib/status.js"></script>
   <script src="lib/cleanupGrouping.js"></script>
   <script src="lib/chatDelivery.js"></script>
+  <script src="lib/chatAttachments.js"></script>
   <script src="tauri-bridge.js"></script>
   <script src="renderer.js"></script>
 </body>
