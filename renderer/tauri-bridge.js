@@ -79,6 +79,9 @@
   async function pickFiles() {
     return invoke('pick_files_command');
   }
+  async function savePastedImage(dataBase64, mime) {
+    return invoke('save_pasted_image_command', { data: dataBase64, mime });
+  }
   function onFilesDropped(callback) {
     window.__TAURI__.event.listen('tauri://drag-drop', e => {
       const paths = e && e.payload && e.payload.paths;
@@ -255,6 +258,7 @@
     onAgentsUpdate,
     pickDirectory,
     pickFiles,
+    savePastedImage,
     onFilesDropped,
     onFilesDragState,
     getFavorites,

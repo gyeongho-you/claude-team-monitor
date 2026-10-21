@@ -6,6 +6,7 @@ mod claude_readiness;
 mod concurrency;
 mod daemon_state;
 mod subagents;
+mod pasted_images;
 mod retired_members;
 mod favorites;
 mod git_diff;
@@ -78,10 +79,13 @@ pub fn run() {
       live_rows::refresh_board_command,
       native_dialog::pick_directory_command,
       native_dialog::pick_files_command,
+      pasted_images::save_pasted_image_command,
       attach_terminal::open_in_terminal_command,
       attach_terminal::open_terminal_for_approval_command,
     ])
     .setup(|app| {
+      // 3일 지난 붙여넣기 이미지 정리(pasted_images.rs 참고).
+      pasted_images::purge_old_attachments();
       if cfg!(debug_assertions) {
         app.handle().plugin(
           tauri_plugin_log::Builder::default()

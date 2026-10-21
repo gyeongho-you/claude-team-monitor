@@ -462,6 +462,7 @@ mark.find-match-current { background: var(--accent-2); color: #fff; }
 .chat-attach-row #chat-attach-btn { font-size: 11px; padding: 2px 8px; cursor: pointer; }
 #chat-attachments { display: flex; flex-wrap: wrap; gap: 4px; }
 .chat-attach-chip { display: inline-flex; align-items: center; gap: 4px; max-width: 220px; background: var(--surface-2); border: 1px solid var(--border-2); border-radius: 10px; padding: 1px 4px 1px 8px; font-size: 11px; color: var(--text-soft); }
+.chat-attach-chip .chip-thumb { width: 22px; height: 22px; object-fit: cover; border-radius: 3px; }
 .chat-attach-chip .chip-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-attach-chip button { border: none; background: transparent; color: var(--text-muted); cursor: pointer; font-size: 11px; padding: 0 3px; }
 .chat-attach-chip button:hover { color: var(--danger); }

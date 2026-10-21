@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld('api', {
   },
   pickDirectory: () => ipcRenderer.invoke('pick-directory'),
   pickFiles: () => ipcRenderer.invoke('pick-files'),
+  savePastedImage: (dataBase64: string, mime: string) => ipcRenderer.invoke('save-pasted-image', dataBase64, mime),
   // Electron은 창에 떨어뜨린 파일을 HTML5 drop으로 주고, 경로는 webUtils.getPathForFile로 얻는다.
   onFilesDropped: (callback: (paths: string[]) => void) => {
     // tsconfig가 DOM 타입을 안 쓰므로 필요한 모양만 직접 적는다.

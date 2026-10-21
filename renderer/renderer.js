@@ -1289,11 +1289,35 @@ const chatAttachmentsEl = document.getElementById('chat-attachments');
 const chatAttachBtn = document.getElementById('chat-attach-btn');
 const chatAttachHintEl = document.getElementById('chat-attach-hint');
 const attachmentsByLead = new Map();
+const attachmentThumbs = new Map(); // 붙여넣은 이미지 경로 → 미리보기(data URL). 화면에서만 쓰고 전송과는 무관하다.
+function dropAttachmentThumbs(paths) {
+  for (const p of paths || []) attachmentThumbs.delete(p);
+}
+
+// 칩에는 아주 작은 썸네일만 필요하므로 큰 이미지를 그대로 들고 있지 않고 작게 줄인 data URL로 만든다.
+// (이 웹뷰에서는 blob: 이미지 URL이 로드되지 않아 data URL을 쓴다 — 실측.)
+function makeThumbDataUrl(srcDataUrl) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const size = 44; // 칩에서는 22px로 보이지만 고해상도 화면을 위해 2배로 만든다
+      const canvas = document.createElement('canvas');
+      canvas.width = size; canvas.height = size;
+      const scale = Math.max(size / img.width, size / img.height);
+      const w = img.width * scale, h = img.height * scale;
+      canvas.getContext('2d').drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+      resolve(canvas.toDataURL('image/png'));
+    };
+    img.onerror = () => resolve(srcDataUrl);
+    img.src = srcDataUrl;
+  });
+}
 
 function renderAttachments() {
   const paths = (selectedLeadId && attachmentsByLead.get(selectedLeadId)) || [];
   chatAttachmentsEl.innerHTML = paths.map((p, i) => `
     <span class="chat-attach-chip" title="${escapeHtml(p)}">
+      ${attachmentThumbs.has(p) ? `<img class="chip-thumb" src="${attachmentThumbs.get(p)}" alt="" />` : ''}
       <span class="chip-name">${escapeHtml(attachmentLabel(p))}</span>
       <button data-remove-attachment="${i}" title="첨부 취소">✕</button>
     </span>`).join('');
@@ -1305,6 +1329,43 @@ function addAttachments(paths) {
   attachmentsByLead.set(selectedLeadId, mergeAttachmentPaths(attachmentsByLead.get(selectedLeadId), paths));
   renderAttachments();
 }
+
+// 입력창에 이미지를 붙여넣으면(Ctrl+V) 파일로 저장해서 그 경로를 첨부한다. 글만 붙여넣을 땐 가로채지 않는다.
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(',')[1] || '');
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+chatInputEl.addEventListener('paste', async e => {
+  const images = [...(e.clipboardData ? e.clipboardData.items : [])]
+    .filter(it => it.kind === 'file' && it.type.startsWith('image/'))
+    .map(it => it.getAsFile())
+    .filter(Boolean);
+  if (!images.length || !selectedLeadId) return;
+  e.preventDefault();
+  const leadId = selectedLeadId;
+  for (const file of images) {
+    try {
+      // 붙여넣기 이벤트가 끝나면 클립보드 파일 객체는 무효가 되므로, 먼저 읽어둔 base64로 미리보기를 새로 만든다.
+      const b64 = await blobToBase64(file);
+      const saved = await window.api.savePastedImage(b64, file.type);
+      attachmentThumbs.set(saved, await makeThumbDataUrl('data:' + file.type + ';base64,' + b64));
+      const prev = selectedLeadId;
+      selectedLeadId = leadId; // 붙여넣는 동안 팀장 선택이 바뀌었어도 붙여넣은 팀장에게 붙인다
+      addAttachments([saved]);
+      selectedLeadId = prev;
+      renderAttachments();
+    } catch (err) {
+      console.error('이미지 붙여넣기 실패:', err);
+      chatAttachHintEl.hidden = false;
+      chatAttachHintEl.textContent = '이미지를 붙여넣지 못했습니다: ' + (err && err.message ? err.message : err);
+    }
+  }
+});
 
 chatAttachBtn.addEventListener('click', async () => {
   try {
@@ -1318,7 +1379,7 @@ chatAttachmentsEl.addEventListener('click', e => {
   const btn = e.target.closest('[data-remove-attachment]');
   if (!btn || !selectedLeadId) return;
   const list = (attachmentsByLead.get(selectedLeadId) || []).slice();
-  list.splice(Number(btn.dataset.removeAttachment), 1);
+  dropAttachmentThumbs(list.splice(Number(btn.dataset.removeAttachment), 1));
   if (list.length) attachmentsByLead.set(selectedLeadId, list);
   else attachmentsByLead.delete(selectedLeadId);
   renderAttachments();
@@ -1345,6 +1406,7 @@ async function sendChatMessage() {
   const message = buildMessageWithAttachments(chatInputEl.value, paths);
   chatInputEl.value = '';
   attachmentsByLead.delete(leadId);
+  dropAttachmentThumbs(paths);
   renderAttachments();
   await sendMessageToLead(leadId, message);
 }

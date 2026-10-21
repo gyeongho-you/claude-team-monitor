@@ -8,6 +8,7 @@ import { trackFirstMiss, pruneMissingKeys } from './lib/firstMissTracker';
 import { liveSubagents } from './lib/subagents';
 import { hasNoLiveProcess } from './lib/ghostAgent';
 import { archiveMemberFile, restoreRetiredMembers } from './lib/retiredMembers';
+import { ATTACHMENTS_DIR, savePastedImage, purgeOld as purgeOldAttachments } from './lib/pastedImages';
 import { resolveWithinCwd, isSafeId } from './lib/pathGuard';
 import { getStatus } from '../renderer/lib/status';
 import { writeJsonFileAtomic } from './lib/jsonFile';
@@ -2345,6 +2346,7 @@ async function restartLead(internalId: string, instruction: string): Promise<{ i
     await stopSession(current.id);
   }
   installTeamLeadSkill();
+  purgeOldAttachments(ATTACHMENTS_DIR); // 3일 지난 붙여넣기 이미지 정리
   const { paths: approvedMembers, text: approvedText } = approvedMemberBriefing(current.targetDir);
   const prompt = `/team-lead ${instruction}\n\n${approvedText}`;
 
@@ -2708,6 +2710,15 @@ ipcMain.handle('pick-directory', async () => {
   const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
   if (result.canceled || result.filePaths.length === 0) return null;
   return result.filePaths[0];
+});
+
+// 채팅에 붙여넣은 이미지를 파일로 저장하고 전체 경로를 돌려준다(3일 뒤 자동 삭제, lib/pastedImages.js 참고).
+ipcMain.handle('save-pasted-image', (_e, dataBase64: string, mime: string) => {
+  try {
+    return savePastedImage(ATTACHMENTS_DIR, dataBase64, mime);
+  } catch (err) {
+    throw new Error(err instanceof Error ? err.message : String(err));
+  }
 });
 
 // 채팅 첨부용 — 여러 파일을 한 번에 고른다(취소하면 빈 목록).
