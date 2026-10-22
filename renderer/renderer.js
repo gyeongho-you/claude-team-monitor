@@ -390,7 +390,8 @@ wireRoleFields(newTplRoleSelect, newTplRoleCustom);
 // 들어온다. 'waiting'은 getStatus가 예외적으로 state 없이 status만 이 값을 줄 때를 대비한
 // 방어용 분기다 — 둘 다 같은 "사람이 봐야 한다" 경고로 취급한다.
 // 데몬은 백그라운드 명령(개발 서버 등)이 남아 있으면 팀장이 쉬고 있어도 busy로 보고한다. 앱이 그런 경우를 따로 알려준다
-// (row.backgroundOnly는 백엔드가 state.json의 tempo=idle 등으로 판정 — subagents.rs 참고). 메시지 대기열 판단은 그대로 busy다.
+// (row.backgroundOnly는 백엔드가 state.json의 tempo=idle 등으로 판정 — subagents.rs 참고). 이런 팀장에게 보내는 메시지는
+// 대기열에 쌓지 않고 데몬 reply로 정지 없이 바로 전달한다(daemon_reply.rs) — 실패하면 기존 대기열로 되돌아간다.
 const BACKGROUND_KIND_LABEL = { local_bash: '셸 명령(개발 서버 등)', monitor: '모니터', artifact_watch: '아티팩트 감시' };
 function backgroundOnlyTitle(row) {
   const kinds = [...new Set(row.backgroundOnly.kinds.map(k => BACKGROUND_KIND_LABEL[k] || k))].join(', ');
@@ -841,8 +842,7 @@ function computeBusyBannerHtml(row) {
   if (isBusy && row.backgroundOnly) {
     return `
       <div class="chat-working">
-        <span class="chat-background-text" title="${escapeHtml(backgroundOnlyTitle(row))}">💤 팀장은 쉬는 중 — 백그라운드 작업 ${row.backgroundOnly.count}개 실행 중 (보낸 메시지는 이 작업이 끝날 때까지 대기열에 쌓입니다)</span>
-        <button class="priority-send-btn" data-priority-send="${escapeHtml(row.id)}" title="큐에 넣지 않고 바로 전달합니다 — 실행 중인 백그라운드 작업(개발 서버 등)은 함께 종료됩니다">⚡ 지금 바로 전달</button>
+        <span class="chat-background-text" title="${escapeHtml(backgroundOnlyTitle(row))}">💤 팀장은 쉬는 중 — 백그라운드 작업 ${row.backgroundOnly.count}개 실행 중 (메시지는 이 작업을 멈추지 않고 바로 전달됩니다)</span>
       </div>
     `;
   }

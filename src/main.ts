@@ -6,6 +6,7 @@ import * as crypto from 'crypto';
 import { exec, execFile, spawn } from 'child_process';
 import { trackFirstMiss, pruneMissingKeys } from './lib/firstMissTracker';
 import { liveSubagents, backgroundOnly } from './lib/subagents';
+import { replyToSession } from './lib/daemonReply';
 import { hasNoLiveProcess } from './lib/ghostAgent';
 import { archiveMemberFile, restoreRetiredMembers } from './lib/retiredMembers';
 import { ATTACHMENTS_DIR, savePastedImage, purgeOld as purgeOldAttachments } from './lib/pastedImages';
@@ -212,6 +213,12 @@ type AgentEntry = {
 // 'working'과 달리 이건 "끝났는데도 안 풀리는" 종류가 아니라 "터미널에서 답하거나 daemon이 자체
 // 재기동하면서 자연히 풀리는" 종류라(오늘 실측: 두 경우 다 waitingFor가 사라짐) 영구 미배달로
 // 이어질 위험은 낮다고 판단했다.
+// busy로 보이지만 실제로는 팀장이 쉬고 백그라운드 명령(개발 서버 등)만 남은 경우 — 이런 팀장에게는 대기열에 쌓거나 정지(stop→resume,
+// 프로세스를 죽이진 않지만 깨어난 세션이 그 작업을 추적하지 못하게 된다)하지 않고 데몬 reply로 바로 전달한다(lib/daemonReply.js 참고). AskUserQuestion 등으로 멈춘 상태(input needed)는 제외한다.
+function isBackgroundOnlyAgent(agent: AgentEntry): boolean {
+  return agent.status === 'busy' && agent.waitingFor !== 'input needed' && !!agent.id && backgroundOnly(JOBS_DIR, agent.id) !== null;
+}
+
 function isLeadTooBusyToInterrupt(agent: AgentEntry): boolean {
   return getStatus(agent) === 'busy' || agent.waitingFor === 'input needed';
 }
@@ -1394,6 +1401,17 @@ function deliverPendingNotices(agents: AgentEntry[], leads: LeadRecord[]): void 
     const exhausted = attemptsSoFar >= MAX_NOTICE_DELIVERY_ATTEMPTS;
     if (exhausted) {
       stillPending.push(...notices);
+      continue;
+    }
+    if (leadRec && liveAgent && isBackgroundOnlyAgent(liveAgent)) {
+      const replyMessage = combinePendingNoticeMessages(notices);
+      const replyAttempted = notices.map(n => ({ ...n, attempts: (n.attempts ?? 0) + 1 }));
+      replyToSession(liveAgent.id!, resolveLongPrompt(replyMessage))
+        .then(() => logCritical(`[deliverPendingNotices] 팀장 ${liveAgent.id}은(는) 백그라운드 작업만 남은 상태라 정지 없이 대기 중이던 알림을 바로 전달했습니다.`))
+        .catch(err => {
+          logCritical(`[deliverPendingNotices] 팀장 ${liveAgent.id}에 정지 없는 전달(reply)이 실패해 큐에 되돌립니다(시도 ${replyAttempted[0].attempts}/${MAX_NOTICE_DELIVERY_ATTEMPTS}) — ${err}`);
+          requeuePendingNotices(replyAttempted);
+        });
       continue;
     }
     if (leadRec && liveAgent && !isBusy) {
@@ -3043,6 +3061,16 @@ ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string, prior
   // priority(우선 전달)는 사용자가 화면에서 "지금 하던 작업은 중단됩니다" 경고를 보고 명시적으로
   // 확인한 뒤에만 켜진다(renderer.js의 우선 전달 모달) — busy여도 큐로 돌리지 않고 아래 stop→resume
   // 경로(blocked/idle 배달과 완전히 같은 안전장치)로 바로 태운다.
+  // 쉬는 중인데 백그라운드 명령만 남은 팀장이면 대기열에 쌓거나 정지하지 않고 바로 전달한다(우선 전달도 필요 없다 — 중단시킬 작업이
+  // 없다). 실패하면 아래 기존 동작으로 이어진다.
+  if (isBusy && agent && isBackgroundOnlyAgent(agent)) {
+    try {
+      await replyToSession(leadId, resolveLongPrompt(message));
+      return { status: 'sent' as const, id: leadId };
+    } catch (err) {
+      logCritical(`[send-to-lead] 팀장 ${leadId}에 정지 없는 전달(reply)이 실패해 기존 방식으로 처리합니다 — ${err}`);
+    }
+  }
   if (isBusy && !priority) {
     const noticeId = queueLeadNotice(lead.internalId, message, 'user');
     return { status: 'queued' as const, id: noticeId };

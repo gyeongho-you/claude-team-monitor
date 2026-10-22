@@ -21,6 +21,7 @@ use crate::concurrency::queue_lead_operation;
 use crate::json_file::write_json_file_atomic;
 use crate::live_rows::SessionRow;
 use crate::logging::log_critical;
+use crate::long_prompt_guard::resolve_long_prompt;
 use crate::member_requests::write_request_decision;
 use crate::paths::pending_notices_path;
 use crate::resume::{resume_lead, stop_session};
@@ -521,12 +522,87 @@ async fn dispatch_delivery(path: std::path::PathBuf, lock: &'static AsyncMutex<(
     .await;
 }
 
+// ---------------------------------------------------------------------------------------------
+// 백그라운드 전용(쉬는 중인데 개발 서버 등만 남아 데몬이 busy로 보고) 팀장에게는 대기열에 쌓지 않고 정지 없이 바로 전달한다.
+// 배경(실측 2026-10-22, 디자인 팀장): 그 명령이 안 끝나면 busy가 안 풀려 메시지가 36분째 안 갔고, 대안인 stop→resume은
+// 프로세스를 죽이진 않지만(실측: 정지 후에도 계속 살아 있음) 깨어난 세션이 그 작업을 추적하지 못한다. 데몬 제어 소켓의 reply 명령으로 세션을 멈추지 않고 전달한다(daemon_reply.rs). 전달에 실패하면(내부 프로토콜이라
+// 버전이 바뀌면 거절될 수 있다) 기존 동작(대기열)으로 되돌아간다. subagents.rs의 background_only 판정을 그대로 쓴다.
+// ---------------------------------------------------------------------------------------------
+
+/// busy로 보이지만 실제로는 백그라운드 명령만 남은 팀장인가. AskUserQuestion 등으로 멈춘 상태(input needed)는 제외한다.
+pub(crate) fn is_background_only_agent(agent: &AgentEntry) -> bool {
+    get_status(agent.status.as_deref(), agent.state.as_deref()) == "busy"
+        && agent.waiting_for.as_deref() != Some("input needed")
+        && agent.id.as_deref().and_then(crate::subagents::live_background_only).is_some()
+}
+
+type ReplyJob = (String, String, Vec<PendingNotice>); // (leadShortId, combinedMessage, attemptedNotices)
+
+/// 대기열에서 "백그라운드 전용 팀장 앞으로 쌓인 알림"을 빼서 reply로 보낼 작업으로 만든다. with_pending_notices_lock 안에서
+/// 실행돼야 한다. 순수 판정 부분(팀장/attach/횟수 조건)은 클로저로 받아 디스크·프로세스 없이 테스트한다.
+pub(crate) fn reply_dequeue_step(
+    current: &mut Vec<PendingNotice>,
+    agents: &[AgentEntry],
+    leads: &[LeadRecord],
+    is_background_only: &dyn Fn(&AgentEntry) -> bool,
+    attach_open: &dyn Fn(&str) -> bool,
+) -> (bool, Vec<ReplyJob>) {
+    if current.is_empty() {
+        return (false, Vec::new());
+    }
+    let original_len = current.len();
+    let mut still_pending: Vec<PendingNotice> = Vec::new();
+    let mut jobs: Vec<ReplyJob> = Vec::new();
+    for (_key, notices) in group_by_lead_and_origin(std::mem::take(current)) {
+        let lead_rec = leads.iter().find(|l| l.internal_id.as_deref() == Some(notices[0].lead_internal_id.as_str()));
+        let live_agent = lead_rec.and_then(|l| agents.iter().find(|a| a.id.as_deref() == Some(l.id.as_str())));
+        let attempts_so_far = notices.iter().map(|n| n.attempts.unwrap_or(0)).max().unwrap_or(0);
+        match (lead_rec, live_agent) {
+            (Some(lead), Some(agent))
+                if attempts_so_far < MAX_NOTICE_DELIVERY_ATTEMPTS && is_background_only(agent) && !attach_open(lead.id.as_str()) =>
+            {
+                let message = combine_pending_notice_messages(&notices);
+                let attempted: Vec<PendingNotice> =
+                    notices.into_iter().map(|n| PendingNotice { attempts: Some(n.attempts.unwrap_or(0) + 1), ..n }).collect();
+                jobs.push((lead.id.clone(), message, attempted));
+            }
+            _ => still_pending.extend(notices),
+        }
+    }
+    *current = still_pending;
+    (current.len() != original_len, jobs)
+}
+
+async fn dispatch_reply(path: std::path::PathBuf, lock: &'static AsyncMutex<()>, short_id: String, message: String, attempted: Vec<PendingNotice>) {
+    // argv 한도와는 무관하지만, 앱 전체가 긴 지시문을 같은 방식(파일 안내문)으로 다루므로 화면의 전달 판정도 그대로 맞는다.
+    match crate::daemon_reply::reply_to_session(&short_id, &resolve_long_prompt(&message)).await {
+        Ok(()) => log_critical(&format!("[deliverPendingNotices] 팀장 {short_id}은(는) 백그라운드 작업만 남은 상태라 정지 없이 대기 중이던 알림을 바로 전달했습니다.")),
+        Err(e) => {
+            let attempts = attempted.first().and_then(|n| n.attempts).unwrap_or(0);
+            log_critical(&format!("[deliverPendingNotices] 팀장 {short_id}에 정지 없는 전달(reply)이 실패해 큐에 되돌립니다(시도 {attempts}/{MAX_NOTICE_DELIVERY_ATTEMPTS}) — {e}"));
+            with_pending_notices_lock_at(&path, lock, |current| {
+                current.extend(attempted);
+                (true, ())
+            })
+            .await;
+        }
+    }
+}
+
 /// deliverPendingNotices(main.ts)와 동일 — 호출부(live_rows.rs의 폴링)는 이 함수를
 /// fire-and-forget(tokio::spawn)으로 건다. resume 시도 자체는 최악의 경우 STOP_AND_RELAUNCH_
 /// WORST_CASE_MS(~199초)까지 걸릴 수 있으므로, 이 함수를 await하는 호출부가 그만큼 막혀서는
 /// 안 된다(main.ts도 이 함수를 await하지 않는다).
 #[cfg_attr(test, allow(dead_code))]
 pub async fn deliver_pending_notices(agents: &[AgentEntry], leads: &[LeadRecord]) {
+    // 백그라운드 전용 팀장 앞으로 쌓인 알림은 정지 없이 바로 전달한다(위 설명 참고) — 나머지는 아래 기존 경로.
+    let reply_jobs = with_pending_notices_lock(|current| {
+        reply_dequeue_step(current, agents, leads, &is_background_only_agent, &|id: &str| is_attach_terminal_open_for(id))
+    })
+    .await;
+    for (short_id, message, attempted) in reply_jobs {
+        tokio::spawn(dispatch_reply(pending_notices_path(), pending_notices_lock(), short_id, message, attempted));
+    }
     let ports = real_delivery_ports();
     let to_deliver = with_pending_notices_lock(|current| deliver_dequeue_step(current, agents, leads, &ports)).await;
     for (internal_id, message, attempted) in to_deliver {
@@ -569,6 +645,14 @@ pub async fn send_to_lead_command(lead_id: String, message: String, priority: bo
     // priority(우선 전달)는 사용자가 화면에서 "지금 하던 작업은 중단됩니다"라는 경고를 보고 명시적
     //으로 확인한 뒤에만 켜진다(renderer.js의 우선 전달 모달) — 그래서 busy여도 큐로 돌리지 않고
     // stop→resume 경로(resume_via_queue, blocked/idle 배달과 완전히 같은 안전장치)로 바로 태운다.
+    // 쉬는 중인데 백그라운드 명령(개발 서버 등)만 남은 팀장이면 대기열에 쌓거나 정지하지 않고 바로 전달한다(우선 전달도 필요 없다 —
+    // 중단시킬 작업이 없다). 실패하면 아래 기존 동작으로 이어진다.
+    if is_busy && agent.map(is_background_only_agent).unwrap_or(false) {
+        match crate::daemon_reply::reply_to_session(&lead_id, &resolve_long_prompt(&message)).await {
+            Ok(()) => return SendToLeadResult::Sent { id: lead_id },
+            Err(e) => log_critical(&format!("[send_to_lead] 팀장 {lead_id}에 정지 없는 전달(reply)이 실패해 기존 방식으로 처리합니다 — {e}")),
+        }
+    }
     if is_busy && !priority {
         let id = queue_lead_notice(&internal_id, &message, NoticeOrigin::User).await;
         return SendToLeadResult::Queued { id };
@@ -1044,6 +1128,47 @@ mod tests {
     // deliver_dequeue_step — D-9 회로차단기: 상한 도달 후 정확히 멈추는지, D-6: resume 실패 시
     // 실제로 큐에 복귀하는지(가상 시계 기반 결정적 동시성 재현).
     // ------------------------------------------------------------------------------------
+
+    fn notice(id: &str, internal: &str, attempts: Option<i64>) -> PendingNotice {
+        serde_json::from_value(serde_json::json!({ "id": id, "leadInternalId": internal, "message": format!("메시지 {id}"), "createdAt": 1, "origin": "user", "attempts": attempts })).unwrap()
+    }
+
+    fn lead(id: &str, internal: &str) -> LeadRecord {
+        serde_json::from_value(serde_json::json!({ "id": id, "sessionId": "s", "targetDir": "C:/x", "launchedAt": 1, "internalId": internal })).unwrap()
+    }
+
+    fn busy_agent(id: &str) -> AgentEntry {
+        AgentEntry { id: Some(id.to_string()), pid: Some(1), cwd: String::new(), kind: "background".into(), started_at: None, session_id: String::new(), name: None, status: Some("busy".into()), state: Some("working".into()), waiting_for: None }
+    }
+
+    #[test]
+    fn reply_dequeue_takes_only_background_only_leads_and_counts_the_attempt() {
+        let leads = [lead("77e4c4d5", "int-design"), lead("c728206b", "int-mgt")];
+        let agents = [busy_agent("77e4c4d5"), busy_agent("c728206b")];
+        let mut current = vec![notice("n1", "int-design", None), notice("n2", "int-mgt", None)];
+        // 디자인 팀장만 백그라운드 전용(쉬는 중)이다
+        let (dirty, jobs) = reply_dequeue_step(&mut current, &agents, &leads, &|a: &AgentEntry| a.id.as_deref() == Some("77e4c4d5"), &|_: &str| false);
+        assert!(dirty);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].0, "77e4c4d5");
+        assert_eq!(jobs[0].2[0].attempts, Some(1), "시도 횟수가 올라간다");
+        assert_eq!(current.len(), 1, "다른 팀장 알림은 그대로 대기열에 남는다");
+        assert_eq!(current[0].lead_internal_id, "int-mgt");
+    }
+
+    #[test]
+    fn reply_dequeue_keeps_notices_when_attach_is_open_or_attempts_are_exhausted_or_not_background_only() {
+        let leads = [lead("77e4c4d5", "int-design")];
+        let agents = [busy_agent("77e4c4d5")];
+        let bg = |_: &AgentEntry| true;
+        let mut a = vec![notice("n1", "int-design", None)];
+        assert!(reply_dequeue_step(&mut a, &agents, &leads, &bg, &|_: &str| true).1.is_empty(), "attach 터미널이 열려 있으면 건드리지 않는다");
+        let mut b = vec![notice("n1", "int-design", Some(MAX_NOTICE_DELIVERY_ATTEMPTS))];
+        assert!(reply_dequeue_step(&mut b, &agents, &leads, &bg, &|_: &str| false).1.is_empty(), "시도 상한이면 자동 재시도를 멈춘다");
+        let mut c = vec![notice("n1", "int-design", None)];
+        assert!(reply_dequeue_step(&mut c, &agents, &leads, &|_: &AgentEntry| false, &|_: &str| false).1.is_empty(), "진짜 작업 중이면 기존대로 기다린다");
+        assert_eq!(c.len(), 1);
+    }
 
     fn always_fail_ports() -> DeliveryPorts {
         DeliveryPorts { resume: Arc::new(|_, _| Box::pin(async { None })), is_attach_terminal_open: Arc::new(|_| false) }

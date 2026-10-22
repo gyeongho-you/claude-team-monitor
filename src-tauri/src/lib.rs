@@ -6,6 +6,7 @@ mod claude_readiness;
 mod concurrency;
 mod daemon_state;
 mod subagents;
+mod daemon_reply;
 mod pasted_images;
 mod retired_members;
 mod favorites;
