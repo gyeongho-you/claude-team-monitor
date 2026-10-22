@@ -423,6 +423,13 @@ async fn resume_retry_from_inner_with_ports(
                 if survived {
                     return Some(candidate_id);
                 }
+                // 사용자가 그 사이에 긴급 중지로 일부러 멈춘 것이면 크래시가 아니다 — 같은 메시지로 다시 띄우면 중지가 무효가 된다.
+                if crate::board_state::recently_emergency_stopped(&candidate_id, crate::board_state::EMERGENCY_STOP_SUPPRESS_RETRY_MS)
+                    || crate::board_state::recently_emergency_stopped(&current.id, crate::board_state::EMERGENCY_STOP_SUPPRESS_RETRY_MS)
+                {
+                    log_critical(&format!("[resumeLead] 팀장 {internal_id}({candidate_id})가 사라졌지만 방금 긴급 중지된 것이라 크래시로 보지 않고 재시도하지 않습니다."));
+                    return Some(candidate_id);
+                }
                 log_critical(&format!(
                     "[resumeLead] 팀장 {internal_id}의 resume 시도 {attempt}/{MAX_RESUME_ATTEMPTS}가 크래시한 것으로 보입니다({candidate_id}, 원인 미확정)."
                 ));
@@ -509,6 +516,11 @@ async fn background_resume_healing_job(internal_id: String, current: LeadRecord,
         Err(_) => return,
     };
     if survived {
+        return;
+    }
+    // 긴급 중지로 일부러 멈춘 것이면 복구하지 않는다(같은 메시지로 다시 띄우면 중지가 무효가 된다).
+    if crate::board_state::recently_emergency_stopped(&expected_id, crate::board_state::EMERGENCY_STOP_SUPPRESS_RETRY_MS) {
+        log_critical(&format!("[resumeLead] 팀장 {internal_id}({expected_id})가 사라졌지만 방금 긴급 중지된 것이라 복구하지 않습니다."));
         return;
     }
     log_critical(&format!(
@@ -926,6 +938,28 @@ mod tests {
         let result = resume_retry_from_with_ports(&ports, "internal-5", &current, "hi", 1).await;
         assert_eq!(result, Some("lead1".to_string()));
         assert_eq!(attempt_count.load(Ordering::SeqCst), 2, "첫 settle 확인이 크래시로 나오면 한 번 더 시도해야 한다");
+    }
+
+    // 긴급 중지(실측 2026-10-22): resume 직후 13초 안에 사용자가 일부러 멈추면 생존 확인이 "사라짐"으로 나오지만 크래시가 아니다 — 같은
+    // 메시지로 다시 띄우면 중지가 무효가 되므로(실제로 같은 메시지가 두 번 실행됐다) 재시도하지 말아야 한다.
+    #[tokio::test(start_paused = true)]
+    async fn resume_retry_does_not_relaunch_when_the_lead_was_just_emergency_stopped() {
+        let attempt_count = Arc::new(AtomicI64::new(0));
+        let attempt_count_clone = attempt_count.clone();
+        let ports = ResumePorts {
+            run_claude_bg: Arc::new(move |_flags, _prompt, _cwd| {
+                attempt_count_clone.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Some("estop-lead".to_string()) })
+            }),
+            agents_alive: Arc::new(|_id| Box::pin(async { Ok(false) })), // 13초 뒤 확인하니 사라져 있음
+            cleanup_fork: Arc::new(|_id| {}),
+            schedule_healing: noop_healing(),
+        };
+        crate::board_state::mark_emergency_stopped("estop-lead"); // 사용자가 그 사이에 긴급 중지를 눌렀다
+        let current = fake_lead("internal-estop", "estop-lead", "session-estop", "C:\\fake");
+        let result = resume_retry_from_with_ports(&ports, "internal-estop", &current, "hi", 1).await;
+        assert_eq!(result, Some("estop-lead".to_string()));
+        assert_eq!(attempt_count.load(Ordering::SeqCst), 1, "긴급 중지된 것은 크래시가 아니므로 같은 메시지로 다시 띄우면 안 된다");
     }
 
     // agents_alive 조회 자체가 실패하면 fail-closed(성공으로 간주)해서 불필요한 재시도를 피해야

@@ -52,6 +52,9 @@ pub struct BoardState {
     /// 아니라 짧은 id다). notifyLeadsOfFinishedMembers(notice_queue.rs)가 폴링마다 busy→idle/done
     /// 전이를 감지하는 데 쓴다.
     pub last_member_status: HashMap<String, String>,
+    /// 긴급 중지로 의도적으로 멈춘 팀장의 짧은 id -> 멈춘 시각(ms). resume 직후의 생존 확인(크래시 감지)과 백그라운드 복구가 "13초 안에
+    /// 사라졌다"를 비정상 종료로 오판해 같은 메시지로 다시 띄우는 것을 막는 데 쓴다.
+    pub emergency_stopped_at: HashMap<String, i64>,
 }
 
 impl BoardState {
@@ -67,8 +70,41 @@ impl BoardState {
             attach_terminal_pids: HashMap::new(),
             member_first_miss_at: HashMap::new(),
             last_member_status: HashMap::new(),
+            emergency_stopped_at: HashMap::new(),
         }
     }
+}
+
+/// 이 시간 안에 긴급 중지된 팀장이 "사라졌다"면 크래시가 아니라 의도적 중지로 본다(RESUME_SETTLE_CHECK_MS 13초보다 넉넉하게).
+pub const EMERGENCY_STOP_SUPPRESS_RETRY_MS: i64 = 30_000;
+
+pub fn mark_emergency_stopped(short_id: &str) {
+    state().lock().unwrap().emergency_stopped_at.insert(short_id.to_string(), crate::timing::now_ms());
+}
+
+#[cfg(test)]
+mod emergency_stop_tests {
+    use super::*;
+
+    #[test]
+    fn marker_is_scoped_to_the_stopped_lead_and_expires() {
+        assert!(!recently_emergency_stopped("never-stopped-lead", EMERGENCY_STOP_SUPPRESS_RETRY_MS));
+        mark_emergency_stopped("stopped-lead-x");
+        assert!(recently_emergency_stopped("stopped-lead-x", EMERGENCY_STOP_SUPPRESS_RETRY_MS));
+        assert!(!recently_emergency_stopped("other-lead-y", EMERGENCY_STOP_SUPPRESS_RETRY_MS), "다른 팀장에게는 영향이 없다");
+        // 오래전에 멈춘 것은 더 이상 억제하지 않는다
+        state().lock().unwrap().emergency_stopped_at.insert("old-stop-lead".to_string(), crate::timing::now_ms() - EMERGENCY_STOP_SUPPRESS_RETRY_MS - 1000);
+        assert!(!recently_emergency_stopped("old-stop-lead", EMERGENCY_STOP_SUPPRESS_RETRY_MS));
+    }
+}
+
+pub fn recently_emergency_stopped(short_id: &str, within_ms: i64) -> bool {
+    state()
+        .lock()
+        .unwrap()
+        .emergency_stopped_at
+        .get(short_id)
+        .map_or(false, |&at| crate::timing::now_ms() - at <= within_ms)
 }
 
 pub fn state() -> &'static Mutex<BoardState> {

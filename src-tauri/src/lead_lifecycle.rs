@@ -409,6 +409,8 @@ pub async fn emergency_stop_lead(internal_id: String) -> bool {
     }
     if stopped {
         board_state().lock().unwrap().lead_first_miss_at.insert(lead.id.clone(), 0);
+        // 직전 resume의 생존 확인·백그라운드 복구가 이 중지를 크래시로 오판해 같은 메시지로 다시 띄우지 않게 표시해 둔다.
+        crate::board_state::mark_emergency_stopped(&lead.id);
     } else {
         log_critical(&format!("[emergencyStopLead] 팀장 {}({}) 정지에 실패했습니다.", internal_id, lead.id));
     }

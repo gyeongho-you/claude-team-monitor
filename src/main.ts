@@ -219,7 +219,18 @@ type AgentEntry = {
 // 반영하고, 터미널(attach)이 붙은 채로도 정상 전달되며 세션 복사본도 안 생긴다. 실패하면 기존 동작으로 돌아간다. 권한 확인 등으로 멈춘
 // 상태(blocked, status가 busy/idle이 아님)와 AskUserQuestion(input needed)은 제외한다.
 function canReplyDirectly(agent: AgentEntry): boolean {
-  return (agent.status === 'busy' || agent.status === 'idle') && agent.waitingFor !== 'input needed' && !!agent.id;
+  // getStatus는 state가 done이면 status가 idle이어도 'done'을 돌려준다(일을 마치고 쉬는 팀장) — idle·done 모두 쉬는 중이다.
+  const st = getStatus(agent);
+  return (st === 'busy' || st === 'idle' || st === 'done') && agent.waitingFor !== 'input needed' && !!agent.id;
+}
+
+// 긴급 중지로 의도적으로 멈춘 팀장의 짧은 id -> 멈춘 시각. resume 직후의 생존 확인(크래시 감지)과 백그라운드 복구가 "13초 안에 사라졌다"를
+// 비정상 종료로 오판해 같은 메시지로 다시 띄우는 것을 막는다.
+const emergencyStoppedAt = new Map<string, number>();
+const EMERGENCY_STOP_SUPPRESS_RETRY_MS = 30000;
+function recentlyEmergencyStopped(shortId: string): boolean {
+  const at = emergencyStoppedAt.get(shortId);
+  return at !== undefined && Date.now() - at <= EMERGENCY_STOP_SUPPRESS_RETRY_MS;
 }
 
 function isLeadTooBusyToInterrupt(agent: AgentEntry): boolean {
@@ -2162,6 +2173,11 @@ async function resumeRetryFrom(internalId: string, current: LeadRecord, message:
           survived = true; // 확인 자체가 실패하면 fail-closed(성공으로 간주) — 불필요한 재시도를 피한다.
         }
         if (survived) return candidateId;
+        // 사용자가 그 사이에 긴급 중지로 일부러 멈춘 것이면 크래시가 아니다 — 같은 메시지로 다시 띄우면 중지가 무효가 된다.
+        if (recentlyEmergencyStopped(candidateId) || recentlyEmergencyStopped(current.id)) {
+          logCritical(`[resumeLead] 팀장 ${internalId}(${candidateId})가 사라졌지만 방금 긴급 중지된 것이라 크래시로 보지 않고 재시도하지 않습니다.`);
+          return candidateId;
+        }
         logCritical(`[resumeLead] 팀장 ${internalId}의 resume 시도 ${attempt}/${MAX_RESUME_ATTEMPTS}가 크래시한 것으로 보입니다(${candidateId}, 원인 미확정).`);
       } else {
         logCritical(`[resumeLead] 팀장 ${internalId}의 resume 시도 ${attempt}/${MAX_RESUME_ATTEMPTS}가 실패했습니다("backgrounded" 마커 없음/타임아웃 또는 복사본으로 감지되어 정리됨).`);
@@ -2194,6 +2210,11 @@ function scheduleBackgroundResumeHealing(internalId: string, current: LeadRecord
                 // 더 위험하다 — 다음 폴링이나 사용자 조작 때 다시 기회가 있으니 여기서는 그냥 넘어간다.
       }
       if (survived) return;
+      // 긴급 중지로 일부러 멈춘 것이면 복구하지 않는다(같은 메시지로 다시 띄우면 중지가 무효가 된다).
+      if (recentlyEmergencyStopped(expectedId)) {
+        logCritical(`[resumeLead] 팀장 ${internalId}(${expectedId})가 사라졌지만 방금 긴급 중지된 것이라 복구하지 않습니다.`);
+        return;
+      }
       logCritical(`[resumeLead] 팀장 ${internalId}(${expectedId})가 백그라운드 확인(spawn 후 ${RESUME_SETTLE_CHECK_MS}ms) 중 사라진 것을 발견했습니다 — 재시도로 복구를 시도합니다.`);
       const healedId = await resumeRetryFrom(internalId, current, message, 2);
       if (!healedId) {
@@ -3206,7 +3227,7 @@ ipcMain.handle('emergency-stop-lead', async (_e, leadId: string) => {
     const current = loadLeads().find(l => l.internalId === lead.internalId) ?? lead;
     let stopped = await stopSession(current.id);
     if (!stopped) stopped = await stopSession(current.id);
-    if (stopped) leadFirstMissAt.set(current.id, 0);
+    if (stopped) { leadFirstMissAt.set(current.id, 0); emergencyStoppedAt.set(current.id, Date.now()); }
     else logCritical(`[emergencyStopLead] 팀장 ${lead.internalId}(${current.id}) 정지에 실패했습니다.`);
     return stopped;
   });

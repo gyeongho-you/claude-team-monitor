@@ -531,11 +531,13 @@ async fn dispatch_delivery(path: std::path::PathBuf, lock: &'static AsyncMutex<(
 // 프로토콜이라 버전이 바뀌면 거절될 수 있다) 기존 동작(대기열 → 한가해지면 stop→resume 전달, 횟수 상한까지 재시도)으로 되돌아간다.
 // ---------------------------------------------------------------------------------------------
 
-/// 정지 없이 reply로 바로 전달할 수 있는 팀장인가 — 살아있는 세션이 일하는 중(busy)이거나 쉬는 중(idle)이다. 권한 확인 등으로 멈춘 상태
-/// (blocked)와 AskUserQuestion으로 멈춘 상태(input needed)는 제외한다 — 기존 처리(깨워서 풀기)를 그대로 둔다.
-/// 쉬는 중에도 reply가 되는 것은 시험으로 확인했다(터미널이 붙은 채로도 정상 전달, 세션 복사본도 안 생김).
+/// 정지 없이 reply로 바로 전달할 수 있는 팀장인가 — 살아있는 세션이 일하는 중(busy)이거나 쉬는 중이다. get_status는 state가 done이면 status가
+/// idle이어도 "done"을 돌려주므로(일을 마치고 쉬는 팀장이 바로 이 경우) idle과 done 모두 쉬는 중이다 — 처음엔 done을 빠뜨려서 쉬는 팀장은
+/// reply를 시도조차 못 하고 예전의 정지→재개로 가는 버그가 있었다. 권한 확인 등으로 멈춘 상태(blocked)와 AskUserQuestion으로 멈춘 상태
+/// (input needed)는 제외한다 — 기존 처리(깨워서 풀기)를 그대로 둔다. 쉬는 중에도 reply가 되는 것은 시험으로 확인했다(터미널이 붙은 채로도
+/// 정상 전달, 세션 복사본도 안 생김).
 pub(crate) fn can_reply_directly(agent: &AgentEntry) -> bool {
-    matches!(get_status(agent.status.as_deref(), agent.state.as_deref()).as_str(), "busy" | "idle") && agent.waiting_for.as_deref() != Some("input needed")
+    matches!(get_status(agent.status.as_deref(), agent.state.as_deref()).as_str(), "busy" | "idle" | "done") && agent.waiting_for.as_deref() != Some("input needed")
 }
 
 type ReplyJob = (String, String, Vec<PendingNotice>); // (leadShortId, combinedMessage, attemptedNotices)
@@ -643,6 +645,14 @@ pub async fn send_to_lead_command(lead_id: String, message: String) -> SendToLea
         match crate::daemon_reply::reply_to_session(&lead_id, &resolve_long_prompt(&message)).await {
             Ok(()) => return SendToLeadResult::Sent { id: lead_id },
             Err(e) => log_critical(&format!("[send_to_lead] 팀장 {lead_id}에 정지 없는 전달(reply)이 실패해 기존 방식으로 처리합니다 — {e}")),
+        }
+    }
+    if let Some(a) = agent {
+        if !can_reply_directly(a) {
+            log_critical(&format!(
+                "[send_to_lead] 팀장 {lead_id}은(는) 상태(status={:?}, state={:?}, waitingFor={:?})가 reply 대상이 아니라 기존 방식(대기열/정지→재개)으로 처리합니다.",
+                a.status, a.state, a.waiting_for
+            ));
         }
     }
     // H-2: 여기부터는 stop→resume 경로다. attach 터미널이 아직 붙어있으면 stop→resume이 attach 쪽의 독립적인 재연결 시도와 경합해
@@ -1170,6 +1180,20 @@ mod tests {
         let mut c = vec![notice("n1", "int-design", None)];
         assert!(reply_dequeue_step(&mut c, &agents, &leads, &|_: &AgentEntry| false, &|_: &str| false).1.is_empty(), "진짜 작업 중이면 기존대로 기다린다");
         assert_eq!(c.len(), 1);
+    }
+
+    fn agent_with(status: Option<&str>, state: Option<&str>, waiting_for: Option<&str>) -> AgentEntry {
+        AgentEntry { id: Some("a".into()), pid: Some(1), cwd: String::new(), kind: "background".into(), started_at: None, session_id: String::new(), name: None, status: status.map(String::from), state: state.map(String::from), waiting_for: waiting_for.map(String::from) }
+    }
+
+    #[test]
+    fn can_reply_directly_covers_working_and_finished_resting_leads_but_not_blocked_ones() {
+        assert!(can_reply_directly(&agent_with(Some("busy"), Some("working"), None)), "일하는 중");
+        assert!(can_reply_directly(&agent_with(Some("idle"), Some("done"), None)), "일을 마치고 쉬는 중 — get_status가 done을 돌려준다(처음엔 빠뜨렸던 경우)");
+        assert!(can_reply_directly(&agent_with(Some("idle"), None, None)));
+        assert!(!can_reply_directly(&agent_with(Some("waiting"), Some("blocked"), None)), "권한 대기는 기존 처리");
+        assert!(!can_reply_directly(&agent_with(Some("busy"), Some("blocked"), None)));
+        assert!(!can_reply_directly(&agent_with(Some("busy"), Some("working"), Some("input needed"))), "선택지 응답 대기는 기존 처리");
     }
 
     fn always_fail_ports() -> DeliveryPorts {
