@@ -52,7 +52,7 @@ contextBridge.exposeInMainWorld('api', {
   getChatUnresolvableDetail: (shortId: string) => ipcRenderer.invoke('get-chat-unresolvable-detail', shortId),
   getChangedFiles: (cwd: string) => ipcRenderer.invoke('get-changed-files', cwd),
   getFileDiff: (cwd: string, file: string) => ipcRenderer.invoke('get-file-diff', cwd, file),
-  sendToLead: (leadId: string, message: string, priority?: boolean) => ipcRenderer.invoke('send-to-lead', leadId, message, !!priority),
+  sendToLead: (leadId: string, message: string) => ipcRenderer.invoke('send-to-lead', leadId, message),
   cancelQueuedMessage: (leadId: string, noticeId: string) => ipcRenderer.invoke('cancel-queued-message', leadId, noticeId),
   deleteLeadHistory: (internalId: string) => ipcRenderer.invoke('delete-lead-history', internalId),
   getPendingNoticeIds: (leadId: string) => ipcRenderer.invoke('get-pending-notice-ids', leadId),
@@ -64,5 +64,6 @@ contextBridge.exposeInMainWorld('api', {
   setLeadAutoStallNudge: (leadId: string, value: boolean) => ipcRenderer.invoke('set-lead-auto-stall-nudge', leadId, value),
   updateLeadLabel: (leadId: string, label: string) => ipcRenderer.invoke('update-lead-label', leadId, label),
   restartLead: (leadId: string, instruction: string) => ipcRenderer.invoke('restart-lead', leadId, instruction),
+  emergencyStopLead: (leadId: string) => ipcRenderer.invoke('emergency-stop-lead', leadId),
   endLeadWork: (leadId: string) => ipcRenderer.invoke('end-lead-work', leadId),
 });

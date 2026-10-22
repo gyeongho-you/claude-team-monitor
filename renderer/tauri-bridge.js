@@ -131,6 +131,9 @@
     return invoke('restart_lead_command', { leadId, instruction });
   }
 
+  async function emergencyStopLead(leadId) {
+    return invoke('emergency_stop_lead_command', { leadId });
+  }
   async function endLeadWork(leadId) {
     return invoke('end_lead_work_command', { leadId });
   }
@@ -207,8 +210,8 @@
   }
 
   // ---- 채팅(알림 큐) ----
-  async function sendToLead(leadId, message, priority) {
-    return invoke('send_to_lead_command', { leadId, message, priority: !!priority });
+  async function sendToLead(leadId, message) {
+    return invoke('send_to_lead_command', { leadId, message });
   }
 
   async function cancelQueuedMessage(leadId, noticeId) {
@@ -301,6 +304,7 @@
     setLeadAutoStallNudge,
     updateLeadLabel,
     restartLead,
+    emergencyStopLead,
     endLeadWork,
   };
 

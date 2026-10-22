@@ -523,17 +523,19 @@ async fn dispatch_delivery(path: std::path::PathBuf, lock: &'static AsyncMutex<(
 }
 
 // ---------------------------------------------------------------------------------------------
-// 백그라운드 전용(쉬는 중인데 개발 서버 등만 남아 데몬이 busy로 보고) 팀장에게는 대기열에 쌓지 않고 정지 없이 바로 전달한다.
-// 배경(실측 2026-10-22, 디자인 팀장): 그 명령이 안 끝나면 busy가 안 풀려 메시지가 36분째 안 갔고, 대안인 stop→resume은
-// 프로세스를 죽이진 않지만(실측: 정지 후에도 계속 살아 있음) 깨어난 세션이 그 작업을 추적하지 못한다. 데몬 제어 소켓의 reply 명령으로 세션을 멈추지 않고 전달한다(daemon_reply.rs). 전달에 실패하면(내부 프로토콜이라
-// 버전이 바뀌면 거절될 수 있다) 기존 동작(대기열)으로 되돌아간다. subagents.rs의 background_only 판정을 그대로 쓴다.
+// 일하는 중(busy)인 팀장에게는 대기열에 쌓지 않고, 터미널에서 일하는 도중에 입력하는 것처럼 정지 없이 바로 끼워 넣는다.
+// 실측(2026-10-22, 시험 세션): 데몬 제어 소켓의 reply 명령으로 보내면 진행 중인 도구 호출이 끝난 다음 단계에서 세션이 메시지를
+// 받고, 하던 작업을 끝까지 이어가면서 반영한다(추가 요청은 마지막 답에 반영, "남은 호출은 다른 주소로" 같은 방식 변경도 남은
+// 단계에 반영). 배경(디자인 팀장): 개발 서버 같은 백그라운드 명령이 남아 busy가 안 풀리면 대기열 메시지가 36분째 안 갔고,
+// 대안인 stop→resume은 프로세스를 죽이진 않지만(실측) 깨어난 세션이 그 작업을 추적하지 못한다. 전달에 실패하면(내부
+// 프로토콜이라 버전이 바뀌면 거절될 수 있다) 기존 동작(대기열 → 한가해지면 stop→resume 전달, 횟수 상한까지 재시도)으로 되돌아간다.
 // ---------------------------------------------------------------------------------------------
 
-/// busy로 보이지만 실제로는 백그라운드 명령만 남은 팀장인가. AskUserQuestion 등으로 멈춘 상태(input needed)는 제외한다.
-pub(crate) fn is_background_only_agent(agent: &AgentEntry) -> bool {
-    get_status(agent.status.as_deref(), agent.state.as_deref()) == "busy"
-        && agent.waiting_for.as_deref() != Some("input needed")
-        && agent.id.as_deref().and_then(crate::subagents::live_background_only).is_some()
+/// 정지 없이 reply로 바로 전달할 수 있는 팀장인가 — 살아있는 세션이 일하는 중(busy)이거나 쉬는 중(idle)이다. 권한 확인 등으로 멈춘 상태
+/// (blocked)와 AskUserQuestion으로 멈춘 상태(input needed)는 제외한다 — 기존 처리(깨워서 풀기)를 그대로 둔다.
+/// 쉬는 중에도 reply가 되는 것은 시험으로 확인했다(터미널이 붙은 채로도 정상 전달, 세션 복사본도 안 생김).
+pub(crate) fn can_reply_directly(agent: &AgentEntry) -> bool {
+    matches!(get_status(agent.status.as_deref(), agent.state.as_deref()).as_str(), "busy" | "idle") && agent.waiting_for.as_deref() != Some("input needed")
 }
 
 type ReplyJob = (String, String, Vec<PendingNotice>); // (leadShortId, combinedMessage, attemptedNotices)
@@ -576,7 +578,7 @@ pub(crate) fn reply_dequeue_step(
 async fn dispatch_reply(path: std::path::PathBuf, lock: &'static AsyncMutex<()>, short_id: String, message: String, attempted: Vec<PendingNotice>) {
     // argv 한도와는 무관하지만, 앱 전체가 긴 지시문을 같은 방식(파일 안내문)으로 다루므로 화면의 전달 판정도 그대로 맞는다.
     match crate::daemon_reply::reply_to_session(&short_id, &resolve_long_prompt(&message)).await {
-        Ok(()) => log_critical(&format!("[deliverPendingNotices] 팀장 {short_id}은(는) 백그라운드 작업만 남은 상태라 정지 없이 대기 중이던 알림을 바로 전달했습니다.")),
+        Ok(()) => log_critical(&format!("[deliverPendingNotices] 팀장 {short_id}이(가) 일하는 중이라 정지 없이 대기 중이던 알림을 도중에 바로 전달했습니다.")),
         Err(e) => {
             let attempts = attempted.first().and_then(|n| n.attempts).unwrap_or(0);
             log_critical(&format!("[deliverPendingNotices] 팀장 {short_id}에 정지 없는 전달(reply)이 실패해 큐에 되돌립니다(시도 {attempts}/{MAX_NOTICE_DELIVERY_ATTEMPTS}) — {e}"));
@@ -595,9 +597,10 @@ async fn dispatch_reply(path: std::path::PathBuf, lock: &'static AsyncMutex<()>,
 /// 안 된다(main.ts도 이 함수를 await하지 않는다).
 #[cfg_attr(test, allow(dead_code))]
 pub async fn deliver_pending_notices(agents: &[AgentEntry], leads: &[LeadRecord]) {
-    // 백그라운드 전용 팀장 앞으로 쌓인 알림은 정지 없이 바로 전달한다(위 설명 참고) — 나머지는 아래 기존 경로.
+    // 일하는 팀장 앞으로 쌓인 알림은 정지 없이 바로 끼워 넣는다(위 설명 참고) — 나머지는 아래 기존 경로.
     let reply_jobs = with_pending_notices_lock(|current| {
-        reply_dequeue_step(current, agents, leads, &is_background_only_agent, &|id: &str| is_attach_terminal_open_for(id))
+        // 정지·재개가 아니라 reply라서 터미널이 열려 있어도 전달한다(attach 때문에 건너뛰지 않는다) — 그래서 attach 조건은 항상 거짓.
+        reply_dequeue_step(current, agents, leads, &can_reply_directly, &|_: &str| false)
     })
     .await;
     for (short_id, message, attempted) in reply_jobs {
@@ -626,34 +629,33 @@ pub enum SendToLeadResult {
 }
 
 #[tauri::command]
-pub async fn send_to_lead_command(lead_id: String, message: String, priority: bool) -> SendToLeadResult {
+pub async fn send_to_lead_command(lead_id: String, message: String) -> SendToLeadResult {
     let Some(lead) = load_leads().into_iter().find(|l| l.id == lead_id) else {
         return SendToLeadResult::NotFound;
     };
-    // H-2: attach 터미널이 아직 붙어있으면 여기서 stop→resume을 걸었다가 attach 쪽의 독립적인
-    // 재연결 시도와 경합해 daemon이 복사본을 만들 수 있다. 큐로 돌리지 않고(그러면 영원히 안
-    // 풀릴 수 있다) 바로 실패로 알려서 사용자가 터미널을 닫고 다시 보내게 한다.
+    let agents = fetch_agents_typed_async().await;
+    let agent = agents.iter().find(|a| a.id.as_deref() == Some(lead_id.as_str()));
+    // 살아있는 팀장(일하는 중이든 쉬는 중이든)에게는 정지·대기열 없이 터미널처럼 바로 reply로 전달한다 — 일하는 중이면 하던 작업을
+    // 이어가면서 반영한다(실측). 정지·재개가 아니라서 터미널(attach)이 열려 있어도 상관없다(시험: attach 상태에서도 정상 전달, 복사본
+    // 없음). 그래서 예전의 "우선 전달(정지 후 전달)"과 "터미널이 열려 있으면 못 보냄"은 이 경로에선 필요 없다. 작업을 멈추고 싶으면
+    // 화면의 긴급 중지를 쓴다. 실패하면 아래 기존 동작으로 이어진다.
+    if agent.map(can_reply_directly).unwrap_or(false) {
+        match crate::daemon_reply::reply_to_session(&lead_id, &resolve_long_prompt(&message)).await {
+            Ok(()) => return SendToLeadResult::Sent { id: lead_id },
+            Err(e) => log_critical(&format!("[send_to_lead] 팀장 {lead_id}에 정지 없는 전달(reply)이 실패해 기존 방식으로 처리합니다 — {e}")),
+        }
+    }
+    // H-2: 여기부터는 stop→resume 경로다. attach 터미널이 아직 붙어있으면 stop→resume이 attach 쪽의 독립적인 재연결 시도와 경합해
+    // daemon이 복사본을 만들 수 있다. 큐로 돌리지 않고(그러면 영원히 안 풀릴 수 있다) 바로 실패로 알려서 사용자가 터미널을 닫고
+    // 다시 보내게 한다.
     if is_attach_terminal_open_for(&lead_id) {
         return SendToLeadResult::AttachOpen;
     }
     let Some(internal_id) = lead.internal_id.clone() else {
         return SendToLeadResult::Failed; // internalId 없는 낡은 레코드는 큐/재개 모두 못 탄다
     };
-    let agents = fetch_agents_typed_async().await;
-    let agent = agents.iter().find(|a| a.id.as_deref() == Some(lead_id.as_str()));
     let is_busy = agent.map(is_lead_too_busy_to_interrupt).unwrap_or(false);
-    // priority(우선 전달)는 사용자가 화면에서 "지금 하던 작업은 중단됩니다"라는 경고를 보고 명시적
-    //으로 확인한 뒤에만 켜진다(renderer.js의 우선 전달 모달) — 그래서 busy여도 큐로 돌리지 않고
-    // stop→resume 경로(resume_via_queue, blocked/idle 배달과 완전히 같은 안전장치)로 바로 태운다.
-    // 쉬는 중인데 백그라운드 명령(개발 서버 등)만 남은 팀장이면 대기열에 쌓거나 정지하지 않고 바로 전달한다(우선 전달도 필요 없다 —
-    // 중단시킬 작업이 없다). 실패하면 아래 기존 동작으로 이어진다.
-    if is_busy && agent.map(is_background_only_agent).unwrap_or(false) {
-        match crate::daemon_reply::reply_to_session(&lead_id, &resolve_long_prompt(&message)).await {
-            Ok(()) => return SendToLeadResult::Sent { id: lead_id },
-            Err(e) => log_critical(&format!("[send_to_lead] 팀장 {lead_id}에 정지 없는 전달(reply)이 실패해 기존 방식으로 처리합니다 — {e}")),
-        }
-    }
-    if is_busy && !priority {
+    if is_busy {
         let id = queue_lead_notice(&internal_id, &message, NoticeOrigin::User).await;
         return SendToLeadResult::Queued { id };
     }

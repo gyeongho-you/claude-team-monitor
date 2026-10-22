@@ -130,15 +130,14 @@ const historyDeleteCancelBtn = document.getElementById('history-delete-cancel-bt
 const helpBtn = document.getElementById('help-btn');
 const helpPanelEl = document.getElementById('help-panel');
 const helpCloseBtn = document.getElementById('help-close-btn');
-const prioritySendPanelEl = document.getElementById('priority-send-panel');
-const prioritySendInstructionEl = document.getElementById('priority-send-instruction');
-const prioritySendConfirmBtn = document.getElementById('priority-send-confirm-btn');
-const prioritySendCancelBtn = document.getElementById('priority-send-cancel-btn');
-const prioritySendStatusEl = document.getElementById('priority-send-status');
-const ALL_MODAL_PANELS = () => [restartLeadPanelEl, endWorkPanelEl, fileListPanelEl, cleanupStopPanelEl, historyDeletePanelEl, helpPanelEl, prioritySendPanelEl];
-// 우선 전달 모달이 지금 누구 앞으로 뜬 건지 — 배너 버튼을 누른 시점의 리드 id를 기억해뒀다가
-// 확인 버튼을 눌렀을 때(그 사이 selectedLeadId가 바뀌었을 수 있으므로) 그 리드로 정확히 보낸다.
-let prioritySendLeadId = null;
+const emergencyStopPanelEl = document.getElementById('emergency-stop-panel');
+const emergencyStopYesBtn = document.getElementById('emergency-stop-yes-btn');
+const emergencyStopNoBtn = document.getElementById('emergency-stop-no-btn');
+const emergencyStopStatusEl = document.getElementById('emergency-stop-status');
+const ALL_MODAL_PANELS = () => [restartLeadPanelEl, endWorkPanelEl, fileListPanelEl, cleanupStopPanelEl, historyDeletePanelEl, helpPanelEl, emergencyStopPanelEl];
+// 긴급 중지 모달이 지금 누구 앞으로 뜬 건지 — 배너 버튼을 누른 시점의 리드 id를 기억해뒀다가
+// "예"를 눌렀을 때(그 사이 selectedLeadId가 바뀌었을 수 있으므로) 그 리드를 정확히 멈춘다.
+let emergencyStopLeadId = null;
 
 // "새 작업 시작"/"작업 종료"/"변경 파일" 같은 확인창·상세창은 대화창 아래쪽에 인라인으로 뜨면
 // 스크롤 밖이라 눈에 안 띄어서(사용자 피드백), 화면 가운데 팝업(모달)으로 띄운다 — 배경을
@@ -850,7 +849,8 @@ function computeBusyBannerHtml(row) {
     return `
       <div class="chat-working">
         <span class="chat-working-text">● 작업 중...</span>
-        <button class="priority-send-btn" data-priority-send="${escapeHtml(row.id)}" title="큐에 넣지 않고, 지금 하던 작업을 중단시키고 바로 전달합니다">⚡ 지금 바로 전달</button>
+        <span class="chat-background-text" title="터미널에서 일하는 도중에 입력하는 것과 같습니다 — 하던 작업을 이어가면서 반영합니다">(보낸 메시지는 작업 중간에 바로 전달됩니다)</span>
+        <button class="emergency-stop-btn" data-emergency-stop="${escapeHtml(row.id)}" title="이 팀장이 하던 작업을 그 자리에서 중단합니다(대화는 남고, 메시지를 보내면 다시 이어집니다)">⛔ 긴급 중지</button>
       </div>
     `;
   }
@@ -899,7 +899,7 @@ function renderQueuedTurnsHtml(leadId) {
     const statusText = item.exhausted
       ? '자동 재시도가 모두 실패해 전달을 멈췄습니다. 아래 취소 버튼으로 지우고 다시 보내보세요 — 계속 반복되면 "새 작업 시작"으로 세션을 새로 띄우세요.'
       : item.kind === 'queued'
-        ? '팀장이 작업 중이라 메시지를 대기열에 넣었습니다 — 완료되면 자동으로 전달됩니다.'
+        ? '작업 중간에 바로 끼워 넣지 못해 대기열에 넣었습니다 — 팀장이 한가해지면 자동으로 전달됩니다.'
         : (isStuck ? '⚠️ 응답이 오래 걸리고 있습니다 — 먹통일 수 있습니다.' : (processingNow ? '팀장이 응답을 작성하는 중...' : '응답을 기다리는 중...'));
     // 전송 자체가 거절된 항목(kind==='failed') — 예전엔 빨간 안내를 chatTranscriptEl에 직접 끼워 넣었는데
     // 3초 폴링의 innerHTML 재렌더에 곧바로 지워져서 뭐가 문제인지 알아볼 새도 없이 사라졌다. 항목을
@@ -2167,44 +2167,37 @@ workTabEl.addEventListener('click', async e => {
     }
     return;
   }
-  const prioritySendBtn = e.target.closest('[data-priority-send]');
-  if (prioritySendBtn) {
+  const emergencyStopBtn = e.target.closest('[data-emergency-stop]');
+  if (emergencyStopBtn) {
     e.stopPropagation();
-    prioritySendLeadId = prioritySendBtn.dataset.prioritySend;
-    prioritySendInstructionEl.value = '';
-    prioritySendStatusEl.textContent = '';
-    showModal(prioritySendPanelEl);
+    emergencyStopLeadId = emergencyStopBtn.dataset.emergencyStop;
+    emergencyStopStatusEl.textContent = '';
+    showModal(emergencyStopPanelEl);
   }
 }, true);
 
-prioritySendCancelBtn.addEventListener('click', () => {
-  hideModal(prioritySendPanelEl);
-  prioritySendLeadId = null;
+emergencyStopNoBtn.addEventListener('click', () => {
+  hideModal(emergencyStopPanelEl);
+  emergencyStopLeadId = null;
 });
 
-prioritySendConfirmBtn.addEventListener('click', async () => {
-  const leadId = prioritySendLeadId;
-  const message = prioritySendInstructionEl.value.trim();
-  if (!leadId || !message) return;
-  prioritySendConfirmBtn.disabled = true;
-  prioritySendStatusEl.textContent = '지금 하던 작업을 중단하고 전달하는 중...';
+emergencyStopYesBtn.addEventListener('click', async () => {
+  const leadId = emergencyStopLeadId;
+  if (!leadId) return;
+  emergencyStopYesBtn.disabled = true;
+  emergencyStopStatusEl.textContent = '중지하는 중...';
   try {
-    const result = await window.api.sendToLead(leadId, message, true);
-    if (result && result.status === 'sent') {
-      hideModal(prioritySendPanelEl);
-      prioritySendLeadId = null;
-      if (selectedLeadId === leadId) await renderChat();
-    } else if (result && result.status === 'attach-open') {
-      prioritySendStatusEl.textContent = '터미널에서 직접 열어둔 창이 있어서 지금은 못 보냅니다 — 그 터미널을 닫고 다시 시도하세요.';
-    } else if (result && result.status === 'not-found') {
-      prioritySendStatusEl.textContent = '팀장을 찾을 수 없습니다(이미 삭제됐을 수 있음).';
+    if (await window.api.emergencyStopLead(leadId)) {
+      hideModal(emergencyStopPanelEl);
+      emergencyStopLeadId = null;
+      await refreshBoardNow();
     } else {
-      prioritySendStatusEl.textContent = '전달에 실패했습니다.';
+      emergencyStopStatusEl.textContent = '중지하지 못했습니다(이미 꺼졌거나 팀장을 찾을 수 없음) — 보드를 새로 고쳐 상태를 확인하세요.';
     }
   } catch (err) {
-    prioritySendStatusEl.textContent = `전달 중 오류가 발생했습니다: ${errMsg(err)}`;
+    emergencyStopStatusEl.textContent = `중지 중 오류가 발생했습니다: ${errMsg(err)}`;
   } finally {
-    prioritySendConfirmBtn.disabled = false;
+    emergencyStopYesBtn.disabled = false;
   }
 });
 

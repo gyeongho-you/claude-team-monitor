@@ -417,7 +417,7 @@ mark.find-match-current { background: var(--accent-2); color: #fff; }
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
-.priority-send-btn {
+.emergency-stop-btn {
   font-size: 11px;
   padding: 2px 8px;
   background: #5a2a2a;
@@ -425,8 +425,9 @@ mark.find-match-current { background: var(--accent-2); color: #fff; }
   border: 1px solid #833;
   border-radius: 3px;
 }
-.priority-send-btn:hover { background: #6a3232; }
-.priority-send-warning { color: var(--warning); }
+.emergency-stop-btn:hover { background: #6a3232; }
+.emergency-stop-warning { color: var(--warning); }
+#emergency-stop-yes-btn { background: var(--danger-strong); color: #fff; }
 .chat-turn { margin-bottom: 10px; }
 .chat-turn .chat-time { color: var(--text-dim); font-size: 10px; }
 .chat-turn .chat-prompt { color: var(--accent-3); margin: 2px 0; white-space: pre-wrap; }

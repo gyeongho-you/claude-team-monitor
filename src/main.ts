@@ -7,6 +7,7 @@ import { exec, execFile, spawn } from 'child_process';
 import { trackFirstMiss, pruneMissingKeys } from './lib/firstMissTracker';
 import { liveSubagents, backgroundOnly } from './lib/subagents';
 import { replyToSession } from './lib/daemonReply';
+import { queuedCommandPrompt, mergeInjectedPrompts } from './lib/transcriptMerge';
 import { hasNoLiveProcess } from './lib/ghostAgent';
 import { archiveMemberFile, restoreRetiredMembers } from './lib/retiredMembers';
 import { ATTACHMENTS_DIR, savePastedImage, purgeOld as purgeOldAttachments } from './lib/pastedImages';
@@ -213,10 +214,12 @@ type AgentEntry = {
 // 'working'과 달리 이건 "끝났는데도 안 풀리는" 종류가 아니라 "터미널에서 답하거나 daemon이 자체
 // 재기동하면서 자연히 풀리는" 종류라(오늘 실측: 두 경우 다 waitingFor가 사라짐) 영구 미배달로
 // 이어질 위험은 낮다고 판단했다.
-// busy로 보이지만 실제로는 팀장이 쉬고 백그라운드 명령(개발 서버 등)만 남은 경우 — 이런 팀장에게는 대기열에 쌓거나 정지(stop→resume,
-// 프로세스를 죽이진 않지만 깨어난 세션이 그 작업을 추적하지 못하게 된다)하지 않고 데몬 reply로 바로 전달한다(lib/daemonReply.js 참고). AskUserQuestion 등으로 멈춘 상태(input needed)는 제외한다.
-function isBackgroundOnlyAgent(agent: AgentEntry): boolean {
-  return agent.status === 'busy' && agent.waitingFor !== 'input needed' && !!agent.id && backgroundOnly(JOBS_DIR, agent.id) !== null;
+// 살아있는 팀장(일하는 중이든 쉬는 중이든)에게는 대기열에 쌓거나 정지(stop→resume)하지 않고, 터미널에서 입력하는 것처럼 데몬 reply로 바로
+// 전달한다(lib/daemonReply.js 참고) — 실측: 일하는 중이면 진행 중인 도구 호출이 끝난 다음 단계에서 세션이 받고 하던 작업을 이어가며
+// 반영하고, 터미널(attach)이 붙은 채로도 정상 전달되며 세션 복사본도 안 생긴다. 실패하면 기존 동작으로 돌아간다. 권한 확인 등으로 멈춘
+// 상태(blocked, status가 busy/idle이 아님)와 AskUserQuestion(input needed)은 제외한다.
+function canReplyDirectly(agent: AgentEntry): boolean {
+  return (agent.status === 'busy' || agent.status === 'idle') && agent.waitingFor !== 'input needed' && !!agent.id;
 }
 
 function isLeadTooBusyToInterrupt(agent: AgentEntry): boolean {
@@ -248,7 +251,7 @@ type SessionRow = AgentEntry & {
   lastActiveAt?: number; // 팀장 히스토리 행일 때만: 세션 원본 파일의 마지막 수정 시각(ms) — 저널이 안 남는 세션도 최근 대화순 정렬에 쓴다
 };
 
-type TranscriptEntry = { time: string; prompt: string; answer: string };
+type TranscriptEntry = { time: string; prompt: string; answer: string; injected?: boolean }; // injected: 일하는 도중 끼어든 메시지(queued_command)에서 온 항목
 
 type MemberRecord = {
   memberId: string;
@@ -554,7 +557,9 @@ function getTranscript(projectName: string, sessionId: string, cwd: string): Tra
     .filter(e => e.sessionId === sessionId)
     .map(e => ({ time: e.time ?? '', prompt: e.prompt ?? '', answer: e.answer ?? '' }));
   const filled = fillMissingTranscriptFromRawSession(journalEntries, cwd, sessionId);
-  return enrichAnswersFromRawSession(filled, cwd, sessionId);
+  // 일하는 도중 끼어든 메시지는 일지에 안 남으므로 원본에서 찾아 시간순 위치에 끼워 넣는다(lib/transcriptMerge.js 참고).
+  const merged = mergeInjectedPrompts(filled, getCachedRawSessionTranscript(cwd, sessionId).filter(e => e.injected));
+  return enrichAnswersFromRawSession(merged, cwd, sessionId);
 }
 
 // "YYYY-MM-DD HH:MM"(daily-journal의 time 포맷, 분 단위) 문자열을 로컬 시각 기준 epoch ms로
@@ -615,11 +620,11 @@ function readRawSessionTranscript(cwd: string, sessionId: string): TranscriptEnt
   }
 
   const entries: TranscriptEntry[] = [];
-  let currentPrompt: { time: string; prompt: string } | null = null;
+  let currentPrompt: { time: string; prompt: string; injected?: boolean } | null = null;
   let currentAnswerParts: string[] = [];
   const flush = () => {
     if (currentPrompt && currentPrompt.prompt.trim()) {
-      entries.push({ time: currentPrompt.time, prompt: currentPrompt.prompt, answer: currentAnswerParts.join('\n').trim() });
+      entries.push({ time: currentPrompt.time, prompt: currentPrompt.prompt, answer: currentAnswerParts.join('\n').trim(), ...(currentPrompt.injected && { injected: true }) });
     }
     currentPrompt = null;
     currentAnswerParts = [];
@@ -642,6 +647,13 @@ function readRawSessionTranscript(cwd: string, sessionId: string): TranscriptEnt
       if (promptText !== null && promptText.trim()) {
         flush();
         currentPrompt = { time: formatRawSessionTimestamp(rec.timestamp), prompt: promptText };
+      }
+    } else if (rec.type === 'attachment') {
+      // 일하는 도중 데몬 reply로 끼어든 메시지 — 새 턴의 시작으로 본다(lib/transcriptMerge.js 참고).
+      const injectedPrompt = queuedCommandPrompt(rec);
+      if (injectedPrompt !== null) {
+        flush();
+        currentPrompt = { time: formatRawSessionTimestamp(rec.timestamp), prompt: injectedPrompt, injected: true };
       }
     } else if (rec.type === 'assistant' && rec.message && currentPrompt) {
       const content = rec.message.content;
@@ -1382,16 +1394,6 @@ function deliverPendingNotices(agents: AgentEntry[], leads: LeadRecord[]): void 
     // 큐에 계속 묶어두면 영원히 배달 안 되는 메시지가 된다(2026-09-17 실사용 재현). blocked도 배달을
     // 시도해 stop→resume으로 깨우고, 세션 포크 방지는 resumeLead 안의 안전장치가 맡는다.
     const isBusy = !!liveAgent && isLeadTooBusyToInterrupt(liveAgent);
-    // "터미널에서 직접 열기"로 띄운 attach 창이 아직 붙어있으면 여기서 stop→resume을 시도하지
-    // 않는다(send-to-lead와 같은 이유, 위 isAttachTerminalOpenFor 주석 참고) — 다만 이건 busy와
-    // 달리 attempts를 소모시키지 않는다: 사람이 그 터미널에서 아직 답하고 있는 중일 뿐 실패한 게
-    // 아니므로, 시도 횟수를 깎지 않고 그냥 이번 폴링만 건너뛴다(창을 닫으면 다음 폴링부터 정상
-    // 배달된다).
-    const attachOpen = !!liveAgent?.id && isAttachTerminalOpenFor(liveAgent.id);
-    if (attachOpen) {
-      stillPending.push(...notices);
-      continue;
-    }
     // 영원히 stop이 안 되는 팀장(좀비 프로세스, 영구히 망가진 세션 등)에게는 재시도해봤자 매번
     // 실패한다 — 상한 없이 폴링마다 계속 resume을 시도하면 프로세스 스폰과 에러 로그만 무기한
     // 낭비된다(팀원 코드리뷰에서 지적). 상한을 넘으면 자동 재시도를 멈추고 큐에 그대로(제거하지
@@ -1403,15 +1405,23 @@ function deliverPendingNotices(agents: AgentEntry[], leads: LeadRecord[]): void 
       stillPending.push(...notices);
       continue;
     }
-    if (leadRec && liveAgent && isBackgroundOnlyAgent(liveAgent)) {
+    if (leadRec && liveAgent && canReplyDirectly(liveAgent)) {
       const replyMessage = combinePendingNoticeMessages(notices);
       const replyAttempted = notices.map(n => ({ ...n, attempts: (n.attempts ?? 0) + 1 }));
       replyToSession(liveAgent.id!, resolveLongPrompt(replyMessage))
-        .then(() => logCritical(`[deliverPendingNotices] 팀장 ${liveAgent.id}은(는) 백그라운드 작업만 남은 상태라 정지 없이 대기 중이던 알림을 바로 전달했습니다.`))
+        .then(() => logCritical(`[deliverPendingNotices] 팀장 ${liveAgent.id}은(는) 일하는 중이라 정지 없이 대기 중이던 알림을 도중에 바로 전달했습니다.`))
         .catch(err => {
           logCritical(`[deliverPendingNotices] 팀장 ${liveAgent.id}에 정지 없는 전달(reply)이 실패해 큐에 되돌립니다(시도 ${replyAttempted[0].attempts}/${MAX_NOTICE_DELIVERY_ATTEMPTS}) — ${err}`);
           requeuePendingNotices(replyAttempted);
         });
+      continue;
+    }
+    // 여기부터는 stop→resume 경로다. "터미널에서 직접 열기"로 띄운 attach 창이 아직 붙어있으면 stop→resume을 시도하지 않는다(send-to-lead와
+    // 같은 이유, 위 isAttachTerminalOpenFor 주석 참고) — 다만 이건 busy와 달리 attempts를 소모시키지 않는다: 사람이 그 터미널에서 아직
+    // 답하고 있는 중일 뿐 실패한 게 아니므로, 시도 횟수를 깎지 않고 그냥 이번 폴링만 건너뛴다(창을 닫으면 다음 폴링부터 정상 배달된다).
+    const attachOpen = !!liveAgent?.id && isAttachTerminalOpenFor(liveAgent.id);
+    if (attachOpen) {
+      stillPending.push(...notices);
       continue;
     }
     if (leadRec && liveAgent && !isBusy) {
@@ -3036,20 +3046,31 @@ async function cleanupLeadsStuckOnStartupDialog(liveLeadRows: SessionRow[], lead
 // 패턴으로 메시지를 큐(pendingNotices)에 원문 그대로 쌓아둔 뒤, buildSessionRows의 폴링이 그 팀장의
 // idle/blocked 전환을 감지했을 때 자동으로 resumeLead에 전달하게 한다. "끊지 않고 대기시켰다가
 // idle 되면 전달"이 지금 이 CLI로 가능한 최선이다.
-ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string, priority?: boolean) => {
+ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string) => {
   const lead = loadLeads().find(l => l.id === leadId);
   if (!lead) return { status: 'not-found' as const };
 
-  // "터미널에서 직접 열기"로 띄운 attach 창이 아직 이 세션에 붙어있으면, 여기서 stop→resume을
-  // 걸었다가 attach 쪽의 독립적인 재연결 시도와 경합해서 daemon이 복사본을 만들 수 있다(위
-  // isAttachTerminalOpenFor 주석 참고, 실사용 재현됨). 큐로 돌리지 않고(그러면 영원히 안 풀릴
-  // 수 있다) 바로 실패로 알려서 사용자가 터미널을 닫고 다시 보내게 한다.
+  const agents = await fetchAgents();
+  const agent = agents.find(a => a.id === leadId);
+  // 살아있는 팀장(일하는 중이든 쉬는 중이든)에게는 정지·대기열 없이 터미널처럼 바로 reply로 전달한다 — 일하는 중이면 하던 작업을 이어가며
+  // 반영한다(실측). 정지·재개가 아니라서 터미널(attach)이 열려 있어도 상관없다(시험: attach 상태에서도 정상 전달, 복사본 없음). 그래서
+  // 예전의 "우선 전달(정지 후 전달)"과 "터미널이 열려 있으면 못 보냄"은 이 경로에선 필요 없다. 작업을 멈추고 싶으면 화면의 긴급 중지를
+  // 쓴다. 실패하면 아래 기존 동작으로 이어진다.
+  if (agent && canReplyDirectly(agent)) {
+    try {
+      await replyToSession(leadId, resolveLongPrompt(message));
+      return { status: 'sent' as const, id: leadId };
+    } catch (err) {
+      logCritical(`[send-to-lead] 팀장 ${leadId}에 정지 없는 전달(reply)이 실패해 기존 방식으로 처리합니다 — ${err}`);
+    }
+  }
+
+  // 여기부터는 stop→resume 경로다. "터미널에서 직접 열기"로 띄운 attach 창이 아직 이 세션에 붙어있으면, stop→resume이 attach 쪽의 독립적인
+  // 재연결 시도와 경합해서 daemon이 복사본을 만들 수 있다(위 isAttachTerminalOpenFor 주석 참고, 실사용 재현됨). 큐로 돌리지 않고(그러면
+  // 영원히 안 풀릴 수 있다) 바로 실패로 알려서 사용자가 터미널을 닫고 다시 보내게 한다.
   if (isAttachTerminalOpenFor(leadId)) {
     return { status: 'attach-open' as const };
   }
-
-  const agents = await fetchAgents();
-  const agent = agents.find(a => a.id === leadId);
   // blocked(권한 승인 대기 등)는 busy와 달리 "언젠가 저절로 풀리는" 상태가 아니다 — headless라
   // 아무도 승인해줄 수 없어 사실상 무기한 멈춰있을 수 있다. 그래서 여기서 blocked를 busy처럼 큐로
   // 돌리면(한때 그렇게 해봤다가 실사용에서 바로 걸림, 2026-09-17) 메시지가 다시는 안 풀리는 큐에
@@ -3058,20 +3079,7 @@ ipcMain.handle('send-to-lead', async (_e, leadId: string, message: string, prior
   // (stop 성공 여부를 확인하고 실패하면 resume 자체를 포기함) 여기서는 busy만 큐로 돌리면 된다 —
   // 다만 "busy"는 status만이 아니라 isLeadTooBusyToInterrupt로 판정한다(위 주석 참고).
   const isBusy = !!agent && isLeadTooBusyToInterrupt(agent);
-  // priority(우선 전달)는 사용자가 화면에서 "지금 하던 작업은 중단됩니다" 경고를 보고 명시적으로
-  // 확인한 뒤에만 켜진다(renderer.js의 우선 전달 모달) — busy여도 큐로 돌리지 않고 아래 stop→resume
-  // 경로(blocked/idle 배달과 완전히 같은 안전장치)로 바로 태운다.
-  // 쉬는 중인데 백그라운드 명령만 남은 팀장이면 대기열에 쌓거나 정지하지 않고 바로 전달한다(우선 전달도 필요 없다 — 중단시킬 작업이
-  // 없다). 실패하면 아래 기존 동작으로 이어진다.
-  if (isBusy && agent && isBackgroundOnlyAgent(agent)) {
-    try {
-      await replyToSession(leadId, resolveLongPrompt(message));
-      return { status: 'sent' as const, id: leadId };
-    } catch (err) {
-      logCritical(`[send-to-lead] 팀장 ${leadId}에 정지 없는 전달(reply)이 실패해 기존 방식으로 처리합니다 — ${err}`);
-    }
-  }
-  if (isBusy && !priority) {
+  if (isBusy) {
     const noticeId = queueLeadNotice(lead.internalId, message, 'user');
     return { status: 'queued' as const, id: noticeId };
   }
@@ -3187,6 +3195,21 @@ ipcMain.handle('restart-lead', async (_e, leadId: string, instruction: string) =
   if (!lead) return { error: '팀장을 찾을 수 없습니다 — 이미 종료됐거나 목록이 갱신됐을 수 있습니다.' };
   const finalInstruction = instruction.trim() || '지금 상황을 파악하고 다음 작업을 시작해줘.';
   return queueLeadOperation(lead.internalId, () => restartLead(lead.internalId, finalInstruction));
+});
+
+// 긴급 중지 — 이 팀장 세션 하나만 그 자리에서 멈춘다(팀원은 건드리지 않는다, 팀원까지 정리하는 건 "작업 종료"). 대화는 그대로 남고
+// 이후 메시지를 보내면 다시 이어진다.
+ipcMain.handle('emergency-stop-lead', async (_e, leadId: string) => {
+  const lead = loadLeads().find(l => l.id === leadId);
+  if (!lead) return false;
+  return queueLeadOperation(lead.internalId, async () => {
+    const current = loadLeads().find(l => l.internalId === lead.internalId) ?? lead;
+    let stopped = await stopSession(current.id);
+    if (!stopped) stopped = await stopSession(current.id);
+    if (stopped) leadFirstMissAt.set(current.id, 0);
+    else logCritical(`[emergencyStopLead] 팀장 ${lead.internalId}(${current.id}) 정지에 실패했습니다.`);
+    return stopped;
+  });
 });
 
 ipcMain.handle('end-lead-work', async (_e, leadId: string) => {

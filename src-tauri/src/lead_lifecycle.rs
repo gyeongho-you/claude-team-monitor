@@ -399,6 +399,37 @@ pub async fn end_lead_work(internal_id: String) -> EndLeadWorkOutcome {
     EndLeadWorkOutcome { success: lead_stopped, member_failures }
 }
 
+/// 긴급 중지 — 이 팀장 세션 하나만 그 자리에서 멈춘다(팀원은 건드리지 않는다, 팀원까지 정리하는 건 "작업 종료"). 대화는 그대로 남고
+/// 이후 메시지를 보내면 다시 이어진다. endLeadWork의 마지막 단계와 같은 재시도·오프라인 표시 규칙을 쓴다.
+pub async fn emergency_stop_lead(internal_id: String) -> bool {
+    let Some(lead) = load_leads().into_iter().find(|l| l.internal_id.as_deref() == Some(internal_id.as_str())) else { return false };
+    let mut stopped = stop_session(lead.id.clone()).await;
+    if !stopped {
+        stopped = stop_session(lead.id.clone()).await;
+    }
+    if stopped {
+        board_state().lock().unwrap().lead_first_miss_at.insert(lead.id.clone(), 0);
+    } else {
+        log_critical(&format!("[emergencyStopLead] 팀장 {}({}) 정지에 실패했습니다.", internal_id, lead.id));
+    }
+    stopped
+}
+
+#[tauri::command]
+pub async fn emergency_stop_lead_command(lead_id: String) -> bool {
+    let Some(lead) = load_leads().into_iter().find(|l| l.id == lead_id) else { return false };
+    let Some(internal_id) = lead.internal_id else { return false };
+    let queue_key = internal_id.clone();
+    let handle = tokio::spawn(async move { queue_lead_operation(&queue_key, move || emergency_stop_lead(internal_id)).await });
+    match handle.await {
+        Ok(result) => result,
+        Err(join_err) => {
+            log_critical(&format!("[emergencyStopLead] 팀장 {lead_id} 중지 큐 작업이 panic했습니다(있어서는 안 되는 상황) — {join_err}"));
+            false
+        }
+    }
+}
+
 /// end-lead-work IPC 핸들러(main.ts:2849-2853)의 포팅.
 #[tauri::command]
 pub async fn end_lead_work_command(lead_id: String) -> EndLeadWorkOutcome {

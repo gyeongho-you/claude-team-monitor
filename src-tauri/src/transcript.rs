@@ -106,11 +106,11 @@ fn text_blocks(content: &serde_json::Value) -> Vec<String> {
 // 오는 assistant 메시지들의 text 블록을 모아 답변으로 짝짓는다.
 // 원본 세션 파일은 수~수십 MB까지 커질 수 있어서(실측 21MB) 3초 폴링마다 통째로 다시 파싱하면
 // 부담이 크다 — mtime이 그대로면 파싱 결과를 재사용한다(main.ts getCachedRawSessionTranscript와 동일).
-fn read_raw_session_transcript_cached(file: &Path) -> Vec<TranscriptEntry> {
+fn read_raw_session_flagged_cached(file: &Path) -> Vec<(TranscriptEntry, bool)> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     use std::time::SystemTime;
-    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, Vec<TranscriptEntry>)>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, Vec<(TranscriptEntry, bool)>)>>> = OnceLock::new();
     let Ok(mtime) = std::fs::metadata(file).and_then(|m| m.modified()) else { return Vec::new() };
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some((cached_mtime, entries)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(file) {
@@ -118,16 +118,46 @@ fn read_raw_session_transcript_cached(file: &Path) -> Vec<TranscriptEntry> {
             return entries.clone();
         }
     }
-    let entries = read_raw_session_transcript_from_file(file);
+    let entries = parse_raw_session_file(file);
     cache.lock().unwrap_or_else(|e| e.into_inner()).insert(file.to_path_buf(), (mtime, entries.clone()));
     entries
 }
 
+fn read_raw_session_transcript_cached(file: &Path) -> Vec<TranscriptEntry> {
+    read_raw_session_flagged_cached(file).into_iter().map(|(e, _)| e).collect()
+}
+
+/// 원본 기록 중 "일하는 도중에 끼어든 메시지"(queued_command)에서 온 항목만.
+fn read_raw_injected_cached(file: &Path) -> Vec<TranscriptEntry> {
+    read_raw_session_flagged_cached(file).into_iter().filter(|(_, injected)| *injected).map(|(e, _)| e).collect()
+}
+
 fn read_raw_session_transcript_from_file(file: &Path) -> Vec<TranscriptEntry> {
+    parse_raw_session_file(file).into_iter().map(|(e, _)| e).collect()
+}
+
+// 팀장이 일하는 도중에 데몬 reply(또는 팀원의 SendMessage)로 들어온 메시지는 일반 user 기록이 아니라
+// attachment(type=queued_command, prompt=원문)로 남는다(실측 2026-10-22) — 일지(daily-journal)에도 안 남는다. 터미널에서 일하는
+// 중간에 입력한 것과 같은 메시지라 새 턴의 시작으로 취급한다(그 뒤 이어지는 assistant 텍스트가 이 메시지의 답변이 된다).
+// 완료 알림(<task-notification>)도 같은 형태로 들어오지만 지금까지 대화창에 안 보이던 것이라 계속 제외한다.
+fn queued_command_prompt(rec: &serde_json::Value) -> Option<String> {
+    let att = rec.get("attachment")?;
+    if att.get("type")?.as_str()? != "queued_command" {
+        return None;
+    }
+    let prompt = att.get("prompt")?.as_str()?;
+    if prompt.trim().is_empty() || prompt.contains("<task-notification>") {
+        return None;
+    }
+    Some(prompt.to_string())
+}
+
+/// 원본 세션 파일 파싱 — 각 항목에 "끼어든 메시지에서 온 것인가"를 함께 돌려준다.
+fn parse_raw_session_file(file: &Path) -> Vec<(TranscriptEntry, bool)> {
     let Ok(content) = std::fs::read_to_string(file) else { return Vec::new() };
 
-    let mut entries: Vec<TranscriptEntry> = Vec::new();
-    let mut current_prompt: Option<(String, String)> = None; // (time, prompt)
+    let mut entries: Vec<(TranscriptEntry, bool)> = Vec::new();
+    let mut current_prompt: Option<(String, String, bool)> = None; // (time, prompt, injected)
     let mut current_answer_parts: Vec<String> = Vec::new();
 
     for line in content.split('\n') {
@@ -154,15 +184,26 @@ fn read_raw_session_transcript_from_file(file: &Path) -> Vec<TranscriptEntry> {
             }
             if let Some(text) = prompt_text {
                 if !text.trim().is_empty() {
-                    if let Some((time, prompt)) = current_prompt.take() {
+                    if let Some((time, prompt, injected)) = current_prompt.take() {
                         if !prompt.trim().is_empty() {
-                            entries.push(TranscriptEntry { time, prompt, answer: current_answer_parts.join("\n").trim().to_string() });
+                            entries.push((TranscriptEntry { time, prompt, answer: current_answer_parts.join("\n").trim().to_string() }, injected));
                         }
                     }
                     current_answer_parts.clear();
                     let time = format_raw_session_timestamp(rec.get("timestamp").and_then(|t| t.as_str()));
-                    current_prompt = Some((time, text));
+                    current_prompt = Some((time, text, false));
                 }
+            }
+        } else if rec_type == "attachment" {
+            if let Some(text) = queued_command_prompt(&rec) {
+                if let Some((time, prompt, injected)) = current_prompt.take() {
+                    if !prompt.trim().is_empty() {
+                        entries.push((TranscriptEntry { time, prompt, answer: current_answer_parts.join("\n").trim().to_string() }, injected));
+                    }
+                }
+                current_answer_parts.clear();
+                let time = format_raw_session_timestamp(rec.get("timestamp").and_then(|t| t.as_str()));
+                current_prompt = Some((time, text, true));
             }
         } else if rec_type == "assistant" && current_prompt.is_some() {
             if let Some(content_val) = rec.get("message").and_then(|m| m.get("content")) {
@@ -173,10 +214,37 @@ fn read_raw_session_transcript_from_file(file: &Path) -> Vec<TranscriptEntry> {
             }
         }
     }
-    if let Some((time, prompt)) = current_prompt.take() {
+    if let Some((time, prompt, injected)) = current_prompt.take() {
         if !prompt.trim().is_empty() {
-            entries.push(TranscriptEntry { time, prompt, answer: current_answer_parts.join("\n").trim().to_string() });
+            entries.push((TranscriptEntry { time, prompt, answer: current_answer_parts.join("\n").trim().to_string() }, injected));
         }
+    }
+    entries
+}
+
+// 일지(daily-journal)에는 끼어든 메시지가 안 남으므로, 일지 기준으로 만든 목록에 없는 끼어든 메시지를 시간순 위치에 끼워 넣는다.
+// 그렇지 않으면 뒤이어 보낸 일반 메시지가 일지에 쌓이는 순간 끼어든 메시지가 대화창에서 사라진다(뒷부분만 보충하는 규칙 때문).
+// 같은 문구가 이미 목록에 있으면(예: 일지가 비어 원본 전체를 쓴 경우) 중복으로 넣지 않는다 — 반복되는 문구("그래" 등)를 오인하지
+// 않도록 시간 차이가 10분 이내인 것만 같은 항목으로 본다.
+fn merge_injected_prompts(mut entries: Vec<TranscriptEntry>, injected: Vec<TranscriptEntry>) -> Vec<TranscriptEntry> {
+    const SAME_SLACK_MS: i64 = 10 * 60 * 1000;
+    for inj in injected {
+        let inj_ms = parse_journal_time_loose(&inj.time);
+        let already = entries.iter().any(|e| {
+            e.prompt == inj.prompt
+                && match (parse_journal_time_loose(&e.time), inj_ms) {
+                    (Some(a), Some(b)) => (a - b).abs() <= SAME_SLACK_MS,
+                    _ => true,
+                }
+        });
+        if already {
+            continue;
+        }
+        let pos = match inj_ms {
+            Some(ms) => entries.iter().position(|e| parse_journal_time_loose(&e.time).map_or(false, |t| t > ms)).unwrap_or(entries.len()),
+            None => entries.len(),
+        };
+        entries.insert(pos, inj);
     }
     entries
 }
@@ -265,7 +333,8 @@ pub(crate) fn get_transcript(project_name: &str, session_id: &str, cwd: &str) ->
         .collect();
     let file = session_file_path(cwd, session_id);
     let filled = fill_missing_transcript_from_raw_session_at(journal_entries, &file);
-    enrich_answers_from_raw_session_at(filled, &file)
+    let merged = merge_injected_prompts(filled, read_raw_injected_cached(&file));
+    enrich_answers_from_raw_session_at(merged, &file)
 }
 
 // enrichAnswersFromRawSession(main.ts)과 동일 — daily-journal의 answer는 Stop 훅이 넘겨주는 그
@@ -335,6 +404,62 @@ mod tests {
 
     fn write_lines(path: &Path, lines: &[&str]) {
         std::fs::write(path, lines.join("\n")).unwrap();
+    }
+
+    fn queued_command_line(ts: &str, prompt: &str) -> String {
+        serde_json::json!({ "type": "attachment", "timestamp": ts, "attachment": { "type": "queued_command", "prompt": prompt } }).to_string()
+    }
+
+    fn user_line(ts: &str, text: &str) -> String {
+        serde_json::json!({ "type": "user", "timestamp": ts, "message": { "role": "user", "content": text } }).to_string()
+    }
+
+    fn assistant_line(ts: &str, text: &str) -> String {
+        serde_json::json!({ "type": "assistant", "timestamp": ts, "message": { "content": [{ "type": "text", "text": text }] } }).to_string()
+    }
+
+    #[test]
+    fn queued_command_attachment_becomes_a_new_turn_whose_answer_is_what_follows() {
+        let path = temp_jsonl_path("queued");
+        let lines = [
+            user_line("2026-10-22T06:25:12Z", "원래 작업을 해줘"),
+            assistant_line("2026-10-22T06:25:15Z", "시작합니다"),
+            queued_command_line("2026-10-22T06:25:20Z", "추가 요청: 끝에 메모접수를 붙여줘"),
+            assistant_line("2026-10-22T06:25:40Z", "끝 +메모접수"),
+        ];
+        write_lines(&path, &lines.iter().map(String::as_str).collect::<Vec<_>>());
+        let flagged = parse_raw_session_file(&path);
+        assert_eq!(flagged.len(), 2);
+        assert!(!flagged[0].1 && flagged[1].1, "두 번째만 끼어든 메시지");
+        assert_eq!(flagged[0].0.prompt, "원래 작업을 해줘");
+        assert_eq!(flagged[0].0.answer, "시작합니다");
+        assert_eq!(flagged[1].0.prompt, "추가 요청: 끝에 메모접수를 붙여줘");
+        assert_eq!(flagged[1].0.answer, "끝 +메모접수");
+    }
+
+    #[test]
+    fn task_notifications_and_empty_prompts_arriving_as_queued_commands_are_ignored() {
+        let path = temp_jsonl_path("queued_skip");
+        let lines = [
+            user_line("2026-10-22T06:25:12Z", "작업"),
+            queued_command_line("2026-10-22T06:25:20Z", "<task-notification><task-id>abc</task-id></task-notification>"),
+            queued_command_line("2026-10-22T06:25:21Z", "   "),
+            assistant_line("2026-10-22T06:25:30Z", "답"),
+        ];
+        write_lines(&path, &lines.iter().map(String::as_str).collect::<Vec<_>>());
+        let flagged = parse_raw_session_file(&path);
+        assert_eq!(flagged.len(), 1, "알림은 지금까지처럼 대화창에 안 넣는다");
+        assert_eq!(flagged[0].0.answer, "답");
+    }
+
+    #[test]
+    fn merge_inserts_injected_prompts_missing_from_the_journal_in_time_order_without_duplicates() {
+        let e = |t: &str, p: &str| TranscriptEntry { time: t.to_string(), prompt: p.to_string(), answer: String::new() };
+        let journal = vec![e("2026-10-22 15:25", "첫 메시지"), e("2026-10-22 15:40", "나중 메시지")];
+        let injected = vec![e("2026-10-22 15:26", "끼어든 메시지"), e("2026-10-22 15:40", "나중 메시지")];
+        let merged = merge_injected_prompts(journal, injected);
+        let order: Vec<&str> = merged.iter().map(|x| x.prompt.as_str()).collect();
+        assert_eq!(order, vec!["첫 메시지", "끼어든 메시지", "나중 메시지"], "일지에 이미 있는 건 중복으로 넣지 않고, 없는 건 시간순 위치에 들어간다");
     }
 
     #[test]

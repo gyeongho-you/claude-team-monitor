@@ -46,6 +46,7 @@ pub fn run() {
       resume::resume_lead_command,
       lead_lifecycle::restart_lead_command,
       lead_lifecycle::end_lead_work_command,
+      lead_lifecycle::emergency_stop_lead_command,
       lead_lifecycle::launch_team_lead_command,
       lead_lifecycle::adopt_lead_command,
       lead_lifecycle::fork_session_as_lead_command,
