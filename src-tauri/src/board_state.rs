@@ -303,6 +303,7 @@ mod tests {
             startup_warning: None,
             last_active_at: None,
             subagents: None,
+            background_only: None,
         }
     }
 

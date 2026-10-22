@@ -170,6 +170,9 @@ pub struct SessionRow {
     // 살아있는 팀장 카드일 때만: 팀장이 띄운 서브에이전트가 지금 돌고 있으면 개수와 이름(읽기 전용 표시용).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagents: Option<crate::subagents::SubagentInfo>,
+    // 살아있는 팀장 카드일 때만: 팀장은 쉬는 중인데 백그라운드 명령(개발 서버 등)만 남아 데몬이 busy로 보고하는 경우.
+    #[serde(rename = "backgroundOnly", skip_serializing_if = "Option::is_none")]
+    pub background_only: Option<crate::subagents::BackgroundOnly>,
 }
 
 fn build_row(agent: AgentEntry, lead: Option<&LeadRecord>, member: Option<&MemberRecord>) -> SessionRow {
@@ -194,6 +197,7 @@ fn build_row(agent: AgentEntry, lead: Option<&LeadRecord>, member: Option<&Membe
         },
         startup_warning: if is_lead { lead.and_then(|l| l.startup_warning.clone()) } else { None },
         subagents: if is_lead { agent.id.as_deref().and_then(|id| crate::subagents::live_subagents(id, &agent.cwd, &agent.session_id)) } else { None },
+        background_only: if is_lead && agent.status.as_deref() == Some("busy") { agent.id.as_deref().and_then(crate::subagents::live_background_only) } else { None },
         last_active_at: None,
         project_name,
         preview,
@@ -290,6 +294,7 @@ fn build_lead_record_row(lead: &LeadRecord, offline: bool) -> SessionRow {
         startup_warning: lead.startup_warning.clone(),
         last_active_at: if offline { crate::transcript::session_last_modified_ms(&lead.target_dir, &lead.session_id) } else { None },
         subagents: None,
+        background_only: None,
     }
 }
 

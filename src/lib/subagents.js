@@ -26,6 +26,23 @@ function daemonLocalAgentCount(jobsDir, shortId) {
   } catch { return null; }
 }
 
+/**
+ * 팀장은 쉬는 중인데 백그라운드 명령(개발 서버 등)만 남아 데몬이 busy로 보고하는 경우.
+ * 실측(2026-10-22): 이때 state.json은 state=working / tempo=idle 이고 inFlight.kinds에 local_bash 등만 있다.
+ * 서브에이전트(local_agent)가 도는 동안은 tempo가 active로 유지되므로 구분된다.
+ * @returns {{count: number, kinds: string[]} | null}
+ */
+function backgroundOnly(jobsDir, shortId) {
+  if (!/^[A-Za-z0-9_-]+$/.test(shortId || '')) return null;
+  try {
+    const s = JSON.parse(fs.readFileSync(path.join(jobsDir, shortId, 'state.json'), 'utf-8'));
+    const f = s && s.inFlight;
+    if (!s || s.state !== 'working' || s.tempo !== 'idle' || !f || !Array.isArray(f.kinds) || typeof f.tasks !== 'number') return null;
+    if (f.tasks === 0 || f.kinds.includes('local_agent')) return null;
+    return { count: f.tasks, kinds: f.kinds };
+  } catch { return null; }
+}
+
 /** @returns {string[]} */
 function runningNamesFromFiles(parentJsonl, subagentsDir) {
   let files;
@@ -80,4 +97,4 @@ function liveSubagents(jobsDir, shortId, sessionFile) {
   return { count, names: runningNamesFromFiles(sessionFile, dir).slice(0, count) };
 }
 
-module.exports = { daemonLocalAgentCount, runningNamesFromFiles, liveSubagents };
+module.exports = { daemonLocalAgentCount, runningNamesFromFiles, liveSubagents, backgroundOnly };

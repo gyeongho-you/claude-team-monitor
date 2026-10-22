@@ -44,6 +44,39 @@ fn daemon_local_agent_count_in(jobs_dir: &Path, short_id: &str) -> Option<u32> {
     }
 }
 
+/// 팀장은 쉬는 중인데 백그라운드 명령(개발 서버 등)만 남아 데몬이 busy로 보고하는 경우의 정보.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct BackgroundOnly {
+    pub count: u32,
+    pub kinds: Vec<String>,
+}
+
+// 실측(2026-10-22, 디자인 팀장이 nuxt dev를 백그라운드로 띄워둔 채 쉬던 사례 + 같은 상황 재현 시험): 데몬은 이 경우에도
+// agents status를 busy로 주지만 state.json은 state=working / tempo=idle 이고 inFlight.kinds에 local_bash 등만 있다.
+// 서브에이전트(local_agent)가 도는 동안은 tempo가 active로 유지되므로 구분된다. 그래서 "working + tempo idle + 진행 중
+// 작업 있음 + local_agent 없음"일 때만 백그라운드 작업만 남은 상태로 본다.
+fn background_only_in(jobs_dir: &Path, short_id: &str) -> Option<BackgroundOnly> {
+    if !is_safe_id(short_id) {
+        return None;
+    }
+    let raw = std::fs::read_to_string(jobs_dir.join(short_id).join("state.json")).ok()?;
+    let data: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    if data.get("state")?.as_str()? != "working" || data.get("tempo")?.as_str()? != "idle" {
+        return None;
+    }
+    let in_flight = data.get("inFlight")?;
+    let tasks = in_flight.get("tasks")?.as_u64()? as u32;
+    let kinds: Vec<String> = in_flight.get("kinds")?.as_array()?.iter().filter_map(|k| k.as_str().map(str::to_string)).collect();
+    if tasks == 0 || kinds.iter().any(|k| k == "local_agent") {
+        return None;
+    }
+    Some(BackgroundOnly { count: tasks, kinds })
+}
+
+pub(crate) fn live_background_only(short_id: &str) -> Option<BackgroundOnly> {
+    background_only_in(&jobs_dir(), short_id)
+}
+
 fn find_between<'a>(s: &'a str, prefix: &str, end: char) -> Option<&'a str> {
     let start = s.find(prefix)? + prefix.len();
     let rest = &s[start..];
@@ -153,6 +186,25 @@ mod tests {
         assert_eq!(daemon_local_agent_count_in(&jobs, "cccc3333"), None);
         assert_eq!(daemon_local_agent_count_in(&jobs, "../x"), None);
         assert_eq!(daemon_local_agent_count_in(&jobs, "nothere1"), None);
+    }
+
+    #[test]
+    fn background_only_means_working_but_idle_tempo_with_no_subagents() {
+        let jobs = tmp("bgonly");
+        let w = |id: &str, body: &str| {
+            std::fs::create_dir_all(jobs.join(id)).unwrap();
+            std::fs::write(jobs.join(id).join("state.json"), body).unwrap();
+        };
+        // 실측 사례: 디자인 팀장(nuxt dev 백그라운드 + 아티팩트 감시)
+        w("aaaa1111", r#"{"state":"working","tempo":"idle","inFlight":{"tasks":3,"kinds":["local_bash","artifact_watch"]}}"#);
+        w("bbbb2222", r#"{"state":"working","tempo":"active","inFlight":{"tasks":1,"kinds":["local_bash"]}}"#);
+        w("cccc3333", r#"{"state":"working","tempo":"idle","inFlight":{"tasks":1,"kinds":["local_agent"]}}"#);
+        w("dddd4444", r#"{"state":"done","tempo":"idle","inFlight":{"tasks":0,"kinds":[]}}"#);
+        assert_eq!(background_only_in(&jobs, "aaaa1111"), Some(BackgroundOnly { count: 3, kinds: vec!["local_bash".into(), "artifact_watch".into()] }));
+        assert_eq!(background_only_in(&jobs, "bbbb2222"), None, "모델이 일하는 중(tempo active)이면 해당 없음");
+        assert_eq!(background_only_in(&jobs, "cccc3333"), None, "서브에이전트가 돌면 진짜 작업 중");
+        assert_eq!(background_only_in(&jobs, "dddd4444"), None);
+        assert_eq!(background_only_in(&jobs, "../x"), None);
     }
 
     #[test]
