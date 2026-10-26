@@ -1147,13 +1147,37 @@ async function renderChat() {
     ? `<button class="pending-choice-terminal-btn" data-attach="${escapeHtml(leadId)}">터미널에서 직접 열기</button>`
     : '';
   let pendingChoiceHtml = '';
-  if (row && row.waitingFor === 'input needed') {
+  // 선택지(AskUserQuestion)뿐 아니라 계획 승인·권한 확인(waitingFor="permission prompt")처럼 선택지 없이 멈춘 경우도 있다 —
+  // 멈춘 팀장이면 waitingFor가 무엇이든(또는 비어 있어도) 선택지부터 읽어 보고, 없으면 기다리는 내용(needs)을 보여 준다.
+  if (row && (row.waitingFor === 'input needed' || getStatus(row) === 'blocked' || row.waitingFor === 'permission prompt')) {
     let questions = null;
     try {
       questions = await window.api.getPendingChoice(leadId);
     } catch { /* 아래에서 questions가 null이면 그냥 안내를 안 보여준다 */ }
     if (mySeq !== renderChatSeq) return; // 위와 같은 이유로 최신 호출만 화면을 쓴다
-    if (questions && questions.length) {
+    if (!(questions && questions.length)) {
+      let unresolvable = null;
+      let needs = null;
+      try { unresolvable = await window.api.getChatUnresolvableDetail(leadId); } catch { /* 조회 실패 시 안내 없음 */ }
+      if (!unresolvable) { try { needs = await window.api.getBlockedNeeds(leadId); } catch { /* 조회 실패 시 안내 없음 */ } }
+      if (mySeq !== renderChatSeq) return;
+      if (unresolvable) {
+        pendingChoiceHtml = `
+        <div class="pending-choice pending-choice-unresolvable">
+          <div class="pending-choice-question">⚠ 채팅으로는 풀 수 없는 문제입니다 — 터미널에서 직접 확인하세요.</div>
+          <div class="pending-choice-detail">${escapeHtml(unresolvable)}</div>
+          <div class="pending-choice-options">${terminalBtnHtml}</div>
+        </div>`;
+      } else if (needs) {
+        const title = row.waitingFor === 'permission prompt' ? '⚠ 승인/권한 확인을 기다리고 있습니다 — 터미널에서 선택하세요.' : '⚠ 팀장이 사람의 확인을 기다리고 있습니다.';
+        pendingChoiceHtml = `
+        <div class="pending-choice">
+          <div class="pending-choice-question">${title}</div>
+          <div class="pending-choice-detail">${escapeHtml(needs === 'approve plan' ? '계획 승인 요청 (approve plan) — 계획을 승인할지, 수정을 요청할지 고릅니다.' : needs)}</div>
+          <div class="pending-choice-options">${terminalBtnHtml}</div>
+        </div>`;
+      }
+    } else {
       // AskUserQuestion 한 번 호출에 질문이 여러 개 실릴 수 있다 — 예전엔 질문마다 카드를 통째로
       // 반복해서 "터미널에서 직접 열기" 버튼까지 여러 개 찍혔다(실사용 지적, 2026-09-18: 답은 터미널
       // 하나로만 하는데 버튼이 여러 개면 어느 걸 눌러야 하는지 헷갈림). 첫 질문만 카드로 보여주고,
@@ -1168,24 +1192,6 @@ async function renderChat() {
           <div class="pending-choice-question">${escapeHtml(first.question)} ${extraBadge}</div>
           <div class="pending-choice-detail">선택지: ${first.options.map(o => escapeHtml(o.label)).join(' / ')}</div>
           ${restLineHtml}
-          <div class="pending-choice-options">${terminalBtnHtml}</div>
-        </div>
-      `;
-    }
-  } else if (row && getStatus(row) === 'blocked') {
-    // AskUserQuestion이 아니어도 채팅으로는 절대 못 푸는 blocked가 있다(예: 로그인 갱신 실패) —
-    // readChatUnresolvableBlockDetail 주석 참고. 이것도 확인되면 "왜 막혔는지" 설명 + 터미널 버튼만
-    // 보여준다(답변 버튼은 없음 — 애초에 채팅으로 답할 수 있는 종류가 아니므로).
-    let unresolvableDetail = null;
-    try {
-      unresolvableDetail = await window.api.getChatUnresolvableDetail(leadId);
-    } catch { /* 조회 실패 시 그냥 아무것도 안 보여준다 */ }
-    if (mySeq !== renderChatSeq) return;
-    if (unresolvableDetail) {
-      pendingChoiceHtml = `
-        <div class="pending-choice pending-choice-unresolvable">
-          <div class="pending-choice-question">⚠ 채팅으로는 풀 수 없는 문제입니다 — 터미널에서 직접 확인하세요.</div>
-          <div class="pending-choice-detail">${escapeHtml(unresolvableDetail)}</div>
           <div class="pending-choice-options">${terminalBtnHtml}</div>
         </div>
       `;

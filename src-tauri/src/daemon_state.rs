@@ -65,6 +65,33 @@ pub fn get_pending_choice_command(short_id: String) -> Option<Vec<PendingChoiceQ
     read_pending_choice_questions_in(&jobs_dir(), &short_id)
 }
 
+/// 멈춘(blocked) 세션이 기다리는 것 — state.json의 needs(없으면 detail). 선택지(block.questions)가 없는 멈춤을 채팅에 알리는 용도.
+/// 실측(2026-10-26, claude 2.1.310): ExitPlanMode 승인 대기는 agents --json에 waitingFor="permission prompt",
+/// state.json에 {"tempo":"blocked","needs":"approve plan"}만 남고 block.questions가 없다 — 예전엔 이런 멈춤이 채팅에 아무 표시가 없었다.
+/// 팀장이 자연어로 물어보고 멈춘 경우도 needs에 그 요약이 들어 있다.
+fn read_blocked_needs_in(jobs_dir: &Path, short_id: &str) -> Option<String> {
+    if !is_safe_id(short_id) {
+        return None;
+    }
+    let raw = std::fs::read_to_string(state_json_path(jobs_dir, short_id)).ok()?;
+    let data: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let blocked = data.get("state").and_then(|s| s.as_str()) == Some("blocked") || data.get("tempo").and_then(|s| s.as_str()) == Some("blocked");
+    if !blocked {
+        return None;
+    }
+    ["needs", "detail"]
+        .iter()
+        .filter_map(|k| data.get(*k).and_then(|v| v.as_str()))
+        .map(str::trim)
+        .find(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+#[tauri::command]
+pub fn get_blocked_needs_command(short_id: String) -> Option<String> {
+    read_blocked_needs_in(&jobs_dir(), &short_id)
+}
+
 // CHAT_UNRESOLVABLE_DETAIL_PATTERNS(main.ts:2678) — 채팅으로는 절대 못 풀리는 blocked 상태를
 // 좁게 잡는다(사람이 터미널에서 직접 /login 등을 해야 풀리는 경우, 실사용 확인: 2026-09-17). claude
 // CLI가 로그인 갱신 실패 때 남기는 문구가 이것뿐이라는 보장은 없다(버전이 바뀌면 문구가 달라질 수
@@ -213,6 +240,20 @@ mod tests {
         let dir = temp_jobs_dir("unrelated");
         write_state(&dir, "job1", r#"{"state":"blocked","detail":"어떤 다른 이유로 멈춤"}"#);
         assert!(read_chat_unresolvable_block_detail_in(&dir, "job1").is_none(), "알려진 패턴이 아니면 None이어야 한다(오탐보다 미탐이 낫다는 판단)");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn blocked_needs_reads_needs_then_detail_only_when_blocked() {
+        let dir = temp_jobs_dir("needs");
+        // 실측: 계획 승인 대기
+        write_state(&dir, "job1", r#"{"state":"working","tempo":"blocked","detail":"","needs":"approve plan"}"#);
+        assert_eq!(read_blocked_needs_in(&dir, "job1").as_deref(), Some("approve plan"));
+        write_state(&dir, "job2", r#"{"state":"blocked","tempo":"blocked","detail":"병합 승인 대기","needs":"  "}"#);
+        assert_eq!(read_blocked_needs_in(&dir, "job2").as_deref(), Some("병합 승인 대기"), "needs가 비면 detail");
+        write_state(&dir, "job3", r#"{"state":"working","tempo":"active","needs":"x"}"#);
+        assert!(read_blocked_needs_in(&dir, "job3").is_none(), "멈춘 게 아니면 무시");
+        assert!(read_blocked_needs_in(&dir, "../x").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

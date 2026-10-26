@@ -209,6 +209,9 @@
     return invoke('get_pending_choice_command', { shortId });
   }
 
+  async function getBlockedNeeds(shortId) {
+    return invoke('get_blocked_needs_command', { shortId });
+  }
   async function getChatUnresolvableDetail(shortId) {
     return invoke('get_chat_unresolvable_detail_command', { shortId });
   }
@@ -307,6 +310,7 @@
     getLeadTranscript,
     getPendingChoice,
     getChatUnresolvableDetail,
+    getBlockedNeeds,
     getChangedFiles,
     getFileDiff,
     sendToLead,

@@ -3032,6 +3032,24 @@ function readChatUnresolvableBlockDetail(shortId: string): string | null {
 
 ipcMain.handle('get-chat-unresolvable-detail', (_e, shortId: string) => readChatUnresolvableBlockDetail(shortId));
 
+// 멈춘(blocked) 세션이 기다리는 것 — state.json의 needs(없으면 detail). 선택지(block.questions)가 없는 멈춤(계획 승인·권한 확인·자연어 질문)을 채팅에 알리는 용도(Rust daemon_state.rs와 같은 규칙).
+function readBlockedNeeds(shortId: string): string | null {
+  if (!isSafeId(shortId)) return null;
+  try {
+    const data = JSON.parse(fs.readFileSync(path.join(JOBS_DIR, shortId, 'state.json'), 'utf-8'));
+    if (data?.state !== 'blocked' && data?.tempo !== 'blocked') return null;
+    for (const k of ['needs', 'detail']) {
+      const v = typeof data?.[k] === 'string' ? data[k].trim() : '';
+      if (v) return v;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+ipcMain.handle('get-blocked-needs', (_e, shortId: string) => readBlockedNeeds(shortId));
+
 // 워크스페이스 신뢰(trust) 승인이 안 된 디렉토리에서 claude --bg를 띄우면(readiness 하드 블락을
 // 경고로 완화한 뒤부터 실제로 일어날 수 있음, 실측 확인: 2026-09-23 Tauri UI 재검증) 세션이
 // 시작 단계 트러스트 다이얼로그에서 그대로 멈춘다 — 헤드리스라 아무도 그 다이얼로그를 눌러줄 수

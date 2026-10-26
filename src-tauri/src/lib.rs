@@ -78,6 +78,7 @@ pub fn run() {
       transcript::get_lead_transcript_command,
       daemon_state::get_pending_choice_command,
       daemon_state::get_chat_unresolvable_detail_command,
+      daemon_state::get_blocked_needs_command,
       lead_admin::delete_lead_history_command,
       lead_admin::set_lead_auto_stall_nudge_command,
       lead_admin::update_lead_label_command,
