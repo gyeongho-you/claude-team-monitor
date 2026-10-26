@@ -89,6 +89,16 @@
             <button id="end-work-cancel-btn">취소</button>
             <div id="end-work-status"></div>
           </div>
+          <div id="activity-panel" class="modal-panel" hidden>
+            <div class="activity-head">
+              <strong id="activity-title"></strong>
+              <span id="activity-sub"></span>
+              <span class="activity-spacer"></span>
+              <button id="activity-refresh-btn" title="새로고침">⟳</button>
+              <button id="activity-close-btn">닫기</button>
+            </div>
+            <div id="activity-body"></div>
+          </div>
           <div id="emergency-stop-panel" class="modal-panel" hidden>
             <p class="form-hint emergency-stop-warning">⚠ 이 팀장이 지금 하던 작업을 그 자리에서 중단합니다(진행 중이던 응답은 잘릴 수 있음). 대화 내용은 그대로 남고, 메시지를 보내면 다시 이어집니다. 긴급 중지할까요?</p>
             <button id="emergency-stop-yes-btn" class="stop-btn">예</button>
@@ -143,6 +153,14 @@
           <h2>서브에이전트 <span id="subagent-count" class="subagent-count"></span></h2>
         </div>
         <div id="subagent-row" class="member-row"></div>
+      </div>
+
+      <div id="background-section" hidden>
+        <div class="section-header">
+          <h2>백그라운드 작업 <span id="background-count" class="subagent-count"></span></h2>
+        </div>
+        <p class="form-hint" id="background-hint"></p>
+        <div id="background-list"></div>
       </div>
 
       <div id="member-section">
@@ -302,6 +320,7 @@
         <h3>1. 작업 탭 — 팀장 카드와 채팅</h3>
         <img src="help/01-work-tab.png" alt="작업 탭" />
         <p>지금 떠있는 팀장이 카드로 보입니다. 카드를 누르면 오른쪽에 그 팀장과의 대화창이 열립니다. 카드 위쪽 배지로 지금 상태를 바로 알 수 있습니다 — <strong>● 작업 중</strong>(실제로 작업 중), <strong>대기 중</strong>(할 일을 기다리는 중), <strong>⚠ 확인 필요</strong>(응답 없이 멈춰서 확인이 필요함), <strong>⚠ 선택지 응답 대기</strong>(팀장이 여러 선택지 중 하나를 골라달라고 멈춰있음), <strong>완료</strong>, <strong>오프라인</strong>(꺼져있거나 재시작 대기 중). 시크릿 모드로 띄운 팀장은 배지 옆에 🔒가 붙습니다(자세한 내용은 아래 "2. 새 팀장 띄우기" 참고). 이름표를 눌러 라벨을 바로 바꿀 수도 있습니다. 대화창 아래 입력창으로 메시지를 보내면, 팀장이 일하는 중이어도 터미널에서 도중에 입력하는 것처럼 <strong>작업 중간에 바로 전달</strong>되고 팀장은 하던 작업을 이어가면서 반영합니다. 어떤 이유로 바로 끼워 넣지 못하면 대기열에 쌓였다가 한가해질 때 전달됩니다. 팀장이 멈춘 듯하거나 하던 일을 당장 그만두게 하고 싶을 때는 일하는 중에 보이는 "⛔ 긴급 중지"를 누르세요(확인창에서 예/아니요). 그 팀장 세션만 멈추고 대화는 남으며, 메시지를 보내면 다시 이어집니다.</p>
+        <p><strong>서브에이전트·팀원·백그라운드 작업 들여다보기</strong> — 팀장이 일을 나눠 맡기면 팀원 칸 위에 <strong>서브에이전트</strong> 칸이, 개발 서버 같은 명령을 백그라운드로 돌리면 <strong>백그라운드 작업</strong> 칸이 생깁니다. 서브에이전트·팀원 카드의 "대화 보기"를 누르면 그가 받은 지시, 응답, 쓴 도구(명령·파일)를 읽기 전용으로 볼 수 있고(열려 있는 동안 자동 새로고침), 백그라운드 작업의 "출력 보기"로 그 명령의 최근 출력을 볼 수 있습니다. 백그라운드 작업은 팀장 기록과 실제 프로세스를 대조해 보여 줍니다 — 프로세스 확인이 안 될 때만 데몬이 센 개수만큼 "완료 알림이 없는 최근 것"을 프로세스를 확인해 <strong>지금 실제로 떠 있는 것만</strong> 위에 보여 주고, 끝난 작업은 접어 둡니다. 대화 보기에서는 지시·응답·보고가 본문으로 보이고 연속된 도구 호출은 한 줄로 접힙니다(눌러서 펼침).</p>
         <p><strong>📎 파일 첨부</strong> — 입력창 아래 "📎 파일 첨부"를 누르거나 파일을 창에 끌어다 놓으면 입력창 아래에 첨부 칩이 생깁니다(✕로 취소). 전송하면 첨부한 파일의 <strong>전체 경로</strong>가 메시지 끝에 자동으로 함께 전달되므로, 경로를 일일이 찾아 붙여넣지 않아도 됩니다. 팀장은 그 경로의 파일을 직접 읽습니다(파일 내용 자체가 복사돼 가는 것은 아닙니다). 글 없이 첨부만 보내도 됩니다. 첨부는 선택한 팀장별로 따로 보관됩니다. <strong>이미지는 복사한 뒤 입력창에서 Ctrl+V</strong>로 붙여넣으면 앱이 파일로 저장해 같은 방식으로 첨부합니다(저장 위치: 사용자 폴더의 .claude/claude-team-monitor/attachments, 3일이 지나면 자동 삭제).</p>
       </section>
       <section class="help-section">

@@ -16,9 +16,17 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct SubagentRef {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SubagentInfo {
     pub count: u32,
     pub names: Vec<String>,
+    /// 이름과 같은 순서의 (id, 이름) — id가 있어야 그 서브에이전트의 대화를 열어 볼 수 있다.
+    pub items: Vec<SubagentRef>,
 }
 
 fn read_records(file: &Path) -> Vec<serde_json::Value> {
@@ -27,21 +35,31 @@ fn read_records(file: &Path) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
-/// 데몬 state.json에서 live 서브에이전트 개수. local_agent가 없거나 0이면 None.
-fn daemon_local_agent_count_in(jobs_dir: &Path, short_id: &str) -> Option<u32> {
+/// 데몬 state.json의 inFlight.tasks. kinds에 kind가 없거나 0이면 None.
+fn daemon_count_of_kind_in(jobs_dir: &Path, short_id: &str, kind: &str) -> Option<u32> {
     if !is_safe_id(short_id) {
         return None;
     }
     let raw = std::fs::read_to_string(jobs_dir.join(short_id).join("state.json")).ok()?;
     let data: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let in_flight = data.get("inFlight")?;
-    let has_local_agent = in_flight.get("kinds")?.as_array()?.iter().any(|k| k.as_str() == Some("local_agent"));
+    let has_kind = in_flight.get("kinds")?.as_array()?.iter().any(|k| k.as_str() == Some(kind));
     let tasks = in_flight.get("tasks")?.as_u64()? as u32;
-    if has_local_agent && tasks > 0 {
+    if has_kind && tasks > 0 {
         Some(tasks)
     } else {
         None
     }
+}
+
+/// 데몬 state.json에서 live 서브에이전트 개수. local_agent가 없거나 0이면 None.
+fn daemon_local_agent_count_in(jobs_dir: &Path, short_id: &str) -> Option<u32> {
+    daemon_count_of_kind_in(jobs_dir, short_id, "local_agent")
+}
+
+/// 데몬이 센 백그라운드 셸 명령(local_bash) 개수 — 화면의 "백그라운드 작업" 칸이 알림 없는 것 중 몇 개가 지금 돌고 있는지 추정하는 기준.
+pub(crate) fn live_local_bash_count(short_id: &str) -> Option<u32> {
+    daemon_count_of_kind_in(&jobs_dir(), short_id, "local_bash")
 }
 
 /// 팀장은 쉬는 중인데 백그라운드 명령(개발 서버 등)만 남아 데몬이 busy로 보고하는 경우의 정보.
@@ -85,6 +103,11 @@ fn find_between<'a>(s: &'a str, prefix: &str, end: char) -> Option<&'a str> {
 
 /// 파일 기반 규칙으로 지금 실행 중으로 보이는 서브에이전트들의 description.
 fn running_names_from_files(parent_jsonl: &Path, subagents_dir: &Path) -> Vec<String> {
+    running_agents_from_files(parent_jsonl, subagents_dir).into_iter().map(|(_, name)| name).collect()
+}
+
+/// 위와 같은 규칙으로 (id, description)을 돌려준다 — id가 있어야 그 서브에이전트의 대화 파일(agent-<id>.jsonl)을 열 수 있다.
+fn running_agents_from_files(parent_jsonl: &Path, subagents_dir: &Path) -> Vec<(String, String)> {
     let mut by_tool: HashMap<String, String> = HashMap::new();
     let mut desc: HashMap<String, String> = HashMap::new();
     let Ok(entries) = std::fs::read_dir(subagents_dir) else { return Vec::new() };
@@ -147,7 +170,10 @@ fn running_names_from_files(parent_jsonl: &Path, subagents_dir: &Path) -> Vec<St
     order
         .into_iter()
         .filter(|id| last.get(id) == Some(&true))
-        .map(|id| desc.get(&id).cloned().unwrap_or(id))
+        .map(|id| {
+            let name = desc.get(&id).cloned().unwrap_or_else(|| id.clone());
+            (id, name)
+        })
         .collect()
 }
 
@@ -156,9 +182,11 @@ pub(crate) fn live_subagents(short_id: &str, cwd: &str, session_id: &str) -> Opt
     let count = daemon_local_agent_count_in(&jobs_dir(), short_id)?;
     let parent = crate::transcript::session_file_path(cwd, session_id);
     let dir = parent.with_extension("").join("subagents");
-    let mut names = running_names_from_files(&parent, &dir);
-    names.truncate(count as usize);
-    Some(SubagentInfo { count, names })
+    let mut agents = running_agents_from_files(&parent, &dir);
+    agents.truncate(count as usize);
+    let names = agents.iter().map(|(_, n)| n.clone()).collect();
+    let items = agents.into_iter().map(|(id, name)| SubagentRef { id, name }).collect();
+    Some(SubagentInfo { count, names, items })
 }
 
 #[cfg(test)]

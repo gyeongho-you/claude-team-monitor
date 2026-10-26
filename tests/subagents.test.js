@@ -43,5 +43,5 @@ test('liveSubagents는 데몬 개수가 없으면 null, 이름 수는 개수를 
   fs.writeFileSync(parent, '');
   assert.strictEqual(liveSubagents(jobs, 'aaaa1111', parent), null);
   fs.writeFileSync(path.join(jobs, 'aaaa1111', 'state.json'), '{"inFlight":{"tasks":1,"queued":0,"kinds":["local_agent"]}}');
-  assert.deepStrictEqual(liveSubagents(jobs, 'aaaa1111', parent), { count: 1, names: [] });
+  assert.deepStrictEqual(liveSubagents(jobs, 'aaaa1111', parent), { count: 1, names: [], items: [] });
 });

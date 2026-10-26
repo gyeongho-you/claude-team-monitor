@@ -417,6 +417,36 @@ mark.find-match-current { background: var(--accent-2); color: #fff; }
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
+/* 대화(활동) 보기 모달과 백그라운드 작업 칸 */
+#activity-panel { width: min(820px, 92vw); }
+.activity-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.activity-head #activity-sub { color: var(--text-dim); font-size: 11px; }
+.activity-spacer { flex: 1; }
+#activity-body { max-height: 62vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; padding: 6px; background: var(--bg); }
+.activity-item { padding: 4px 6px; border-left: 3px solid var(--border-2); margin-bottom: 6px; }
+.activity-item.activity-user { border-left-color: var(--accent); }
+.activity-item.activity-assistant { border-left-color: var(--success); }
+.activity-item.activity-tool { border-left-color: var(--border-2); opacity: 0.85; }
+.activity-meta { display: flex; justify-content: space-between; color: var(--text-muted); font-size: 10px; }
+.activity-text { white-space: pre-wrap; word-break: break-word; font-size: 12px; }
+.activity-tool .activity-text { font-family: Consolas, monospace; font-size: 11px; color: var(--text-soft); }
+.activity-output { margin: 0; white-space: pre-wrap; word-break: break-word; font-family: Consolas, monospace; font-size: 11px; }
+#background-section { padding-bottom: 20px; }
+#background-hint { margin: 0 0 6px; }
+.activity-item.activity-message { border-left-color: var(--warning); background: var(--surface); }
+.activity-message .activity-text { font-size: 13px; }
+.activity-tools { margin-bottom: 6px; }
+.activity-tools > summary { cursor: pointer; color: var(--text-muted); font-size: 11px; padding: 2px 6px; }
+.activity-tools .activity-item { margin-left: 8px; }
+.bg-ended { margin-top: 4px; }
+.bg-ended > summary { cursor: pointer; color: var(--text-muted); font-size: 11px; padding: 2px 4px; }
+.bg-task { background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--border-2); border-radius: 4px; padding: 6px 10px; margin-bottom: 6px; }
+.bg-task-main { display: flex; align-items: center; gap: 8px; }
+.bg-cmd { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--text-soft); }
+.bg-task-meta { display: flex; align-items: center; gap: 12px; margin-top: 4px; font-size: 10px; color: var(--text-muted); }
+.bg-task-meta button { margin-left: auto; font-size: 11px; padding: 1px 8px; cursor: pointer; }
+.bg-badge { flex-shrink: 0; font-size: 10px; padding: 0 6px; border-radius: 8px; background: var(--surface-2); border: 1px solid var(--border-2); color: var(--text-muted); }
+.bg-badge.bg-running { color: #1e1e1e; background: var(--warning); border-color: var(--warning); }
 .emergency-stop-btn {
   font-size: 11px;
   padding: 2px 8px;

@@ -6,6 +6,10 @@ contextBridge.exposeInMainWorld('api', {
   },
   pickDirectory: () => ipcRenderer.invoke('pick-directory'),
   pickFiles: () => ipcRenderer.invoke('pick-files'),
+  getMemberActivity: (cwd: string, sessionId: string) => ipcRenderer.invoke('get-member-activity', cwd, sessionId),
+  getSubagentActivity: (leadId: string, agentId: string) => ipcRenderer.invoke('get-subagent-activity', leadId, agentId),
+  getBackgroundTasks: (leadId: string) => ipcRenderer.invoke('get-background-tasks', leadId),
+  getTaskOutput: (leadId: string, taskId: string) => ipcRenderer.invoke('get-task-output', leadId, taskId),
   savePastedImage: (dataBase64: string, mime: string) => ipcRenderer.invoke('save-pasted-image', dataBase64, mime),
   // Electron은 창에 떨어뜨린 파일을 HTML5 drop으로 주고, 경로는 webUtils.getPathForFile로 얻는다.
   onFilesDropped: (callback: (paths: string[]) => void) => {

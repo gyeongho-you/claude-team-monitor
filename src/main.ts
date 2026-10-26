@@ -5,7 +5,8 @@ import * as os from 'os';
 import * as crypto from 'crypto';
 import { exec, execFile, spawn } from 'child_process';
 import { trackFirstMiss, pruneMissingKeys } from './lib/firstMissTracker';
-import { liveSubagents, backgroundOnly } from './lib/subagents';
+import { liveSubagents, backgroundOnly, daemonLocalBashCount } from './lib/subagents';
+import { readActivity, subagentFile, backgroundTasksFor, readTaskOutput } from './lib/activity';
 import { replyToSession } from './lib/daemonReply';
 import { queuedCommandPrompt, mergeInjectedPrompts } from './lib/transcriptMerge';
 import { hasNoLiveProcess } from './lib/ghostAgent';
@@ -257,8 +258,9 @@ type SessionRow = AgentEntry & {
   resumeRetrying?: { attempt: number; max: number };
   secret?: boolean; // 팀장·팀원 카드 공통: LeadRecord.secret/MemberRecord.secret을 그대로 반영 — 🔒 표시용
   startupWarning?: string; // 팀장 카드일 때만: LeadRecord.startupWarning 그대로 반영 — 히스토리 카드에 경고로 표시
+  backgroundTasks?: number; // 살아있는 팀장 카드일 때만: 데몬이 센 백그라운드 셸 명령(local_bash) 개수
   backgroundOnly?: { count: number; kinds: string[] }; // 살아있는 팀장 카드일 때만: 팀장은 쉬는 중인데 백그라운드 명령(개발 서버 등)만 남아 데몬이 busy로 보고하는 경우
-  subagents?: { count: number; names: string[] }; // 살아있는 팀장 카드일 때만: 팀장이 띄운 서브에이전트가 지금 돌고 있으면 개수·이름(읽기 전용 표시용)
+  subagents?: { count: number; names: string[]; items?: { id: string; name: string }[] }; // 살아있는 팀장 카드일 때만: 팀장이 띄운 서브에이전트가 지금 돌고 있으면 개수·이름(읽기 전용 표시용)
   lastActiveAt?: number; // 팀장 히스토리 행일 때만: 세션 원본 파일의 마지막 수정 시각(ms) — 저널이 안 남는 세션도 최근 대화순 정렬에 쓴다
 };
 
@@ -1120,6 +1122,7 @@ function computeLiveRows(
         autoStallNudge: isLead ? lead?.autoStallNudge : undefined,
         secret: isLead ? lead?.secret : member?.secret,
         subagents: isLead ? liveSubagents(JOBS_DIR, a.id!, sessionFilePath(a.cwd, a.sessionId)) ?? undefined : undefined,
+        backgroundTasks: isLead ? daemonLocalBashCount(JOBS_DIR, a.id!) ?? undefined : undefined,
         backgroundOnly: isLead && a.status === 'busy' ? backgroundOnly(JOBS_DIR, a.id!) ?? undefined : undefined,
       };
     });
@@ -2778,6 +2781,27 @@ ipcMain.handle('pick-files', async () => {
   const result = await dialog.showOpenDialog(mainWindow, { properties: ['openFile', 'multiSelections'] });
   return result.canceled ? [] : result.filePaths;
 });
+
+// 서브에이전트·팀원의 대화(활동) 기록과 팀장의 백그라운드 셸 작업 보기(lib/activity.js 참고) — 모두 읽기 전용.
+ipcMain.handle('get-member-activity', (_e, cwd: string, sessionId: string) => (isSafeId(sessionId) ? readActivity(sessionFilePath(cwd, sessionId)) : []));
+ipcMain.handle('get-subagent-activity', (_e, leadId: string, agentId: string) => {
+  const lead = loadLeads().find(l => l.id === leadId);
+  const file = lead ? subagentFile(sessionFilePath(lead.targetDir, lead.sessionId), agentId) : null;
+  return file ? readActivity(file) : [];
+});
+function leadBackgroundTasks(leadId: string) {
+  const lead = loadLeads().find(l => l.id === leadId);
+  if (!lead) return [];
+  return backgroundTasksFor(sessionFilePath(lead.targetDir, lead.sessionId), daemonLocalBashCount(JOBS_DIR, lead.id) ?? 0);
+}
+// outputPath(출력 파일의 실제 경로)는 화면에 넘기지 않는다 — 출력은 아래 get-task-output으로만 읽는다.
+ipcMain.handle('get-background-tasks', (_e, leadId: string) =>
+  leadBackgroundTasks(leadId).map((t: { outputPath: string }) => {
+    const { outputPath: _hidden, ...rest } = t;
+    return rest;
+  }),
+);
+ipcMain.handle('get-task-output', (_e, leadId: string, taskId: string) => (isSafeId(taskId) ? readTaskOutput(leadBackgroundTasks(leadId).find((t: { taskId: string }) => t.taskId === taskId)) : ''));
 
 ipcMain.handle('get-favorites', () => loadFavorites());
 

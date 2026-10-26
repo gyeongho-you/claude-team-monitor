@@ -130,11 +130,12 @@ const historyDeleteCancelBtn = document.getElementById('history-delete-cancel-bt
 const helpBtn = document.getElementById('help-btn');
 const helpPanelEl = document.getElementById('help-panel');
 const helpCloseBtn = document.getElementById('help-close-btn');
+const activityPanelEl = document.getElementById('activity-panel');
 const emergencyStopPanelEl = document.getElementById('emergency-stop-panel');
 const emergencyStopYesBtn = document.getElementById('emergency-stop-yes-btn');
 const emergencyStopNoBtn = document.getElementById('emergency-stop-no-btn');
 const emergencyStopStatusEl = document.getElementById('emergency-stop-status');
-const ALL_MODAL_PANELS = () => [restartLeadPanelEl, endWorkPanelEl, fileListPanelEl, cleanupStopPanelEl, historyDeletePanelEl, helpPanelEl, emergencyStopPanelEl];
+const ALL_MODAL_PANELS = () => [restartLeadPanelEl, endWorkPanelEl, fileListPanelEl, cleanupStopPanelEl, historyDeletePanelEl, helpPanelEl, emergencyStopPanelEl, activityPanelEl];
 // 긴급 중지 모달이 지금 누구 앞으로 뜬 건지 — 배너 버튼을 누른 시점의 리드 id를 기억해뒀다가
 // "예"를 눌렀을 때(그 사이 selectedLeadId가 바뀌었을 수 있으므로) 그 리드를 정확히 멈춘다.
 let emergencyStopLeadId = null;
@@ -532,6 +533,7 @@ function renderSubagentSection() {
     const names = lead.subagents.names || [];
     for (let i = 0; i < lead.subagents.count; i++) {
       const title = names[i] || '(이름 확인 중)';
+      const agentRef = (lead.subagents.items || [])[i];
       cards.push(`
         <div class="session-card subagent-card ${blocked ? 'status-blocked' : 'status-busy'}">
           <div class="top-line">
@@ -539,12 +541,173 @@ function renderSubagentSection() {
             <span>${blocked ? '⚠ 권한 확인 대기' : '● 작업 중'}</span>
           </div>
           <div class="member-of">소속 팀장: ${escapeHtml(leadName)}</div>
+          ${agentRef ? `<div class="actions"><button data-subagent-activity="${escapeHtml(agentRef.id)}" data-activity-lead="${escapeHtml(lead.id)}" data-activity-title="${escapeHtml(title)}" title="이 서브에이전트가 받은 지시와 한 일(도구 호출 포함)을 봅니다">대화 보기</button></div>` : ''}
         </div>`);
     }
   });
   subagentSectionEl.hidden = cards.length === 0;
   subagentCountEl.textContent = cards.length ? String(cards.length) : '';
   subagentRowEl.innerHTML = cards.join('');
+}
+
+// ---------------- 대화(활동) 보기 모달 ----------------
+// 서브에이전트·팀원·백그라운드 작업을 읽기 전용으로 들여다보는 공용 창. 열려 있는 동안 4초마다 새로고침한다(백엔드가 파일 끝부분만 읽는다).
+const activityTitleEl = document.getElementById('activity-title');
+const activitySubEl = document.getElementById('activity-sub');
+const activityBodyEl = document.getElementById('activity-body');
+let activityLoader = null; // () => Promise<items[] | string> — 배열이면 대화, 문자열이면 출력 텍스트
+let activityTimer = null;
+
+function renderActivityBody(data) {
+  const atBottom = activityBodyEl.scrollHeight - activityBodyEl.scrollTop - activityBodyEl.clientHeight < 40;
+  const first = !activityBodyEl.dataset.loaded;
+  if (typeof data === 'string') {
+    activityBodyEl.innerHTML = data.trim()
+      ? `<pre class="activity-output">${escapeHtml(data)}</pre>`
+      : '<div class="empty-hint">출력이 아직 없습니다(비어 있거나 파일을 찾지 못했습니다).</div>';
+  } else if (!data || !data.length) {
+    activityBodyEl.innerHTML = '<div class="empty-hint">기록이 없습니다(아직 시작 전이거나 기록 파일을 찾지 못했습니다).</div>';
+  } else {
+    const label = { user: '▸ 지시/사용자', assistant: '응답', message: '📨 보고·전달·지시', tool: '🔧 도구' };
+    const itemHtml = it => `
+      <div class="activity-item activity-${it.kind}">
+        <div class="activity-meta">${escapeHtml(label[it.kind] || it.kind)}<span>${escapeHtml(it.time || '')}</span></div>
+        <div class="activity-text">${escapeHtml(it.text)}</div>
+      </div>`;
+    // 도구 호출만 줄줄이 이어지면 무슨 말이 오갔는지 안 보인다 — 연속된 도구 호출은 한 줄 요약으로 접고(눌러서 펼침) 대화(지시·응답·보고)를 앞에 둔다.
+    const parts = [];
+    for (let i = 0; i < data.length;) {
+      if (data[i].kind !== 'tool') { parts.push(itemHtml(data[i])); i++; continue; }
+      let j = i;
+      while (j < data.length && data[j].kind === 'tool') j++;
+      const group = data.slice(i, j);
+      const counts = new Map();
+      group.forEach(t => { const n = t.text.split(':')[0]; counts.set(n, (counts.get(n) || 0) + 1); });
+      const summary = [...counts].map(([n, c]) => `${n} ${c}`).join(', ');
+      parts.push(`<details class="activity-tools"><summary>🔧 도구 ${group.length}회 (${escapeHtml(summary)})</summary>${group.map(itemHtml).join('')}</details>`);
+      i = j;
+    }
+    activityBodyEl.innerHTML = parts.join('') + (data.length >= 300 ? '<div class="empty-hint">(최근 300개 항목만 표시)</div>' : '');
+  }
+  activityBodyEl.dataset.loaded = '1';
+  if (first || atBottom) activityBodyEl.scrollTop = activityBodyEl.scrollHeight;
+}
+
+async function refreshActivity() {
+  if (!activityLoader) return;
+  const loader = activityLoader;
+  try {
+    const data = await loader();
+    if (loader === activityLoader) renderActivityBody(data);
+  } catch (err) {
+    activityBodyEl.innerHTML = `<div class="empty-hint">불러오지 못했습니다: ${escapeHtml(errMsg(err))}</div>`;
+  }
+}
+
+function openActivityViewer(title, sub, loader) {
+  activityTitleEl.textContent = title;
+  activitySubEl.textContent = sub || '';
+  activityBodyEl.innerHTML = '<div class="empty-hint">불러오는 중...</div>';
+  delete activityBodyEl.dataset.loaded;
+  activityLoader = loader;
+  showModal(activityPanelEl);
+  refreshActivity();
+  clearInterval(activityTimer);
+  activityTimer = setInterval(() => { if (activityPanelEl.hidden) closeActivityViewer(); else refreshActivity(); }, 4000);
+}
+
+function closeActivityViewer() {
+  clearInterval(activityTimer);
+  activityTimer = null;
+  activityLoader = null;
+  hideModal(activityPanelEl);
+}
+
+document.getElementById('activity-close-btn').addEventListener('click', closeActivityViewer);
+document.getElementById('activity-refresh-btn').addEventListener('click', refreshActivity);
+modalBackdropEl.addEventListener('click', () => { if (activityLoader) closeActivityViewer(); });
+
+document.addEventListener('click', e => {
+  const sub = e.target.closest('[data-subagent-activity]');
+  if (sub) {
+    const { subagentActivity: agentId, activityLead: leadId, activityTitle: title } = sub.dataset;
+    openActivityViewer(`서브에이전트: ${title}`, '지시·응답·도구 호출', () => window.api.getSubagentActivity(leadId, agentId));
+    return;
+  }
+  const mem = e.target.closest('[data-member-activity]');
+  if (mem) {
+    const { memberActivity: sessionId, activityCwd: cwd, activityTitle: title } = mem.dataset;
+    openActivityViewer(`팀원: ${title}`, '지시·응답·도구 호출', () => window.api.getMemberActivity(cwd, sessionId));
+    return;
+  }
+  const task = e.target.closest('[data-task-output]');
+  if (task) {
+    const { taskOutput: taskId, activityLead: leadId, activityTitle: title } = task.dataset;
+    openActivityViewer(`백그라운드 작업 출력: ${title}`, '최근 출력(끝부분)', () => window.api.getTaskOutput(leadId, taskId));
+  }
+});
+
+// ---------------- 백그라운드 작업 칸 ----------------
+// 데몬은 팀장이 백그라운드로 돌리는 셸 명령(개발 서버 등)을 "백그라운드 N개"로만 알려준다. 어떤 명령인지는 팀장 기록에서 읽는다(백엔드 activity.rs).
+// 완료 알림이 없는 것 중 데몬이 센 개수만큼 가장 최근 것을 "실행 중(추정)"으로 표시한다 — 정확한 목록이 아니라 추정이라는 점을 화면에 밝힌다.
+const backgroundSectionEl = document.getElementById('background-section');
+const backgroundCountEl = document.getElementById('background-count');
+const backgroundHintEl = document.getElementById('background-hint');
+const backgroundListEl = document.getElementById('background-list');
+let backgroundRenderSeq = 0;
+
+function formatAgo(ms) {
+  if (typeof ms !== 'number') return '출력 없음';
+  const sec = Math.max(0, Math.round((Date.now() - ms) / 1000));
+  if (sec < 90) return `${sec}초 전`;
+  if (sec < 5400) return `${Math.round(sec / 60)}분 전`;
+  return `${Math.round(sec / 3600)}시간 전`;
+}
+
+// 프로세스를 확인한 결과(alive)가 있으면 그걸 믿고, 프로세스 목록을 못 얻은 경우에만 예전 추정(runningGuess)을 쓴다.
+function isTaskRunning(t) {
+  return t.alive === true || (t.alive === undefined && t.runningGuess === true);
+}
+
+function backgroundStatusBadge(t) {
+  if (t.alive === true) return '<span class="bg-badge bg-running">● 실행 중</span>';
+  if (t.runningGuess) return '<span class="bg-badge bg-running">● 실행 중(추정)</span>';
+  const map = { unfinished: '○ 끝남(알림 없음)', completed: '✓ 완료', failed: '✗ 실패', stopped: '■ 중지됨', killed: '■ 종료됨' };
+  return `<span class="bg-badge">${escapeHtml(map[t.status] || t.status)}</span>`;
+}
+
+async function renderBackgroundSection() {
+  const seq = ++backgroundRenderSeq;
+  const isCreatingLead = getEffectiveLeadMode() !== 'none';
+  const lead = lastRows.find(r => !isCreatingLead && r.isLead && r.id === selectedLeadId && !r.offline && r.backgroundTasks > 0);
+  if (!lead) { backgroundSectionEl.hidden = true; return; }
+  let tasks = [];
+  try { tasks = await window.api.getBackgroundTasks(lead.id); } catch (err) { console.error('백그라운드 작업 조회 실패:', err); }
+  if (seq !== backgroundRenderSeq) return; // 더 최신 렌더가 시작됐으면 이 결과는 버린다
+  // 지금 실제로 돌고 있는 것만 위에 보이고, 끝난 것(완료·실패·중지·프로세스 없음)은 접어 둔다 — 끝난 것까지 주렁주렁 달려 보이던 문제(사용자 지적)
+  const running = tasks.filter(isTaskRunning);
+  const ended = tasks.filter(t => !isTaskRunning(t)).slice(0, 8);
+  const processChecked = tasks.some(t => t.alive !== undefined);
+  backgroundSectionEl.hidden = false;
+  backgroundCountEl.textContent = String(processChecked ? running.length : lead.backgroundTasks);
+  backgroundHintEl.textContent = processChecked
+    ? `프로세스를 확인해 지금 실제로 떠 있는 것만 위에 보입니다(데몬이 센 개수: ${lead.backgroundTasks}개). 끝난 작업은 아래에 접어 두었습니다.`
+    : `프로세스 목록을 얻지 못해 팀장 기록으로 추정했습니다(데몬이 센 개수: ${lead.backgroundTasks}개) — "실행 중(추정)"은 완료 알림이 없는 것 중 가장 최근 ${lead.backgroundTasks}개입니다.`;
+  const taskHtml = t => `
+      <div class="bg-task">
+        <div class="bg-task-main">
+          ${backgroundStatusBadge(t)}
+          <code class="bg-cmd" title="${escapeHtml(t.command)}">${escapeHtml(t.command || '(명령을 찾지 못함)')}</code>
+        </div>
+        <div class="bg-task-meta">
+          <span>시작 ${escapeHtml(t.started || '?')}</span>
+          <span>출력 ${t.outputBytes ? Math.max(1, Math.round(t.outputBytes / 1024)) + 'KB' : '없음'} · 마지막 출력 ${escapeHtml(formatAgo(t.outputModifiedMs))}</span>
+          <button data-task-output="${escapeHtml(t.taskId)}" data-activity-lead="${escapeHtml(lead.id)}" data-activity-title="${escapeHtml(t.command.slice(0, 50))}">출력 보기</button>
+        </div>
+      </div>`;
+  backgroundListEl.innerHTML =
+    (running.length ? running.map(taskHtml).join('') : '<div class="empty-hint">지금 실행 중인 백그라운드 작업이 없습니다.</div>') +
+    (ended.length ? `<details class="bg-ended"><summary>끝난 작업 ${ended.length}개 보기</summary>${ended.map(taskHtml).join('')}</details>` : '');
 }
 
 // ---------------- 작업 탭: 팀장 ----------------
@@ -2031,6 +2194,7 @@ function renderMemberCard(row, leadLabelById) {
       <div class="preview">${preview}</div>
       <div class="actions">
         ${attachBtn}
+        ${row.sessionId ? `<button data-member-activity="${escapeHtml(row.sessionId)}" data-activity-cwd="${escapeHtml(row.cwd)}" data-activity-title="${escapeHtml(row.label || row.projectName)}" title="이 팀원이 받은 지시와 한 일(도구 호출 포함)을 봅니다">대화 보기</button>` : ''}
         <button data-files="${escapeHtml(row.cwd)}">커밋 대상</button>
         <button data-refresh-member="${escapeHtml(row.id)}" title="이 팀원 최신 상태 새로고침">⟳</button>
         <button class="stop-btn" data-stop-member="${escapeHtml(row.id)}" title="이 팀원 세션 종료">삭제</button>
@@ -2105,6 +2269,7 @@ function renderBoard(rows) {
 // 새로 안 걸어도 된다(그래서 이 함수를 몇 번을 다시 불러도 리스너가 중복되지 않는다).
 function renderMemberRow() {
   renderSubagentSection();
+  renderBackgroundSection();
   renderAttachments(); // 팀장 선택이 바뀌면 그 팀장의 첨부 목록으로 바꿔 보여준다
   const leadLabelById = new Map(lastRows.filter(r => r.isLead).map(l => [l.id, l.label || l.projectName]));
   const members = lastRows.filter(r => !r.isLead);

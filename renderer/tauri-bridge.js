@@ -76,6 +76,19 @@
 
   // ---- 채팅 첨부 ----
   // Tauri는 창에 떨어뜨린 파일을 HTML5 drop이 아니라 자체 이벤트(tauri://drag-drop)로 경로와 함께 준다.
+  // ---- 서브에이전트·팀원 대화 / 백그라운드 작업 보기 ----
+  async function getMemberActivity(cwd, sessionId) {
+    return invoke('get_member_activity_command', { cwd, sessionId });
+  }
+  async function getSubagentActivity(leadId, agentId) {
+    return invoke('get_subagent_activity_command', { leadId, agentId });
+  }
+  async function getBackgroundTasks(leadId) {
+    return invoke('get_background_tasks_command', { leadId });
+  }
+  async function getTaskOutput(leadId, taskId) {
+    return invoke('get_task_output_command', { leadId, taskId });
+  }
   async function pickFiles() {
     return invoke('pick_files_command');
   }
@@ -261,6 +274,10 @@
     onAgentsUpdate,
     pickDirectory,
     pickFiles,
+    getMemberActivity,
+    getSubagentActivity,
+    getBackgroundTasks,
+    getTaskOutput,
     savePastedImage,
     onFilesDropped,
     onFilesDragState,

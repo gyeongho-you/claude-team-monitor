@@ -340,6 +340,7 @@ mod tests {
             last_active_at: None,
             subagents: None,
             background_only: None,
+            background_tasks: None,
         }
     }
 

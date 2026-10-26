@@ -16,14 +16,23 @@ function readRecords(file) {
 }
 
 /** @returns {number | null} */
-function daemonLocalAgentCount(jobsDir, shortId) {
+function daemonCountOfKind(jobsDir, shortId, kind) {
   if (!/^[A-Za-z0-9_-]+$/.test(shortId || '')) return null;
   try {
     const data = JSON.parse(fs.readFileSync(path.join(jobsDir, shortId, 'state.json'), 'utf-8'));
     const f = data && data.inFlight;
     if (!f || !Array.isArray(f.kinds) || typeof f.tasks !== 'number') return null;
-    return f.kinds.includes('local_agent') && f.tasks > 0 ? f.tasks : null;
+    return f.kinds.includes(kind) && f.tasks > 0 ? f.tasks : null;
   } catch { return null; }
+}
+
+function daemonLocalAgentCount(jobsDir, shortId) {
+  return daemonCountOfKind(jobsDir, shortId, 'local_agent');
+}
+
+/** 데몬이 센 백그라운드 셸 명령(local_bash) 개수 — 화면의 "백그라운드 작업" 칸이 알림 없는 것 중 몇 개가 지금 돌고 있는지 추정하는 기준. */
+function daemonLocalBashCount(jobsDir, shortId) {
+  return daemonCountOfKind(jobsDir, shortId, 'local_bash');
 }
 
 /**
@@ -45,6 +54,11 @@ function backgroundOnly(jobsDir, shortId) {
 
 /** @returns {string[]} */
 function runningNamesFromFiles(parentJsonl, subagentsDir) {
+  return runningAgentsFromFiles(parentJsonl, subagentsDir).map(a => a.name);
+}
+
+/** 위와 같은 규칙으로 {id, name}을 돌려준다 — id가 있어야 그 서브에이전트의 대화 파일(agent-<id>.jsonl)을 열 수 있다. @returns {{id: string, name: string}[]} */
+function runningAgentsFromFiles(parentJsonl, subagentsDir) {
   let files;
   try { files = fs.readdirSync(subagentsDir); } catch { return []; }
   const byTool = new Map();
@@ -80,7 +94,7 @@ function runningNamesFromFiles(parentJsonl, subagentsDir) {
   events.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   const last = new Map();
   for (const [, id, run] of events) last.set(id, run);
-  return [...last].filter(([, run]) => run).map(([id]) => desc.get(id) || id);
+  return [...last].filter(([, run]) => run).map(([id]) => ({ id, name: desc.get(id) || id }));
 }
 
 /**
@@ -94,7 +108,8 @@ function liveSubagents(jobsDir, shortId, sessionFile) {
   const count = daemonLocalAgentCount(jobsDir, shortId);
   if (count === null) return null;
   const dir = path.join(sessionFile.replace(/\.jsonl$/, ''), 'subagents');
-  return { count, names: runningNamesFromFiles(sessionFile, dir).slice(0, count) };
+  const items = runningAgentsFromFiles(sessionFile, dir).slice(0, count);
+  return { count, names: items.map(a => a.name), items };
 }
 
-module.exports = { daemonLocalAgentCount, runningNamesFromFiles, liveSubagents, backgroundOnly };
+module.exports = { daemonLocalAgentCount, daemonLocalBashCount, runningNamesFromFiles, runningAgentsFromFiles, liveSubagents, backgroundOnly };

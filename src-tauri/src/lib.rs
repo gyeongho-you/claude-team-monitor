@@ -6,6 +6,7 @@ mod claude_readiness;
 mod concurrency;
 mod daemon_state;
 mod subagents;
+mod activity;
 mod daemon_reply;
 mod pasted_images;
 mod retired_members;
@@ -47,6 +48,10 @@ pub fn run() {
       lead_lifecycle::restart_lead_command,
       lead_lifecycle::end_lead_work_command,
       lead_lifecycle::emergency_stop_lead_command,
+      activity::get_member_activity_command,
+      activity::get_subagent_activity_command,
+      activity::get_background_tasks_command,
+      activity::get_task_output_command,
       lead_lifecycle::launch_team_lead_command,
       lead_lifecycle::adopt_lead_command,
       lead_lifecycle::fork_session_as_lead_command,
