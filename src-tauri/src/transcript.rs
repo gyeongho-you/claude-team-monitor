@@ -6,7 +6,7 @@
 use crate::live_rows::{encode_project_dir_name, read_journal_entries, resolve_project_name};
 use crate::paths::projects_dir;
 use crate::session_registry::load_leads;
-use chrono::{Local, TimeZone};
+use chrono::Local;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -23,26 +23,6 @@ fn format_raw_session_timestamp(iso: Option<&str>) -> String {
     let Some(iso) = iso else { return String::new() };
     let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso) else { return String::new() };
     dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string()
-}
-
-// parseJournalTimeLoose(main.ts)와 동일 — "YYYY-MM-DD HH:MM" 문자열을 로컬 시각 기준 epoch ms로
-// 되돌린다. 형식이 안 맞으면(예전 스키마 등) None.
-fn parse_journal_time_loose(time: &str) -> Option<i64> {
-    let bytes = time.as_bytes();
-    if bytes.len() != 16 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b' ' || bytes[13] != b':' {
-        return None;
-    }
-    let y: i32 = time.get(0..4)?.parse().ok()?;
-    let mo: u32 = time.get(5..7)?.parse().ok()?;
-    let d: u32 = time.get(8..10)?.parse().ok()?;
-    let h: u32 = time.get(11..13)?.parse().ok()?;
-    let mi: u32 = time.get(14..16)?.parse().ok()?;
-    let naive = chrono::NaiveDate::from_ymd_opt(y, mo, d)?.and_hms_opt(h, mi, 0)?;
-    match Local.from_local_datetime(&naive) {
-        chrono::LocalResult::Single(dt) => Some(dt.timestamp_millis()),
-        chrono::LocalResult::Ambiguous(dt, _) => Some(dt.timestamp_millis()),
-        chrono::LocalResult::None => None,
-    }
 }
 
 // 팀장이 team-lead 스킬로 git worktree에 들어가서 작업하면(EnterWorktree, 흔한 패턴), claude
@@ -127,15 +107,6 @@ fn read_raw_session_transcript_cached(file: &Path) -> Vec<TranscriptEntry> {
     read_raw_session_flagged_cached(file).into_iter().map(|(e, _)| e).collect()
 }
 
-/// 원본 기록 중 "일하는 도중에 끼어든 메시지"(queued_command)에서 온 항목만.
-fn read_raw_injected_cached(file: &Path) -> Vec<TranscriptEntry> {
-    read_raw_session_flagged_cached(file).into_iter().filter(|(_, injected)| *injected).map(|(e, _)| e).collect()
-}
-
-fn read_raw_session_transcript_from_file(file: &Path) -> Vec<TranscriptEntry> {
-    parse_raw_session_file(file).into_iter().map(|(e, _)| e).collect()
-}
-
 // 팀장이 일하는 도중에 데몬 reply(또는 팀원의 SendMessage)로 들어온 메시지는 일반 user 기록이 아니라
 // attachment(type=queued_command, prompt=원문)로 남는다(실측 2026-10-22) — 일지(daily-journal)에도 안 남는다. 터미널에서 일하는
 // 중간에 입력한 것과 같은 메시지라 새 턴의 시작으로 취급한다(그 뒤 이어지는 assistant 텍스트가 이 메시지의 답변이 된다).
@@ -155,7 +126,10 @@ fn queued_command_prompt(rec: &serde_json::Value) -> Option<String> {
 /// 원본 세션 파일 파싱 — 각 항목에 "끼어든 메시지에서 온 것인가"를 함께 돌려준다.
 fn parse_raw_session_file(file: &Path) -> Vec<(TranscriptEntry, bool)> {
     let Ok(content) = std::fs::read_to_string(file) else { return Vec::new() };
+    parse_raw_session_text(&content)
+}
 
+fn parse_raw_session_text(content: &str) -> Vec<(TranscriptEntry, bool)> {
     let mut entries: Vec<(TranscriptEntry, bool)> = Vec::new();
     let mut current_prompt: Option<(String, String, bool)> = None; // (time, prompt, injected)
     let mut current_answer_parts: Vec<String> = Vec::new();
@@ -222,146 +196,82 @@ fn parse_raw_session_file(file: &Path) -> Vec<(TranscriptEntry, bool)> {
     entries
 }
 
-// 일지(daily-journal)에는 끼어든 메시지가 안 남으므로, 일지 기준으로 만든 목록에 없는 끼어든 메시지를 시간순 위치에 끼워 넣는다.
-// 그렇지 않으면 뒤이어 보낸 일반 메시지가 일지에 쌓이는 순간 끼어든 메시지가 대화창에서 사라진다(뒷부분만 보충하는 규칙 때문).
-// 같은 문구가 이미 목록에 있으면(예: 일지가 비어 원본 전체를 쓴 경우) 중복으로 넣지 않는다 — 반복되는 문구("그래" 등)를 오인하지
-// 않도록 시간 차이가 10분 이내인 것만 같은 항목으로 본다.
-fn merge_injected_prompts(mut entries: Vec<TranscriptEntry>, injected: Vec<TranscriptEntry>) -> Vec<TranscriptEntry> {
-    const SAME_SLACK_MS: i64 = 10 * 60 * 1000;
-    for inj in injected {
-        let inj_ms = parse_journal_time_loose(&inj.time);
-        let already = entries.iter().any(|e| {
-            e.prompt == inj.prompt
-                && match (parse_journal_time_loose(&e.time), inj_ms) {
-                    (Some(a), Some(b)) => (a - b).abs() <= SAME_SLACK_MS,
-                    _ => true,
-                }
-        });
-        if already {
-            continue;
-        }
-        let pos = match inj_ms {
-            Some(ms) => entries.iter().position(|e| parse_journal_time_loose(&e.time).map_or(false, |t| t > ms)).unwrap_or(entries.len()),
-            None => entries.len(),
-        };
-        entries.insert(pos, inj);
+// 대화의 기본 출처는 claude가 직접 쓰는 원본 세션 파일이다(턴이 끝나야 기록되는 daily-journal 플러그인은 기록이 빠지거나 늦어지는 일이 잦았다).
+// 끼어든 메시지(queued_command)도 원본 파서가 이미 새 턴으로 읽는다. daily-journal은 원본에서 대화를 하나도 못 읽을 때만 쓰는 읽기 전용 보조다.
+
+/// 원본 파일은 있는데 대화를 하나도 못 읽는 세션을 앱 로그에 한 번만 남긴다 — claude의 기록 형식이 바뀌었을 때 알아챌 수 있게 한다.
+fn warn_if_unreadable_once(file: &Path) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    let big_enough = std::fs::metadata(file).map(|m| m.len() > 2048).unwrap_or(false);
+    if !big_enough {
+        return;
     }
-    entries
-}
-
-// findLastMatchingRawIndex(main.ts:604-620)와 동일 — journalEntries의 마지막 항목과 똑같은 prompt
-// 텍스트가 원본 세션 파일에 정확히 어디 있었는지 찾는다. 이 앱이 자동으로 넣는 정형 문구([알림] 등)는
-// 여러 번 글자 하나 안 틀리고 반복될 수 있어서, 단순히 "끝에서부터 훑어 처음 일치"가 아니라 시간이
-// 가장 가까운 후보를 고른다(1시간 여유, 대기열에서 오래 기다린 경우까지 감안).
-fn find_last_matching_raw_index(last_entry: &TranscriptEntry, raw_entries: &[TranscriptEntry]) -> i64 {
-    let Some(last_time) = parse_journal_time_loose(&last_entry.time) else {
-        for i in (0..raw_entries.len()).rev() {
-            if raw_entries[i].prompt == last_entry.prompt {
-                return i as i64;
-            }
-        }
-        return -1;
-    };
-    const MATCH_SLACK_MS: i64 = 60 * 60 * 1000;
-    let mut best_index: i64 = -1;
-    let mut best_diff = i64::MAX;
-    for i in (0..raw_entries.len()).rev() {
-        if raw_entries[i].prompt != last_entry.prompt {
-            continue;
-        }
-        let Some(raw_time) = parse_journal_time_loose(&raw_entries[i].time) else { continue };
-        let diff = (raw_time - last_time).abs();
-        if diff <= MATCH_SLACK_MS && diff < best_diff {
-            best_diff = diff;
-            best_index = i as i64;
-        }
-    }
-    best_index
-}
-
-// fillMissingTranscriptFromRawSession(main.ts:582-599)와 동일 — daily-journal 기록이 있으면 그게
-// 더 정제된 형태라 그대로 신뢰하고, 거기 없는(원본에는 있는) 뒷부분만 원본 세션 파일에서 보완해서
-// 이어붙인다. daily-journal의 마지막 기록 시각 이후로 원본 파일이 수정된 적이 없으면(파일을 열
-// 필요 없이 mtime만으로 확인) 새로 쌓인 턴이 없다는 뜻이니 그냥 넘어간다(비용 절감).
-fn fill_missing_transcript_from_raw_session_at(journal_entries: Vec<TranscriptEntry>, file: &Path) -> Vec<TranscriptEntry> {
-    if journal_entries.is_empty() {
-        let raw = read_raw_session_transcript_cached(file);
-        return if raw.is_empty() { journal_entries } else { raw };
-    }
-
-    let Ok(meta) = std::fs::metadata(file) else { return journal_entries };
-    let Ok(modified) = meta.modified() else { return journal_entries };
-    let mtime_ms = modified.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
-
-    // "YYYY-MM-DD HH:MM"은 분 단위까지만 있어서 실제 mtime과 최대 1분 가까이 차이날 수 있다 —
-    // 여유를 두고 비교한다(main.ts와 동일).
-    if let Some(last_journal_time) = parse_journal_time_loose(&journal_entries.last().unwrap().time) {
-        if mtime_ms <= last_journal_time + 2 * 60 * 1000 {
-            return journal_entries;
-        }
-    }
-
-    let raw_entries = read_raw_session_transcript_cached(file);
-    if raw_entries.is_empty() {
-        return journal_entries;
-    }
-
-    let cut_index = find_last_matching_raw_index(journal_entries.last().unwrap(), &raw_entries);
-    let tail: Vec<TranscriptEntry> = if cut_index >= 0 {
-        raw_entries.into_iter().skip((cut_index + 1) as usize).collect()
-    } else {
-        // daily-journal의 마지막 프롬프트를 원본에서 못 찾으면 개수 기준으로 대략 맞춰 보완한다
-        // (main.ts와 동일 — 완벽하지 않아도 아예 안 보이는 것보다는 낫다).
-        raw_entries.into_iter().skip(journal_entries.len()).collect()
-    };
-    if tail.is_empty() {
-        journal_entries
-    } else {
-        let mut combined = journal_entries;
-        combined.extend(tail);
-        combined
+    let first = WARNED.get_or_init(|| Mutex::new(HashSet::new())).lock().unwrap_or_else(|e| e.into_inner()).insert(file.to_path_buf());
+    if first {
+        crate::logging::log_critical(&format!("[transcript] 세션 파일은 있는데 대화를 하나도 읽지 못했습니다(기록 형식이 바뀌었을 수 있음): {}", file.display()));
     }
 }
 
-/// getTranscript(main.ts:478-483)와 동일 — daily-journal 기록을 sessionId로 걸러 먼저 채우고,
-/// 원본 세션 파일로 모자란 뒷부분을 보완한다.
-pub(crate) fn get_transcript(project_name: &str, session_id: &str, cwd: &str) -> Vec<TranscriptEntry> {
-    let journal_entries: Vec<TranscriptEntry> = read_journal_entries(project_name)
+fn journal_turns(project_name: &str, session_id: &str) -> Vec<TranscriptEntry> {
+    read_journal_entries(project_name)
         .into_iter()
         .filter(|e| e.session_id == session_id)
         .map(|e| TranscriptEntry { time: e.time, prompt: e.prompt, answer: e.answer })
-        .collect();
-    let file = session_file_path(cwd, session_id);
-    let filled = fill_missing_transcript_from_raw_session_at(journal_entries, &file);
-    let merged = merge_injected_prompts(filled, read_raw_injected_cached(&file));
-    enrich_answers_from_raw_session_at(merged, &file)
+        .collect()
 }
 
-// enrichAnswersFromRawSession(main.ts)과 동일 — daily-journal의 answer는 Stop 훅이 넘겨주는 그
-// 턴의 "마지막 assistant 메시지 한 조각"이라, 도구 호출 사이사이의 설명이나(저널이 턴 도중에
-// 기록된 경우) 그 뒤에 이어진 최종 답변이 빠질 수 있다. 원본 쪽 답변이 더 길면 그쪽으로 교체한다.
-// 이게 없어서 터미널엔 나온 최종 답변이 채팅창에는 안 뜨는 일이 있었다(실사용 재현).
-fn enrich_answers_from_raw_session_at(entries: Vec<TranscriptEntry>, file: &Path) -> Vec<TranscriptEntry> {
-    if entries.is_empty() {
-        return entries;
+/// 세션의 전체 대화 — 원본 세션 파일 기준, 거기서 못 읽으면 daily-journal 기록(있다면).
+pub(crate) fn get_transcript(project_name: &str, session_id: &str, cwd: &str) -> Vec<TranscriptEntry> {
+    let file = session_file_path(cwd, session_id);
+    let raw = read_raw_session_transcript_cached(&file);
+    if !raw.is_empty() {
+        return raw;
     }
-    let raw_entries = read_raw_session_transcript_cached(file);
-    if raw_entries.is_empty() {
-        return entries;
+    warn_if_unreadable_once(&file);
+    journal_turns(project_name, session_id)
+}
+
+fn read_tail_turns(file: &Path) -> Vec<TranscriptEntry> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(file) else { return Vec::new() };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    for window in [256 * 1024u64, 2 * 1024 * 1024, 16 * 1024 * 1024] {
+        let start = len.saturating_sub(window);
+        if f.seek(SeekFrom::Start(start)).is_err() {
+            break;
+        }
+        let mut buf = Vec::new();
+        if f.read_to_end(&mut buf).is_err() {
+            break;
+        }
+        let text = String::from_utf8_lossy(&buf);
+        // 시작 위치가 줄 중간일 수 있으니 첫 줄은 버린다.
+        let body = if start > 0 { text.split_once('\n').map(|(_, rest)| rest).unwrap_or("") } else { &text };
+        let entries: Vec<TranscriptEntry> = parse_raw_session_text(body).into_iter().map(|(e, _)| e).collect();
+        if !entries.is_empty() {
+            return entries;
+        }
+        if start == 0 {
+            break;
+        }
     }
-    entries
-        .into_iter()
-        .map(|mut entry| {
-            let idx = find_last_matching_raw_index(&entry, &raw_entries);
-            if idx >= 0 {
-                let raw_answer = &raw_entries[idx as usize].answer;
-                if raw_answer.chars().count() > entry.answer.chars().count() {
-                    entry.answer = raw_answer.clone();
-                }
-            }
-            entry
-        })
-        .collect()
+    Vec::new()
+}
+
+/// 세션의 최근 대화 몇 턴 — 파일 끝부분만 읽어서(수십 MB 파일을 폴링마다 통째로 파싱하지 않기 위해) 카드 미리보기·정체 감시에 쓴다.
+/// 끝부분에 사용자 메시지가 하나도 없으면(긴 도구 실행 구간) 읽는 범위를 넓혀 다시 본다. 원본에서 못 읽으면 daily-journal(있다면).
+pub(crate) fn recent_turns(project_name: &str, session_id: &str, cwd: &str) -> Vec<TranscriptEntry> {
+    let file = session_file_path(cwd, session_id);
+    let tail = read_tail_turns(&file);
+    if !tail.is_empty() {
+        return tail;
+    }
+    if file.exists() {
+        warn_if_unreadable_once(&file);
+    }
+    journal_turns(project_name, session_id)
 }
 
 /// getLeadTranscript(main.ts:2638-2643) IPC — 팀장과의 "대화" 패널용 전체 왕복 기록.
@@ -377,25 +287,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_journal_time_loose_round_trips_with_format_raw_session_timestamp() {
-        // format_raw_session_timestamp가 만든 문자열을 parse_journal_time_loose가 다시 읽을 수
-        // 있어야 한다(둘 다 로컬 시각 기준이므로 왕복이 성립해야 함).
-        let iso = "2026-09-17T03:04:00Z";
-        let formatted = format_raw_session_timestamp(Some(iso));
-        assert!(parse_journal_time_loose(&formatted).is_some(), "formatted={formatted:?}");
-    }
-
-    #[test]
-    fn parse_journal_time_loose_rejects_malformed_strings() {
-        assert_eq!(parse_journal_time_loose(""), None);
-        assert_eq!(parse_journal_time_loose("아무말"), None);
-        assert_eq!(parse_journal_time_loose("2026-13-99 99:99"), None);
-    }
-
-    #[test]
     fn format_raw_session_timestamp_returns_empty_for_missing_or_invalid() {
         assert_eq!(format_raw_session_timestamp(None), "");
         assert_eq!(format_raw_session_timestamp(Some("not-a-date")), "");
+    }
+
+    fn read_raw_session_transcript_from_file(file: &Path) -> Vec<TranscriptEntry> {
+        parse_raw_session_file(file).into_iter().map(|(e, _)| e).collect()
     }
 
     fn temp_jsonl_path(tag: &str) -> PathBuf {
@@ -453,16 +351,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_inserts_injected_prompts_missing_from_the_journal_in_time_order_without_duplicates() {
-        let e = |t: &str, p: &str| TranscriptEntry { time: t.to_string(), prompt: p.to_string(), answer: String::new() };
-        let journal = vec![e("2026-10-22 15:25", "첫 메시지"), e("2026-10-22 15:40", "나중 메시지")];
-        let injected = vec![e("2026-10-22 15:26", "끼어든 메시지"), e("2026-10-22 15:40", "나중 메시지")];
-        let merged = merge_injected_prompts(journal, injected);
-        let order: Vec<&str> = merged.iter().map(|x| x.prompt.as_str()).collect();
-        assert_eq!(order, vec!["첫 메시지", "끼어든 메시지", "나중 메시지"], "일지에 이미 있는 건 중복으로 넣지 않고, 없는 건 시간순 위치에 들어간다");
-    }
-
-    #[test]
     fn read_raw_session_transcript_pairs_prompts_with_following_assistant_text() {
         let path = temp_jsonl_path("pairing");
         write_lines(
@@ -493,88 +381,6 @@ mod tests {
         let entries = read_raw_session_transcript_from_file(&path);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].prompt, "질문");
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn fill_missing_transcript_reads_raw_when_journal_is_empty() {
-        let path = temp_jsonl_path("empty-journal");
-        write_lines(&path, &[r#"{"type":"user","timestamp":"2026-09-17T03:00:00Z","message":{"content":"원본에만 있는 질문"}}"#]);
-
-        let result = fill_missing_transcript_from_raw_session_at(Vec::new(), &path);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].prompt, "원본에만 있는 질문");
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn fill_missing_transcript_skips_raw_read_when_file_not_modified_since_last_journal_entry() {
-        // 파일이 아예 없으면(mtime 확인 자체가 실패) journal_entries를 그대로 돌려줘야 한다.
-        let path = temp_jsonl_path("nonexistent");
-        let journal = vec![TranscriptEntry { time: "2026-09-17 03:00".to_string(), prompt: "질문".to_string(), answer: "답변".to_string() }];
-        let result = fill_missing_transcript_from_raw_session_at(journal.clone(), &path);
-        assert_eq!(result, journal);
-    }
-
-    #[test]
-    fn fill_missing_transcript_appends_tail_found_by_matching_last_prompt() {
-        let path = temp_jsonl_path("append-tail");
-        write_lines(
-            &path,
-            &[
-                r#"{"type":"user","timestamp":"2026-09-17T03:00:00Z","message":{"content":"이미 journal에 있는 질문"}}"#,
-                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"이미 journal에 있는 답변"}]}}"#,
-                r#"{"type":"user","timestamp":"2026-09-17T04:00:00Z","message":{"content":"journal엔 아직 없는 새 질문"}}"#,
-                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"새 답변"}]}}"#,
-            ],
-        );
-        // 파일 mtime을 journal의 마지막 기록 시각보다 충분히 뒤로 당겨서(2분 초과) raw 보완 경로를
-        // 탄다 — File::create는 내용을 잘라내므로(0바이트) 쓴 줄이 사라진다, write(true)로 열어서
-        // 내용은 그대로 두고 mtime만 바꾼다.
-        let far_future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
-        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        file.set_modified(far_future).unwrap();
-
-        let journal = vec![TranscriptEntry { time: "2026-09-17 03:00".to_string(), prompt: "이미 journal에 있는 질문".to_string(), answer: "이미 journal에 있는 답변".to_string() }];
-        let result = fill_missing_transcript_from_raw_session_at(journal, &path);
-        assert_eq!(result.len(), 2, "원본에서 찾은 새 턴 하나만 뒤에 이어붙어야 한다: {result:?}");
-        assert_eq!(result[1].prompt, "journal엔 아직 없는 새 질문");
-        assert_eq!(result[1].answer, "새 답변");
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn find_last_matching_raw_index_prefers_closest_time_among_repeated_prompts() {
-        // 같은 문구("[알림] ...")가 여러 번 반복될 때, 시간이 가장 가까운 후보를 골라야 한다.
-        let raw = vec![
-            TranscriptEntry { time: "2026-09-17 01:00".to_string(), prompt: "[알림] 반복".to_string(), answer: String::new() },
-            TranscriptEntry { time: "2026-09-17 03:00".to_string(), prompt: "[알림] 반복".to_string(), answer: String::new() },
-            TranscriptEntry { time: "2026-09-17 05:00".to_string(), prompt: "[알림] 반복".to_string(), answer: String::new() },
-        ];
-        let last = TranscriptEntry { time: "2026-09-17 03:05".to_string(), prompt: "[알림] 반복".to_string(), answer: String::new() };
-        let idx = find_last_matching_raw_index(&last, &raw);
-        assert_eq!(idx, 1, "03:00짜리(인덱스 1)가 03:05와 가장 가까워야 한다");
-    }
-
-    #[test]
-    fn enrich_replaces_stale_journal_answer_with_longer_raw_answer() {
-        // 저널은 턴 도중("지금 확인할게.")에 기록됐는데, 원본엔 그 뒤 도구 실행과 최종 답변까지 이어진 경우.
-        let path = std::env::temp_dir().join(format!("claude_team_monitor_test_enrich_{}.jsonl", uuid::Uuid::new_v4()));
-        let lines = [
-            r#"{"type":"user","timestamp":"2026-09-29T01:48:00Z","message":{"content":"확인하고있지..?"}}"#,
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"지금 확인할게."}]}}"#,
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"확인했어. 최종 답변 본문입니다."}]}}"#,
-        ];
-        std::fs::write(&path, lines.join("\n")).unwrap();
-        let raw_time = format_raw_session_timestamp(Some("2026-09-29T01:48:00Z"));
-        let journal = vec![TranscriptEntry { time: raw_time, prompt: "확인하고있지..?".to_string(), answer: "지금 확인할게.".to_string() }];
-
-        let result = enrich_answers_from_raw_session_at(journal, &path);
-        assert_eq!(result.len(), 1);
-        assert!(result[0].answer.contains("최종 답변 본문"), "{:?}", result[0].answer);
-
         let _ = std::fs::remove_file(&path);
     }
 
@@ -624,5 +430,45 @@ mod tests {
         assert_eq!(result, dir.join("C--Users-x-g1cl-mgt").join("sess1.jsonl"), "무관한 폴더를 집으면 안 되고, 못 찾았으니 원래 기대 경로로 폴백해야 한다");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_tail_turns_reads_the_last_turns_even_when_the_window_starts_mid_line() {
+        let path = temp_jsonl_path("tail");
+        let mut lines: Vec<String> = Vec::new();
+        for i in 0..4000 {
+            lines.push(user_line("2026-09-17T03:00:00Z", &format!("질문 {i} {}", "가".repeat(120))));
+            lines.push(assistant_line("2026-09-17T03:00:01Z", &format!("답변 {i}")));
+        }
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        write_lines(&path, &refs);
+        let turns = read_tail_turns(&path);
+        assert!(!turns.is_empty());
+        assert!(turns.len() < 4000, "파일 끝부분만 읽는다");
+        assert!(turns.last().unwrap().prompt.starts_with("질문 3999"));
+        assert_eq!(turns.last().unwrap().answer, "답변 3999");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_tail_turns_widens_the_window_when_the_tail_has_no_user_message() {
+        let path = temp_jsonl_path("tail-wide");
+        let mut lines: Vec<String> = vec![user_line("2026-09-17T03:00:00Z", "오래된 질문"), assistant_line("2026-09-17T03:00:01Z", "오래된 답")];
+        for _ in 0..3000 {
+            lines.push(assistant_line("2026-09-17T03:00:02Z", &"도구 사이 설명 ".repeat(30)));
+        }
+        let refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
+        write_lines(&path, &refs);
+        let turns = read_tail_turns(&path);
+        assert_eq!(turns.last().map(|t| t.prompt.as_str()), Some("오래된 질문"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_tail_turns_returns_nothing_for_an_unknown_format() {
+        let path = temp_jsonl_path("tail-unknown");
+        write_lines(&path, &[r#"{"kind":"새 형식","body":"..."}"#]);
+        assert!(read_tail_turns(&path).is_empty(), "알 수 없는 형식은 비어서 daily-journal 보조/경고 경로로 넘어간다");
+        let _ = std::fs::remove_file(&path);
     }
 }

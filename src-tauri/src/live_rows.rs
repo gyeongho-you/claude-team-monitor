@@ -51,8 +51,6 @@ pub(crate) struct JournalEntry {
     pub(crate) prompt: String,
     #[serde(default)]
     pub(crate) answer: String,
-    #[serde(default)]
-    pub(crate) summary: Option<String>,
 }
 
 // readJournalEntries(main.ts)와 동일 — 팀장을 하루 넘겨 이어가는 경우가 있어서 daily-journal에
@@ -101,17 +99,9 @@ pub struct Preview {
 
 // getLatestPreview(main.ts)와 동일 — sessionId로 걸러야 같은 디렉토리의 예전 세션 기록이 새
 // 세션 카드로 새어나오지 않는다.
-fn get_latest_preview(project_name: &str, session_id: &str) -> Option<Preview> {
-    let last = read_journal_entries(project_name)
-        .into_iter()
-        .filter(|e| e.session_id == session_id)
-        .next_back()?;
-    Some(Preview {
-        time: last.time,
-        prompt: last.prompt,
-        answer: last.answer,
-        summary: last.summary.filter(|s| !s.is_empty()),
-    })
+fn get_latest_preview(project_name: &str, session_id: &str, cwd: &str) -> Option<Preview> {
+    let last = crate::transcript::recent_turns(project_name, session_id, cwd).into_iter().next_back()?;
+    Some(Preview { time: last.time, prompt: last.prompt, answer: last.answer, summary: None })
 }
 
 // resolveProjectName(main.ts)와 동일 — daily-journal이 세션당 캐시해둔 프로젝트명을 재사용하고,
@@ -181,7 +171,7 @@ pub struct SessionRow {
 fn build_row(agent: AgentEntry, lead: Option<&LeadRecord>, member: Option<&MemberRecord>) -> SessionRow {
     let is_lead = lead.is_some();
     let project_name = resolve_project_name(&agent.session_id, &agent.cwd);
-    let preview = get_latest_preview(&project_name, &agent.session_id);
+    let preview = get_latest_preview(&project_name, &agent.session_id, &agent.cwd);
     SessionRow {
         lead_id: member.map(|m| m.lead_id.clone()),
         role: member.and_then(|m| m.role.clone()),
@@ -271,7 +261,7 @@ pub(crate) fn has_live_member(lead_id: &str, members: &[MemberRecord], agent_ids
 fn build_lead_record_row(lead: &LeadRecord, offline: bool) -> SessionRow {
     let project_name = resolve_project_name(&lead.session_id, &lead.target_dir);
     let name = lead.ai_title.clone().or_else(|| get_session_ai_title(&lead.session_id, &lead.target_dir));
-    let preview = get_latest_preview(&project_name, &lead.session_id);
+    let preview = get_latest_preview(&project_name, &lead.session_id, &lead.target_dir);
     SessionRow {
         agent: AgentEntry {
             id: Some(lead.id.clone()),

@@ -1,7 +1,7 @@
 use crate::agents_json::{fetch_agents_typed, AgentEntry};
 use crate::board_state::{prune_missing_keys, state};
 use crate::json_file::write_json_file_atomic;
-use crate::live_rows::{read_journal_entries, resolve_project_name, SessionRow};
+use crate::live_rows::{resolve_project_name, SessionRow};
 use crate::paths::{settings_path, stall_alerts_path};
 use crate::session_registry::{load_leads, LeadRecord, MemberRecord};
 use crate::timing::{
@@ -401,13 +401,9 @@ pub(crate) fn get_status_agent(agent: &AgentEntry) -> String {
     crate::agents_json::get_status(agent.status.as_deref(), agent.state.as_deref())
 }
 
-fn get_transcript_tail(project_name: &str, session_id: &str) -> Vec<crate::live_rows::JournalEntry> {
-    // getTranscript(main.ts)는 daily-journal 기록에 원본 세션 파일(fillMissingTranscriptFromRawSession)을
-    // 보완해서 합치지만, 이번 포팅은 그 보완 병합까지는 하지 않는다(요청받은 함수 목록에 없음) —
-    // daily-journal 기록만으로도 정체 감시의 입력(최근 몇 턴 요약)으로는 충분하고, 승인 요청 정규식·
-    // Haiku의 waitingForUser 판단·발송 직전 재확인까지 이어지는 다중 안전장치는 트랜스크립트
-    // 완결성과 무관하게 항상 적용된다.
-    read_journal_entries(project_name).into_iter().filter(|e| e.session_id == session_id).collect()
+fn get_transcript_tail(project_name: &str, session_id: &str, cwd: &str) -> Vec<crate::transcript::TranscriptEntry> {
+    // 정체 감시의 입력(최근 몇 턴)은 원본 세션 파일의 끝부분에서 읽는다(daily-journal은 못 읽을 때만 보조).
+    crate::transcript::recent_turns(project_name, session_id, cwd)
 }
 
 static STALL_WATCHDOG_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
@@ -511,7 +507,7 @@ fn run_stall_watchdog(live_rows: &[SessionRow], leads: &[LeadRecord], members: &
         let Candidate { member, member_row, lead, lead_row } = candidate;
 
         let project_name = resolve_project_name(&lead.session_id, &lead.target_dir);
-        let transcript = get_transcript_tail(&project_name, &lead.session_id);
+        let transcript = get_transcript_tail(&project_name, &lead.session_id, &lead.target_dir);
         let start = transcript.len().saturating_sub(4);
         let last_entries = &transcript[start..];
         if last_entries.is_empty() {

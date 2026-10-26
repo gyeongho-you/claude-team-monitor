@@ -8,7 +8,7 @@ import { trackFirstMiss, pruneMissingKeys } from './lib/firstMissTracker';
 import { liveSubagents, backgroundOnly, daemonLocalBashCount } from './lib/subagents';
 import { readActivity, subagentFile, backgroundTasksFor, readTaskOutput } from './lib/activity';
 import { replyToSession } from './lib/daemonReply';
-import { queuedCommandPrompt, mergeInjectedPrompts } from './lib/transcriptMerge';
+import { queuedCommandPrompt } from './lib/transcriptMerge';
 import { hasNoLiveProcess } from './lib/ghostAgent';
 import { archiveMemberFile, restoreRetiredMembers } from './lib/retiredMembers';
 import { ATTACHMENTS_DIR, savePastedImage, purgeOld as purgeOldAttachments } from './lib/pastedImages';
@@ -548,41 +548,68 @@ function readJournalEntries(projectName: string): any[] {
 // 오늘자 daily-journal jsonl에서 그 프로젝트의 마지막 기록(가장 최근 대화)을 미리보기로 가져온다.
 // projectName만으로 마지막 기록을 가져오면, 같은 디렉토리에서 예전에 지운 세션의 마지막 대화가
 // 새로 띄운(아직 대화 기록이 없는) 세션 카드에 그대로 새어나온다 — 반드시 sessionId로 걸러야 한다.
-function getLatestPreview(projectName: string, sessionId: string): SessionRow['preview'] {
-  const entries = readJournalEntries(projectName).filter(e => e.sessionId === sessionId);
-  if (entries.length === 0) return null;
-  const last = entries[entries.length - 1];
-  // daily-journal이 prompt/answer 말고 요약([F]/[T]/[S] 구조로 파일·도구·핵심을 정리한 것)도 같이
-  // 남긴다 — 원문 앞부분을 그냥 자르는 것보다 훨씬 읽기 좋아서 있으면 우선 쓴다.
-  return { time: last.time ?? '', prompt: last.prompt ?? '', answer: last.answer ?? '', summary: last.summary || undefined };
+function getLatestPreview(projectName: string, sessionId: string, cwd: string): SessionRow['preview'] {
+  const last = recentTurns(projectName, sessionId, cwd).slice(-1)[0];
+  if (!last) return null;
+  return { time: last.time ?? '', prompt: last.prompt ?? '', answer: last.answer ?? '' };
 }
 
-// 팀장과의 "대화" 패널용 — 그 세션 id로 필터링한 전체 왕복 기록. daily-journal이 특정 상황
-// (백그라운드 세션의 긴 턴, task-notification으로 재개된 턴 등 — claude-team-monitor 바깥의 별도
-// 이슈로 실측 확인됨)에서 기록을 통째로 누락할 수 있다 — 그러면 대화창이 텅 비거나 최근 턴만
-// 쏙 빠져 보인다. daily-journal 기록이 비었거나 원본 세션 파일보다 뒤처져 보이면, 원본 세션 파일
-// (~/.claude/projects/<cwd 인코딩>/<sessionId>.jsonl)에서 직접 읽어와 모자란 뒷부분만 이어붙인다.
-// 그 다음 enrichAnswersFromRawSession으로, daily-journal에 이미 있는 턴이라도 원본 쪽 답변이 더
-// 길면(daily-journal은 그 턴의 "마지막 assistant 메시지" 한 조각만 남기는 구조라 도구 호출
-// 사이사이의 앞쪽 설명이 다 빠질 수 있음 — daily-journal 자체 소스로 확인함) 그쪽으로 교체한다.
-function getTranscript(projectName: string, sessionId: string, cwd: string): TranscriptEntry[] {
-  const journalEntries = readJournalEntries(projectName)
+// 팀장과의 "대화" 패널용 — 그 세션 id의 전체 왕복 기록. 기본 출처는 claude가 직접 쓰는 원본 세션 파일
+// (~/.claude/projects/<cwd 인코딩>/<sessionId>.jsonl)이다. 턴이 끝나야 기록되는 daily-journal 플러그인은 기록이
+// 통째로 빠지거나 늦어지는 일이 잦았다. 끼어든 메시지(queued_command)도 원본 파서가 이미 새 턴으로 읽는다.
+// daily-journal은 원본에서 대화를 하나도 못 읽을 때만 쓰는 읽기 전용 보조다.
+function journalTurns(projectName: string, sessionId: string): TranscriptEntry[] {
+  return readJournalEntries(projectName)
     .filter(e => e.sessionId === sessionId)
     .map(e => ({ time: e.time ?? '', prompt: e.prompt ?? '', answer: e.answer ?? '' }));
-  const filled = fillMissingTranscriptFromRawSession(journalEntries, cwd, sessionId);
-  // 일하는 도중 끼어든 메시지는 일지에 안 남으므로 원본에서 찾아 시간순 위치에 끼워 넣는다(lib/transcriptMerge.js 참고).
-  const merged = mergeInjectedPrompts(filled, getCachedRawSessionTranscript(cwd, sessionId).filter(e => e.injected));
-  return enrichAnswersFromRawSession(merged, cwd, sessionId);
 }
 
-// "YYYY-MM-DD HH:MM"(daily-journal의 time 포맷, 분 단위) 문자열을 로컬 시각 기준 epoch ms로
-// 되돌린다 — 형식이 안 맞으면(예전 스키마 등) null.
-function parseJournalTimeLoose(time: string): number | null {
-  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(time);
-  if (!m) return null;
-  const [, y, mo, d, h, mi] = m;
-  const ts = new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi)).getTime();
-  return Number.isNaN(ts) ? null : ts;
+const warnedUnreadable = new Set<string>();
+// 원본 파일은 있는데 대화를 하나도 못 읽는 세션을 앱 로그에 한 번만 남긴다 — claude의 기록 형식이 바뀌었을 때 알아챌 수 있게 한다.
+function warnIfUnreadableOnce(file: string): void {
+  try {
+    if (fs.statSync(file).size <= 2048 || warnedUnreadable.has(file)) return;
+    warnedUnreadable.add(file);
+    console.error(`[transcript] 세션 파일은 있는데 대화를 하나도 읽지 못했습니다(기록 형식이 바뀌었을 수 있음): ${file}`);
+  } catch { /* 파일 없음 */ }
+}
+
+function getTranscript(projectName: string, sessionId: string, cwd: string): TranscriptEntry[] {
+  const raw = getCachedRawSessionTranscript(cwd, sessionId);
+  if (raw.length > 0) return raw;
+  warnIfUnreadableOnce(sessionFilePath(cwd, sessionId));
+  return journalTurns(projectName, sessionId);
+}
+
+// 최근 몇 턴 — 파일 끝부분만 읽어서(수십 MB 파일을 폴링마다 통째로 파싱하지 않기 위해) 카드 미리보기·정체 감시에 쓴다.
+// 끝부분에 사용자 메시지가 하나도 없으면(긴 도구 실행 구간) 읽는 범위를 넓혀 다시 본다. 원본에서 못 읽으면 daily-journal(있다면).
+function readTailTurns(file: string): TranscriptEntry[] {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(file, 'r');
+    const len = fs.fstatSync(fd).size;
+    for (const window of [256 * 1024, 2 * 1024 * 1024, 16 * 1024 * 1024]) {
+      const start = Math.max(0, len - window);
+      const buf = Buffer.alloc(len - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      let lines = buf.toString('utf8').split('\n');
+      if (start > 0) lines = lines.slice(1); // 시작 위치가 줄 중간일 수 있으니 첫 줄은 버린다
+      const entries = parseRawSessionLines(lines);
+      if (entries.length > 0) return entries;
+      if (start === 0) break;
+    }
+  } catch { /* 파일 없음 */ } finally {
+    if (fd !== undefined) try { fs.closeSync(fd); } catch { /* ignore */ }
+  }
+  return [];
+}
+
+function recentTurns(projectName: string, sessionId: string, cwd: string): TranscriptEntry[] {
+  const file = sessionFilePath(cwd, sessionId);
+  const tail = readTailTurns(file);
+  if (tail.length > 0) return tail;
+  if (fs.existsSync(file)) warnIfUnreadableOnce(file);
+  return journalTurns(projectName, sessionId);
 }
 
 function formatRawSessionTimestamp(iso: string | undefined): string {
@@ -631,7 +658,10 @@ function readRawSessionTranscript(cwd: string, sessionId: string): TranscriptEnt
   } catch {
     return [];
   }
+  return parseRawSessionLines(lines);
+}
 
+function parseRawSessionLines(lines: string[]): TranscriptEntry[] {
   const entries: TranscriptEntry[] = [];
   let currentPrompt: { time: string; prompt: string; injected?: boolean } | null = null;
   let currentAnswerParts: string[] = [];
@@ -678,91 +708,6 @@ function readRawSessionTranscript(cwd: string, sessionId: string): TranscriptEnt
   }
   flush();
   return entries;
-}
-
-// daily-journal 기록이 있으면 그게 더 깔끔하게 정제된 형태라 그대로 신뢰하고, 거기 없는(원본에는
-// 있는) 뒷부분만 원본 세션 파일에서 보완해서 이어붙인다 — 완전히 원본으로 교체하지 않는다.
-// 원본 세션 파일은 몇 MB씩 될 수 있어서(실측: 두 달치 프로젝트의 팀장 세션 파일이 1.7MB) 매번
-// 열어 전체를 재구성하면 3초 폴링마다 부담이 크다 — daily-journal의 마지막 기록 시각 이후로 원본
-// 파일이 수정된 적이 없으면(fs.statSync만으로 확인 가능, 파일을 열 필요가 없다) 새로 쌓인 턴이
-// 없다는 뜻이니 그냥 넘어간다.
-function fillMissingTranscriptFromRawSession(journalEntries: TranscriptEntry[], cwd: string, sessionId: string): TranscriptEntry[] {
-  if (journalEntries.length === 0) {
-    const raw = getCachedRawSessionTranscript(cwd, sessionId);
-    return raw.length ? raw : journalEntries;
-  }
-
-  const file = sessionFilePath(cwd, sessionId);
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(file);
-  } catch {
-    return journalEntries;
-  }
-  const lastJournalTime = parseJournalTimeLoose(journalEntries[journalEntries.length - 1].time);
-  // "YYYY-MM-DD HH:MM"은 분 단위까지만 있어서 실제 mtime과 최대 1분 가까이 차이날 수 있다 —
-  // 여유를 두고 비교한다.
-  if (lastJournalTime !== null && stat.mtimeMs <= lastJournalTime + 2 * 60 * 1000) {
-    return journalEntries;
-  }
-
-  const rawEntries = getCachedRawSessionTranscript(cwd, sessionId);
-  if (rawEntries.length === 0) return journalEntries;
-
-  const cutIndex = findLastMatchingRawIndex(journalEntries[journalEntries.length - 1], rawEntries);
-  // daily-journal의 마지막 프롬프트를 원본에서 못 찾으면(문구 가공 등으로 정확히 안 맞을 수 있음)
-  // 개수 기준으로 대략 맞춰 보완한다 — 완벽하지 않아도 아예 안 보이는 것보다는 낫다.
-  const tail = cutIndex >= 0 ? rawEntries.slice(cutIndex + 1) : rawEntries.slice(journalEntries.length);
-  return tail.length ? journalEntries.concat(tail) : journalEntries;
-}
-
-// daily-journal에 이미 기록이 있는 턴이라도, 그 턴의 답변이 원본 세션 파일 쪽보다 짧으면 원본
-// 쪽으로 교체한다. daily-journal의 answer는 Stop 훅이 넘겨주는 last_assistant_message 그대로인데,
-// 이건 그 턴의 "진짜 마지막 assistant 메시지 하나"일 뿐이다(daily-journal 자체 소스 stop-hook.ts
-// 확인) — 도구 호출 사이사이에 나온 앞쪽 설명은 애초에 daily-journal에 전달조차 안 된다. 그래서
-// 실시간으로 볼 때는(원본 파일 기반) 전체가 다 보이다가, daily-journal이 그 턴의 기록을 남기는
-// 순간부터 "완료했습니다" 같은 마지막 한 마디로 줄어드는 게 실사용으로 확인된 증상이다. 매칭은
-// findLastMatchingRawIndex와 같은 방식(prompt 정확히 일치 + 시간 가장 가까운 후보)을 항목별로
-// 반복한다 — 못 찾으면(문구 가공 등) 그 항목은 그대로 둔다.
-function enrichAnswersFromRawSession(entries: TranscriptEntry[], cwd: string, sessionId: string): TranscriptEntry[] {
-  if (entries.length === 0) return entries;
-  const rawEntries = getCachedRawSessionTranscript(cwd, sessionId);
-  if (rawEntries.length === 0) return entries;
-  return entries.map(entry => {
-    const idx = findLastMatchingRawIndex(entry, rawEntries);
-    if (idx < 0) return entry;
-    const rawAnswer = rawEntries[idx].answer;
-    return rawAnswer.length > entry.answer.length ? { ...entry, answer: rawAnswer } : entry;
-  });
-}
-
-// journalEntries의 마지막 항목과 똑같은 prompt 텍스트가 원본 세션 파일에 정확히 어디 있었는지
-// 찾는다. 이 앱이 자동으로 넣는 "[알림] 팀원 ... 완료" 같은 정형 문구는 같은 팀원이 같은 상태로
-// 여러 번 끝날 때마다 글자 하나 안 틀리고 그대로 반복될 수 있다(실측 확인) — 그래서 단순히
-// "원본 배열 끝에서부터 훑어 처음 일치하는 것"을 고르면, 훨씬 나중에 벌어진 무관한 재발생을
-// 잘못 짚어서 그 뒤로 아무것도 안 남는(보완 실패) 사고가 난다. daily-journal의 time과 원본
-// 프롬프트의 time이 완전히 같지는 않아도(대기열에 걸려있다 배달되면 최대 수십 분 차이날 수
-// 있음 — deliverPendingNotices 참고) 어느 정도는 가까울 수밖에 없으므로, 텍스트가 일치하는
-// 후보들 중 시간이 가장 가까운 것을 고른다.
-function findLastMatchingRawIndex(lastEntry: TranscriptEntry, rawEntries: TranscriptEntry[]): number {
-  const lastTime = parseJournalTimeLoose(lastEntry.time);
-  if (lastTime === null) {
-    for (let i = rawEntries.length - 1; i >= 0; i--) {
-      if (rawEntries[i].prompt === lastEntry.prompt) return i;
-    }
-    return -1;
-  }
-  const MATCH_SLACK_MS = 60 * 60 * 1000; // 대기열에서 오래 기다린 경우까지 감안한 여유
-  let bestIndex = -1;
-  let bestDiff = Infinity;
-  for (let i = rawEntries.length - 1; i >= 0; i--) {
-    if (rawEntries[i].prompt !== lastEntry.prompt) continue;
-    const rawTime = parseJournalTimeLoose(rawEntries[i].time);
-    if (rawTime === null) continue;
-    const diff = Math.abs(rawTime - lastTime);
-    if (diff <= MATCH_SLACK_MS && diff < bestDiff) { bestDiff = diff; bestIndex = i; }
-  }
-  return bestIndex;
 }
 
 // claude 자신이 세션마다 자동으로 붙이는 짧은 주제(claude agents --json의 name 필드, 네이티브
@@ -1112,7 +1057,7 @@ function computeLiveRows(
       return {
         ...a,
         projectName,
-        preview: getLatestPreview(projectName, a.sessionId),
+        preview: getLatestPreview(projectName, a.sessionId, a.cwd),
         isLead,
         leadId: member?.leadId,
         role: member?.role,
@@ -1299,7 +1244,7 @@ async function runStallWatchdog(liveRows: SessionRow[], leads: LeadRecord[], mem
   try {
     for (const { member, memberRow, lead, leadRow } of candidates) {
       const projectName = resolveProjectName(lead.sessionId, lead.targetDir);
-      const transcript = getTranscript(projectName, lead.sessionId, lead.targetDir);
+      const transcript = recentTurns(projectName, lead.sessionId, lead.targetDir);
       const lastEntries = transcript.slice(-4);
       if (lastEntries.length === 0) continue; // 대화 기록이 없으면 판단할 근거가 없다 — 아직 실제 확인은 안 했으니 쿨다운도 걸지 않고 다음 폴링에 다시 시도한다
 
@@ -1510,7 +1455,7 @@ function buildLeadRecordRow(l: LeadRecord, offline: boolean): { row: SessionRow;
     startedAt: l.launchedAt,
     name: l.aiTitle,
     projectName,
-    preview: getLatestPreview(projectName, l.sessionId),
+    preview: getLatestPreview(projectName, l.sessionId, l.targetDir),
     isLead: true,
     label: l.label,
     offline,
