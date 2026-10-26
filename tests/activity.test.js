@@ -95,6 +95,21 @@ test('증분 스캔은 새로 붙은 완성된 줄만 읽는다(덜 써진 줄�
   assert.strictEqual(backgroundTasksFor(file, 1).length, 2);
 });
 
+test('포그라운드로 시작해 120초 제한으로 자동 백그라운드가 된 명령도 작업으로 잡는다', () => {
+  const scan = newScan();
+  const lines = [
+    j({ type: 'assistant', timestamp: '2026-10-26T01:00:00Z', message: { content: [{ type: 'tool_use', id: 'tu9', name: 'Bash', input: { command: 'python -m pytest tests', description: '전체 테스트' } }] } }),
+    j({ type: 'user', timestamp: '2026-10-26T01:02:00Z', message: { content: [{ type: 'tool_result', tool_use_id: 'tu9', content: 'Command did not complete within its 120s timeout and was moved to the background (ID: brc110e8v). Output is being written to: C:\\Temp\\claude\\proj\\sess\\tasks\\brc110e8v.output. You will be notified when it completes.' }] } }),
+    j({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tu10', name: 'Bash', input: { command: 'ls' } }] } }),
+    j({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu10', content: 'a b c' }] } }),
+  ];
+  for (const l of lines) scanTaskLine(scan, l);
+  assert.strictEqual(scan.launches.length, 1);
+  assert.strictEqual(scan.launches[0].taskId, 'brc110e8v');
+  assert.strictEqual(scan.launches[0].command, 'python -m pytest tests');
+  assert.strictEqual(scan.launches[0].outputPath, 'C:\\Temp\\claude\\proj\\sess\\tasks\\brc110e8v.output');
+});
+
 test('서브에이전트가 띄운 백그라운드 명령도 찾고 그 기록의 완료 알림과 짝짓는다', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ctm-activity-sub-'));
   const sub = path.join(dir, 'sess', 'subagents');

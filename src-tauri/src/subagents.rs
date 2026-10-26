@@ -46,10 +46,14 @@ fn daemon_in_flight_in(jobs_dir: &Path, short_id: &str) -> Option<(u32, Vec<Stri
     let tasks = in_flight.get("tasks")?.as_u64()? as u32;
     let kinds: Vec<String> = in_flight.get("kinds")?.as_array()?.iter().filter_map(|k| k.as_str().map(str::to_string)).collect();
     if tasks == 0 {
-        None
-    } else {
-        Some((tasks, kinds))
+        return None;
     }
+    // tasks에는 서브에이전트·백그라운드 명령 말고 다른 종류(artifact_watch 등)도 들어 있다(실측 2026-10-26: [artifact_watch, local_agent] = tasks 2인데
+    // 서브에이전트는 1개). 다른 종류는 종류마다 1개로 보고(artifact_watch는 drainableMonitors 개수) 빼서 센다.
+    let drainable = in_flight.get("drainableMonitors").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let others: u32 = kinds.iter().filter(|k| *k != "local_agent" && *k != "local_bash").map(|k| if k == "artifact_watch" { drainable.max(1) } else { 1 }).sum();
+    let counted = kinds.iter().any(|k| k == "local_agent" || k == "local_bash");
+    Some((if counted { tasks.saturating_sub(others).max(1) } else { tasks }, kinds))
 }
 
 /// 데몬의 tasks는 종류를 가리지 않은 합계다(실측 2026-10-26: 서브에이전트 1 + 서브에이전트가 띄운 백그라운드 명령 1 = tasks 2,
@@ -238,6 +242,15 @@ mod tests {
         assert_eq!(agents("cccc3333"), None);
         assert_eq!(agents("../x"), None);
         assert_eq!(agents("nothere1"), None);
+    }
+
+    #[test]
+    fn other_kinds_like_artifact_watch_are_not_counted_as_subagents() {
+        let jobs = tmp("others");
+        std::fs::create_dir_all(jobs.join("aaaa1111")).unwrap();
+        // 실측: 서브에이전트 1개 + 산출물 감시 1개 → tasks 2
+        std::fs::write(jobs.join("aaaa1111").join("state.json"), r#"{"inFlight":{"tasks":2,"queued":0,"kinds":["artifact_watch","local_agent"],"drainableMonitors":1}}"#).unwrap();
+        assert_eq!(daemon_in_flight_in(&jobs, "aaaa1111").map(|(t, _)| t), Some(1));
     }
 
     #[test]

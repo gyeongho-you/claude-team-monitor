@@ -702,11 +702,15 @@ async function renderBackgroundSection() {
   const running = tasks.filter(isTaskRunning);
   const ended = tasks.filter(t => !isTaskRunning(t)).slice(0, 8);
   const processChecked = tasks.some(t => t.alive !== undefined);
+  // 데몬이 센 local_bash/tasks 개수는 숫자로 믿을 수 없다(실측 2026-10-26: pc 연동 툴 팀장은 기록·프로세스로는 미완료 백그라운드 작업이 0개인데 데몬은
+  // tasks 3[artifact_watch·local_agent·local_bash]을 셌다 — 종류가 섞이고, 실행 중인 일반 명령도 local_bash일 가능성이 있다). 그래서 숫자로 쓰지 않고,
+  // 기록과 프로세스로 확인된 실행 중 작업이 없으면 빈 칸을 보이지 않고 숨긴다(사용자 지적: 없는데 "2개"로 보임).
+  if (running.length === 0) { backgroundSectionEl.hidden = true; return; }
   backgroundSectionEl.hidden = false;
-  backgroundCountEl.textContent = String(processChecked ? running.length : lead.backgroundTasks);
+  backgroundCountEl.textContent = String(running.length);
   backgroundHintEl.textContent = processChecked
-    ? `프로세스를 확인해 지금 실제로 떠 있는 것만 위에 보입니다(데몬이 센 개수: ${lead.backgroundTasks}개). 끝난 작업은 아래에 접어 두었습니다.`
-    : `프로세스 목록을 얻지 못해 팀장 기록으로 추정했습니다(데몬이 센 개수: ${lead.backgroundTasks}개) — "실행 중(추정)"은 완료 알림이 없는 것 중 가장 최근 ${lead.backgroundTasks}개입니다.`;
+    ? '프로세스를 확인해 지금 실제로 떠 있는 것만 위에 보입니다. 끝난 작업은 아래에 접어 두었습니다.'
+    : '프로세스 목록을 얻지 못해 팀장 기록으로 추정했습니다 — "실행 중(추정)"은 완료 알림이 없는 가장 최근 작업입니다.';
   const taskHtml = t => `
       <div class="bg-task">
         <div class="bg-task-main">

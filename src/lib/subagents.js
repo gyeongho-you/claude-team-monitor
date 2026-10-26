@@ -22,7 +22,12 @@ function daemonInFlight(jobsDir, shortId) {
     const data = JSON.parse(fs.readFileSync(path.join(jobsDir, shortId, 'state.json'), 'utf-8'));
     const f = data && data.inFlight;
     if (!f || !Array.isArray(f.kinds) || typeof f.tasks !== 'number' || f.tasks <= 0) return null;
-    return { tasks: f.tasks, kinds: f.kinds };
+    // tasks에는 서브에이전트·백그라운드 명령 말고 다른 종류(artifact_watch 등)도 들어 있다(실측 2026-10-26: [artifact_watch, local_agent] = tasks 2인데
+    // 서브에이전트는 1개). 다른 종류는 종류마다 1개로 보고(artifact_watch는 drainableMonitors 개수) 빼서 센다.
+    const drainable = typeof f.drainableMonitors === 'number' ? f.drainableMonitors : 0;
+    const others = f.kinds.filter(k => k !== 'local_agent' && k !== 'local_bash').reduce((n, k) => n + (k === 'artifact_watch' ? Math.max(drainable, 1) : 1), 0);
+    const counted = f.kinds.includes('local_agent') || f.kinds.includes('local_bash');
+    return { tasks: counted ? Math.max(f.tasks - others, 1) : f.tasks, kinds: f.kinds };
   } catch { return null; }
 }
 

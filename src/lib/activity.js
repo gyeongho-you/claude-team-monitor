@@ -118,12 +118,15 @@ const between = (s, start, end) => { const a = s.indexOf(start); if (a === -1) r
 function newScan() { return { offset: 0, pending: new Map(), launches: [], done: new Map() }; }
 
 function scanTaskLine(scan, line) {
-  if (!(line.includes('run_in_background') || line.includes('running in background with ID') || line.includes('<task-notification>'))) return;
+  // 포그라운드로 시작했다가 120초 제한에 걸려 자동으로 백그라운드로 넘어간 명령("moved to the background (ID: …)", 실측 2026-10-26)도 같은
+  // 백그라운드 작업이다 — 이때는 tool_use에 run_in_background가 없어서 명령을 알려면 Bash 호출을 전부 기억해 둬야 한다.
+  if (!(line.includes('run_in_background') || line.includes('background with ID') || line.includes('moved to the background') || line.includes('<task-notification>') || line.includes('"name":"Bash"'))) return;
   let rec; try { rec = JSON.parse(line); } catch { return; }
   const time = formatTime(rec.timestamp);
   if (rec.type === 'assistant') {
     for (const b of (rec.message && rec.message.content) || []) {
-      if (b && b.type === 'tool_use' && b.name === 'Bash' && b.input && b.input.run_in_background === true) {
+      if (b && b.type === 'tool_use' && b.name === 'Bash' && b.input) {
+        if (scan.pending.size > 1000) scan.pending.clear(); // 결과가 안 오는 호출이 쌓이는 비정상 상황의 안전장치
         scan.pending.set(String(b.id || ''), { cmd: clip(oneLine(b.input.command || ''), 240), desc: clip(String(b.input.description || ''), 120), time });
       }
     }
@@ -133,14 +136,14 @@ function scanTaskLine(scan, line) {
     for (const b of c) {
       if (!b || b.type !== 'tool_result') continue;
       const text = typeof b.content === 'string' ? b.content : JSON.stringify(b.content);
-      const taskId = between(text, 'running in background with ID: ', '.');
+      const p = scan.pending.get(String(b.tool_use_id || '')) || { cmd: '', desc: '', time: '' };
+      scan.pending.delete(String(b.tool_use_id || ''));
+      const taskId = between(text, 'running in background with ID: ', '.') || between(text, 'moved to the background (ID: ', ')');
       if (!taskId) continue;
       // 경로 뒤에 ". You will be notified when it completes …" 같은 안내 문장이 이어지므로 ".output"까지만 경로로 읽는다(실측).
       const outRaw = text.split('Output is being written to: ')[1] || '';
       const outIdx = outRaw.indexOf('.output');
       const out = outIdx !== -1 ? outRaw.slice(0, outIdx + '.output'.length) : outRaw.split('\n')[0].trim();
-      const p = scan.pending.get(String(b.tool_use_id || '')) || { cmd: '', desc: '', time: '' };
-      scan.pending.delete(String(b.tool_use_id || ''));
       scan.launches.push({ taskId: taskId.trim(), command: p.cmd, description: p.desc, started: p.time || time, outputPath: out.replace(/\\\\/g, '\\').trim() });
     }
   } else if (rec.type === 'queue-operation' && rec.operation === 'enqueue' && typeof rec.content === 'string') {

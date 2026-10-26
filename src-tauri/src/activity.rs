@@ -224,7 +224,9 @@ fn between<'a>(s: &'a str, start: &str, end: &str) -> Option<&'a str> {
 }
 
 fn scan_task_line(scan: &mut TaskScan, line: &str) {
-    if !(line.contains("run_in_background") || line.contains("running in background with ID") || line.contains("<task-notification>")) {
+    // 포그라운드로 시작했다가 120초 제한에 걸려 자동으로 백그라운드로 넘어간 명령("moved to the background (ID: …)", 실측 2026-10-26)도 같은
+    // 백그라운드 작업이다 — 이때는 tool_use에 run_in_background가 없어서 명령을 알려면 Bash 호출을 전부 기억해 둬야 한다.
+    if !(line.contains("run_in_background") || line.contains("background with ID") || line.contains("moved to the background") || line.contains("<task-notification>") || line.contains("\"name\":\"Bash\"")) {
         return;
     }
     let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else { return };
@@ -234,12 +236,13 @@ fn scan_task_line(scan: &mut TaskScan, line: &str) {
             for b in rec.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array()).into_iter().flatten() {
                 if b.get("type").and_then(|t| t.as_str()) == Some("tool_use") && b.get("name").and_then(|n| n.as_str()) == Some("Bash") {
                     let input = b.get("input");
-                    if input.and_then(|i| i.get("run_in_background")).and_then(|v| v.as_bool()) == Some(true) {
-                        let id = b.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
-                        let cmd = input.and_then(|i| i.get("command")).and_then(|c| c.as_str()).unwrap_or("");
-                        let desc = input.and_then(|i| i.get("description")).and_then(|c| c.as_str()).unwrap_or("");
-                        scan.pending.insert(id, (clip(&cmd.split_whitespace().collect::<Vec<_>>().join(" "), 240), clip(desc, 120), time.clone()));
+                    let id = b.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                    let cmd = input.and_then(|i| i.get("command")).and_then(|c| c.as_str()).unwrap_or("");
+                    let desc = input.and_then(|i| i.get("description")).and_then(|c| c.as_str()).unwrap_or("");
+                    if scan.pending.len() > 1000 {
+                        scan.pending.clear(); // 결과가 안 오는 호출이 쌓이는 비정상 상황의 안전장치
                     }
+                    scan.pending.insert(id, (clip(&cmd.split_whitespace().collect::<Vec<_>>().join(" "), 240), clip(desc, 120), time.clone()));
                 }
             }
         }
@@ -253,15 +256,17 @@ fn scan_task_line(scan: &mut TaskScan, line: &str) {
                     Some(v) => v.to_string(),
                     None => continue,
                 };
-                let Some(task_id) = between(&text, "running in background with ID: ", ".") else { continue };
+                let tool_use_id = b.get("tool_use_id").and_then(|i| i.as_str()).unwrap_or("");
+                let started = scan.pending.remove(tool_use_id);
+                let task_id = between(&text, "running in background with ID: ", ".").or_else(|| between(&text, "moved to the background (ID: ", ")"));
+                let Some(task_id) = task_id else { continue };
                 // 경로 뒤에 ". You will be notified when it completes …" 같은 안내 문장이 이어지므로 ".output"까지만 경로로 읽는다(실측).
                 let out_raw = text.split("Output is being written to: ").nth(1).unwrap_or("");
                 let out = match out_raw.find(".output") {
                     Some(i) => &out_raw[..i + ".output".len()],
                     None => out_raw.lines().next().unwrap_or("").trim(),
                 };
-                let tool_use_id = b.get("tool_use_id").and_then(|i| i.as_str()).unwrap_or("");
-                let (cmd, desc, t) = scan.pending.remove(tool_use_id).unwrap_or_default();
+                let (cmd, desc, t) = started.unwrap_or_default();
                 scan.launches.push((task_id.trim().to_string(), cmd, desc, if t.is_empty() { time.clone() } else { t }, out.replace("\\\\", "\\").trim().to_string()));
             }
         }
@@ -539,6 +544,24 @@ mod tests {
             rec(serde_json::json!({"type":"assistant","timestamp":"2026-10-26T01:00:00Z","message":{"content":[{"type":"tool_use","id":tool_use,"name":"Bash","input":{"command":cmd,"description":"설명","run_in_background":true}}]}})),
             rec(serde_json::json!({"type":"user","timestamp":"2026-10-26T01:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":tool_use,"content":format!("Command running in background with ID: {id}. Output is being written to: C:\\Temp\\claude\\proj\\sess\\tasks\\{id}.output. You will be notified when it completes — do not poll that file.\nSession cwd remains C:\\x.")}]}})),
         ]
+    }
+
+    #[test]
+    fn a_foreground_command_auto_moved_to_background_after_the_timeout_is_a_task() {
+        let mut scan = TaskScan::default();
+        let lines = [
+            rec(serde_json::json!({"type":"assistant","timestamp":"2026-10-26T01:00:00Z","message":{"content":[{"type":"tool_use","id":"tu9","name":"Bash","input":{"command":"python -m pytest tests","description":"전체 테스트"}}]}})),
+            rec(serde_json::json!({"type":"user","timestamp":"2026-10-26T01:02:00Z","message":{"content":[{"type":"tool_result","tool_use_id":"tu9","content":"Command did not complete within its 120s timeout and was moved to the background (ID: brc110e8v). Output is being written to: C:\\Temp\\claude\\proj\\sess\\tasks\\brc110e8v.output. You will be notified when it completes."}]}})),
+            rec(serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu10","name":"Bash","input":{"command":"ls"}}]}})),
+            rec(serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu10","content":"a b c"}]}})),
+        ];
+        for l in &lines {
+            scan_task_line(&mut scan, l);
+        }
+        assert_eq!(scan.launches.len(), 1);
+        assert_eq!(scan.launches[0].0, "brc110e8v");
+        assert_eq!(scan.launches[0].1, "python -m pytest tests");
+        assert_eq!(scan.launches[0].4, "C:\\Temp\\claude\\proj\\sess\\tasks\\brc110e8v.output");
     }
 
     #[test]
