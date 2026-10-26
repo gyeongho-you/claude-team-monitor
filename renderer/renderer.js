@@ -676,6 +676,20 @@ function backgroundStatusBadge(t) {
   return `<span class="bg-badge">${escapeHtml(map[t.status] || t.status)}</span>`;
 }
 
+// 작업 이름: 팀장이 붙인 설명이 있으면 그것, 없으면 명령에서 "폴더 · 실행 프로그램"을 뽑아 사람이 읽을 이름으로 만든다
+function backgroundTaskTitle(t) {
+  if (t.description) return t.description;
+  const cmd = String(t.command || '');
+  const cd = cmd.match(/^cd\s+("[^"]+"|'[^']+'|\S+)/);
+  const dir = cd ? cd[1].replace(/^["']|["']$/g, '').split(/[\\/]/).filter(Boolean).pop() : '';
+  const rest0 = cmd.replace(/^cd\s+("[^"]+"|'[^']+'|\S+)\s*(&&|;)\s*/, '');
+  const parts = rest0.split(/\s*(?:&&|;|\|)\s*/).filter(p => p && !/^(env|echo|export|sleep)\b/.test(p) && !/^[A-Za-z_]+=\S*$/.test(p));
+  let rest = parts.length ? parts[parts.length - 1] : rest0;
+  rest = rest.replace(/^(?:[A-Za-z_]+=("[^"]*"|\S*)\s+)+/, '').replace(/\s*[12]?>.*$/, '').replace(/\S*[\\/](?=[^\\/\s]+(\s|$))/g, '');
+  const prog = rest.trim().split(/\s+/).slice(0, 3).join(' ');
+  return [dir, prog].filter(Boolean).join(' · ') || '(이름 없는 작업)';
+}
+
 async function renderBackgroundSection() {
   const seq = ++backgroundRenderSeq;
   const isCreatingLead = getEffectiveLeadMode() !== 'none';
@@ -697,12 +711,13 @@ async function renderBackgroundSection() {
       <div class="bg-task">
         <div class="bg-task-main">
           ${backgroundStatusBadge(t)}
-          <code class="bg-cmd" title="${escapeHtml(t.command)}">${escapeHtml(t.command || '(명령을 찾지 못함)')}</code>
+          <strong class="bg-title" title="${escapeHtml(t.command)}">${escapeHtml(backgroundTaskTitle(t))}</strong>
         </div>
+        <details class="bg-cmd-detail"><summary>실행한 명령 보기</summary><code class="bg-cmd-full">${escapeHtml(t.command || '(명령을 찾지 못함)')}</code></details>
         <div class="bg-task-meta">
           <span>시작 ${escapeHtml(t.started || '?')}</span>
           <span>출력 ${t.outputBytes ? Math.max(1, Math.round(t.outputBytes / 1024)) + 'KB' : '없음'} · 마지막 출력 ${escapeHtml(formatAgo(t.outputModifiedMs))}</span>
-          <button data-task-output="${escapeHtml(t.taskId)}" data-activity-lead="${escapeHtml(lead.id)}" data-activity-title="${escapeHtml(t.command.slice(0, 50))}">출력 보기</button>
+          <button data-task-output="${escapeHtml(t.taskId)}" data-activity-lead="${escapeHtml(lead.id)}" data-activity-title="${escapeHtml(backgroundTaskTitle(t).slice(0, 50))}">출력 보기</button>
         </div>
       </div>`;
   backgroundListEl.innerHTML =

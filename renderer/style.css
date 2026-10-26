@@ -848,3 +848,8 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 .history-risk { display: inline-block; font-size: 10px; border-radius: 8px; padding: 0 6px; margin-left: 6px; }
 .history-risk.risk-mid { background: #5a4a2a; color: #dcaa3c; }
 .history-risk.risk-high { background: #5a2a2a; color: #f19999; }
+
+.bg-title { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bg-cmd-detail { margin: 4px 0 0 2px; font-size: 11px; color: var(--text-soft); }
+.bg-cmd-detail summary { cursor: pointer; }
+.bg-cmd-full { display: block; margin-top: 4px; white-space: pre-wrap; word-break: break-all; max-height: 120px; overflow: auto; }
