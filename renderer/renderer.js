@@ -1173,12 +1173,14 @@ async function renderChat() {
           <div class="pending-choice-options">${terminalBtnHtml}</div>
         </div>`;
       } else if (needs) {
-        const title = row.waitingFor === 'permission prompt' ? '⚠ 승인/권한 확인을 기다리고 있습니다 — 터미널에서 선택하세요.' : '⚠ 팀장이 사람의 확인을 기다리고 있습니다.';
+        // 터미널에서만 고를 수 있는 건 승인/권한 확인뿐이다. 팀장이 자연어로 물어보고 멈춘 경우는 채팅으로 답하면 되므로 터미널 버튼을 붙이지 않는다(사용자 지적).
+        const terminalOnly = row.waitingFor === 'permission prompt';
+        const title = terminalOnly ? '⚠ 승인/권한 확인을 기다리고 있습니다 — 터미널에서 선택하세요.' : '⚠ 팀장이 답변을 기다리고 있습니다 — 아래 입력창에 답하면 됩니다.';
         pendingChoiceHtml = `
         <div class="pending-choice">
           <div class="pending-choice-question">${title}</div>
           <div class="pending-choice-detail">${escapeHtml(needs === 'approve plan' ? '계획 승인 요청 (approve plan) — 계획을 승인할지, 수정을 요청할지 고릅니다.' : needs)}</div>
-          <div class="pending-choice-options">${terminalBtnHtml}</div>
+          ${terminalOnly ? `<div class="pending-choice-options">${terminalBtnHtml}</div>` : ''}
         </div>`;
       }
     } else {
