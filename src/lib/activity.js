@@ -147,6 +147,11 @@ function scanTaskLine(scan, line) {
     const id = between(rec.content, '<task-id>', '</task-id>');
     const status = between(rec.content, '<status>', '</status>');
     if (id && status) scan.done.set(id.trim(), status.trim());
+  } else if (rec.type === 'attachment' && rec.attachment && rec.attachment.type === 'queued_command' && typeof rec.attachment.prompt === 'string') {
+    // 서브에이전트 기록에는 완료 알림이 queued_command 첨부로 남는다
+    const id = between(rec.attachment.prompt, '<task-id>', '</task-id>');
+    const status = between(rec.attachment.prompt, '<status>', '</status>');
+    if (id && status) scan.done.set(id.trim(), status.trim());
   }
 }
 
@@ -219,11 +224,28 @@ function buildTasks(scan, runningCount, procs) {
 }
 
 const scanCache = new Map();
+function scanOf(file) {
+  let scan = scanCache.get(file);
+  if (!scan) { scan = newScan(); scanCache.set(file, scan); }
+  updateScan(file, scan);
+  return scan;
+}
+
 function backgroundTasksFor(sessionFile, runningCount) {
-  let scan = scanCache.get(sessionFile);
-  if (!scan) { scan = newScan(); scanCache.set(sessionFile, scan); }
-  updateScan(sessionFile, scan);
-  return buildTasks(scan, runningCount, liveBashCommandLines());
+  const parent = scanOf(sessionFile);
+  // 서브에이전트가 띄운 백그라운드 명령은 시작·출력 경로가 그 서브에이전트 기록(subagents/agent-*.jsonl)에만 남고(실측 2026-10-26),
+  // 완료 알림은 팀장 기록과 서브에이전트 기록 양쪽에 남는다 — 같이 스캔해서 합친다.
+  const subDir = path.join(sessionFile.replace(/\.jsonl$/, ''), 'subagents');
+  let subFiles = [];
+  try { subFiles = fs.readdirSync(subDir).filter(n => n.endsWith('.jsonl')).sort().map(n => path.join(subDir, n)); } catch { /* 서브에이전트 없음 */ }
+  const merged = { launches: parent.launches.slice(), done: new Map(parent.done) };
+  for (const f of subFiles) {
+    const sub = scanOf(f);
+    merged.launches.push(...sub.launches);
+    for (const [id, st] of sub.done) if (!merged.done.has(id)) merged.done.set(id, st);
+  }
+  merged.launches.sort((a, b) => (a.started < b.started ? -1 : a.started > b.started ? 1 : 0));
+  return buildTasks(merged, runningCount, liveBashCommandLines());
 }
 
 /** 백그라운드 작업의 출력 끝부분. 출력 경로는 기록에 적힌 값이라 임의 파일을 읽지 않도록 임시 폴더의 claude 작업 폴더 안의 .output만 허용한다. */

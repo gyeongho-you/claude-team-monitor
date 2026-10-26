@@ -95,6 +95,22 @@ test('증분 스캔은 새로 붙은 완성된 줄만 읽는다(덜 써진 줄�
   assert.strictEqual(backgroundTasksFor(file, 1).length, 2);
 });
 
+test('서브에이전트가 띄운 백그라운드 명령도 찾고 그 기록의 완료 알림과 짝짓는다', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ctm-activity-sub-'));
+  const sub = path.join(dir, 'sess', 'subagents');
+  fs.mkdirSync(sub, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'sess.jsonl'), launchLines('par111', 'tp1', 'nuxt dev').join('\n') + '\n');
+  const subLines = [...launchLines('sub222', 'ts1', 'node img-server.mjs'), ...launchLines('sub333', 'ts2', 'gradlew bootRun'),
+    j({ type: 'attachment', attachment: { type: 'queued_command', prompt: '<task-notification>\n<task-id>sub333</task-id>\n<status>completed</status>\n</task-notification>' } })];
+  fs.writeFileSync(path.join(sub, 'agent-a1.jsonl'), subLines.join('\n') + '\n');
+  const tasks = backgroundTasksFor(path.join(dir, 'sess.jsonl'), 2);
+  const status = id => (tasks.find(t => t.taskId === id) || {}).status;
+  assert.strictEqual(tasks.length, 3);
+  assert.strictEqual(status('par111'), 'unfinished');
+  assert.strictEqual(status('sub222'), 'unfinished');
+  assert.strictEqual(status('sub333'), 'completed');
+});
+
 test('서브에이전트 파일 경로는 안전한 id만 만든다', () => {
   assert.strictEqual(subagentFile('/x/sess.jsonl', '../evil'), null);
   assert.ok(subagentFile('/x/sess.jsonl', 'aa5ec3cdb7a092e0c').endsWith(path.join('sess', 'subagents', 'agent-aa5ec3cdb7a092e0c.jsonl')));

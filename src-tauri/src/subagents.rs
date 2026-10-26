@@ -35,31 +35,52 @@ fn read_records(file: &Path) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
-/// 데몬 state.json의 inFlight.tasks. kinds에 kind가 없거나 0이면 None.
-fn daemon_count_of_kind_in(jobs_dir: &Path, short_id: &str, kind: &str) -> Option<u32> {
+/// 데몬 state.json의 (inFlight.tasks, kinds). tasks가 0이거나 읽을 수 없으면 None.
+fn daemon_in_flight_in(jobs_dir: &Path, short_id: &str) -> Option<(u32, Vec<String>)> {
     if !is_safe_id(short_id) {
         return None;
     }
     let raw = std::fs::read_to_string(jobs_dir.join(short_id).join("state.json")).ok()?;
     let data: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let in_flight = data.get("inFlight")?;
-    let has_kind = in_flight.get("kinds")?.as_array()?.iter().any(|k| k.as_str() == Some(kind));
     let tasks = in_flight.get("tasks")?.as_u64()? as u32;
-    if has_kind && tasks > 0 {
-        Some(tasks)
-    } else {
+    let kinds: Vec<String> = in_flight.get("kinds")?.as_array()?.iter().filter_map(|k| k.as_str().map(str::to_string)).collect();
+    if tasks == 0 {
         None
+    } else {
+        Some((tasks, kinds))
     }
 }
 
-/// 데몬 state.json에서 live 서브에이전트 개수. local_agent가 없거나 0이면 None.
-fn daemon_local_agent_count_in(jobs_dir: &Path, short_id: &str) -> Option<u32> {
-    daemon_count_of_kind_in(jobs_dir, short_id, "local_agent")
+/// 데몬의 tasks는 종류를 가리지 않은 합계다(실측 2026-10-26: 서브에이전트 1 + 서브에이전트가 띄운 백그라운드 명령 1 = tasks 2,
+/// kinds [local_agent, local_bash]). 종류가 섞이면 서브에이전트 수는 파일 규칙으로 센 값(실행 중 이름 수)을 기준으로 삼고,
+/// 백그라운드 명령 수는 나머지로 본다. (서브에이전트 수, 백그라운드 명령 수) — 해당 종류가 없으면 None.
+fn split_in_flight(tasks: u32, kinds: &[String], files_agents: usize) -> (Option<u32>, Option<u32>) {
+    let has = |k: &str| kinds.iter().any(|x| x == k);
+    let (has_agent, has_bash) = (has("local_agent"), has("local_bash"));
+    let files_agents = files_agents as u32;
+    match (has_agent, has_bash) {
+        (true, false) => (Some(tasks), None),
+        (false, true) => (None, Some(tasks)),
+        (true, true) => {
+            let agents = files_agents.clamp(1, tasks.saturating_sub(1).max(1));
+            (Some(agents), Some(tasks.saturating_sub(agents)).filter(|n| *n > 0))
+        }
+        (false, false) => (None, None),
+    }
+}
+
+fn running_agents_for(cwd: &str, session_id: &str) -> Vec<(String, String)> {
+    let parent = crate::transcript::session_file_path(cwd, session_id);
+    let dir = parent.with_extension("").join("subagents");
+    running_agents_from_files(&parent, &dir)
 }
 
 /// 데몬이 센 백그라운드 셸 명령(local_bash) 개수 — 화면의 "백그라운드 작업" 칸이 알림 없는 것 중 몇 개가 지금 돌고 있는지 추정하는 기준.
-pub(crate) fn live_local_bash_count(short_id: &str) -> Option<u32> {
-    daemon_count_of_kind_in(&jobs_dir(), short_id, "local_bash")
+pub(crate) fn live_local_bash_count(short_id: &str, cwd: &str, session_id: &str) -> Option<u32> {
+    let (tasks, kinds) = daemon_in_flight_in(&jobs_dir(), short_id)?;
+    let files = if kinds.iter().any(|k| k == "local_agent") { running_agents_for(cwd, session_id).len() } else { 0 };
+    split_in_flight(tasks, &kinds, files).1
 }
 
 /// 팀장은 쉬는 중인데 백그라운드 명령(개발 서버 등)만 남아 데몬이 busy로 보고하는 경우의 정보.
@@ -179,10 +200,12 @@ fn running_agents_from_files(parent_jsonl: &Path, subagents_dir: &Path) -> Vec<(
 
 /// 라이브 팀장 한 명의 서브에이전트 현황. 하나도 안 돌면 None.
 pub(crate) fn live_subagents(short_id: &str, cwd: &str, session_id: &str) -> Option<SubagentInfo> {
-    let count = daemon_local_agent_count_in(&jobs_dir(), short_id)?;
-    let parent = crate::transcript::session_file_path(cwd, session_id);
-    let dir = parent.with_extension("").join("subagents");
-    let mut agents = running_agents_from_files(&parent, &dir);
+    let (tasks, kinds) = daemon_in_flight_in(&jobs_dir(), short_id)?;
+    if !kinds.iter().any(|k| k == "local_agent") {
+        return None;
+    }
+    let mut agents = running_agents_for(cwd, session_id);
+    let count = split_in_flight(tasks, &kinds, agents.len()).0?;
     agents.truncate(count as usize);
     let names = agents.iter().map(|(_, n)| n.clone()).collect();
     let items = agents.into_iter().map(|(id, name)| SubagentRef { id, name }).collect();
@@ -209,11 +232,27 @@ mod tests {
         w("aaaa1111", r#"{"inFlight":{"tasks":2,"queued":0,"kinds":["local_agent"]}}"#);
         w("bbbb2222", r#"{"inFlight":{"tasks":1,"queued":0,"kinds":["artifact_watch"]}}"#);
         w("cccc3333", r#"{"inFlight":{"tasks":0,"queued":0,"kinds":[]}}"#);
-        assert_eq!(daemon_local_agent_count_in(&jobs, "aaaa1111"), Some(2));
-        assert_eq!(daemon_local_agent_count_in(&jobs, "bbbb2222"), None);
-        assert_eq!(daemon_local_agent_count_in(&jobs, "cccc3333"), None);
-        assert_eq!(daemon_local_agent_count_in(&jobs, "../x"), None);
-        assert_eq!(daemon_local_agent_count_in(&jobs, "nothere1"), None);
+        let agents = |id: &str| daemon_in_flight_in(&jobs, id).and_then(|(t, k)| split_in_flight(t, &k, 0).0);
+        assert_eq!(agents("aaaa1111"), Some(2));
+        assert_eq!(agents("bbbb2222"), None);
+        assert_eq!(agents("cccc3333"), None);
+        assert_eq!(agents("../x"), None);
+        assert_eq!(agents("nothere1"), None);
+    }
+
+    #[test]
+    fn mixed_kinds_split_agents_and_background_commands() {
+        let k = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // 실측: 서브에이전트 1개 + 그 서브에이전트가 띄운 백그라운드 명령 1개 → tasks 2
+        assert_eq!(split_in_flight(2, &k(&["local_agent", "local_bash"]), 1), (Some(1), Some(1)));
+        // 파일 규칙이 0개로 읽어도 local_agent가 있으니 최소 1개, 나머지는 백그라운드
+        assert_eq!(split_in_flight(2, &k(&["local_agent", "local_bash"]), 0), (Some(1), Some(1)));
+        // 서브에이전트 둘 + 명령 하나
+        assert_eq!(split_in_flight(3, &k(&["local_agent", "local_bash"]), 2), (Some(2), Some(1)));
+        // 종류가 하나면 tasks 그대로
+        assert_eq!(split_in_flight(2, &k(&["local_agent"]), 1), (Some(2), None));
+        assert_eq!(split_in_flight(3, &k(&["local_bash", "artifact_watch"]), 0), (None, Some(3)));
+        assert_eq!(split_in_flight(1, &k(&["artifact_watch"]), 0), (None, None));
     }
 
     #[test]

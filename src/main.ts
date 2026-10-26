@@ -1122,7 +1122,7 @@ function computeLiveRows(
         autoStallNudge: isLead ? lead?.autoStallNudge : undefined,
         secret: isLead ? lead?.secret : member?.secret,
         subagents: isLead ? liveSubagents(JOBS_DIR, a.id!, sessionFilePath(a.cwd, a.sessionId)) ?? undefined : undefined,
-        backgroundTasks: isLead ? daemonLocalBashCount(JOBS_DIR, a.id!) ?? undefined : undefined,
+        backgroundTasks: isLead ? daemonLocalBashCount(JOBS_DIR, a.id!, sessionFilePath(a.cwd, a.sessionId)) ?? undefined : undefined,
         backgroundOnly: isLead && a.status === 'busy' ? backgroundOnly(JOBS_DIR, a.id!) ?? undefined : undefined,
       };
     });
@@ -2792,7 +2792,7 @@ ipcMain.handle('get-subagent-activity', (_e, leadId: string, agentId: string) =>
 function leadBackgroundTasks(leadId: string) {
   const lead = loadLeads().find(l => l.id === leadId);
   if (!lead) return [];
-  return backgroundTasksFor(sessionFilePath(lead.targetDir, lead.sessionId), daemonLocalBashCount(JOBS_DIR, lead.id) ?? 0);
+  return backgroundTasksFor(sessionFilePath(lead.targetDir, lead.sessionId), daemonLocalBashCount(JOBS_DIR, lead.id, sessionFilePath(lead.targetDir, lead.sessionId)) ?? 0);
 }
 // outputPath(출력 파일의 실제 경로)는 화면에 넘기지 않는다 — 출력은 아래 get-task-output으로만 읽는다.
 ipcMain.handle('get-background-tasks', (_e, leadId: string) =>

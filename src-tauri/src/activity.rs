@@ -274,6 +274,16 @@ fn scan_task_line(scan: &mut TaskScan, line: &str) {
                 }
             }
         }
+        "attachment" => {
+            let att = rec.get("attachment");
+            if att.and_then(|a| a.get("type")).and_then(|t| t.as_str()) == Some("queued_command") {
+                if let Some(c) = att.and_then(|a| a.get("prompt")).and_then(|p| p.as_str()) {
+                    if let (Some(id), Some(status)) = (between(c, "<task-id>", "</task-id>"), between(c, "<status>", "</status>")) {
+                        scan.done.insert(id.trim().to_string(), status.trim().to_string());
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -404,16 +414,38 @@ fn scan_cache() -> &'static Mutex<HashMap<PathBuf, TaskScan>> {
 
 pub(crate) fn background_tasks_for(session_file: &Path, running_count: usize) -> Vec<BackgroundTask> {
     let mut cache = scan_cache().lock().unwrap_or_else(|e| e.into_inner());
-    let scan = cache.entry(session_file.to_path_buf()).or_default();
-    update_scan(session_file, scan);
+    {
+        let scan = cache.entry(session_file.to_path_buf()).or_default();
+        update_scan(session_file, scan);
+    }
+    // 서브에이전트가 띄운 백그라운드 명령은 시작·출력 경로가 그 서브에이전트 기록(subagents/agent-*.jsonl)에만 남고(실측 2026-10-26,
+    // pc 연동 툴 팀장: 데몬은 local_bash 1개를 세는데 팀장 기록에는 시작이 없었다), 완료 알림은 팀장 기록과 서브에이전트 기록 양쪽에 남는다.
+    let sub_dir = session_file.with_extension("").join("subagents");
+    let mut sub_files: Vec<PathBuf> = std::fs::read_dir(&sub_dir)
+        .map(|rd| rd.flatten().map(|e| e.path()).filter(|p| p.extension().and_then(|x| x.to_str()) == Some("jsonl")).collect())
+        .unwrap_or_default();
+    sub_files.sort();
+    for p in &sub_files {
+        update_scan(p, cache.entry(p.clone()).or_default());
+    }
+    let mut merged = cache.get(session_file).cloned().unwrap_or_default();
+    for p in &sub_files {
+        if let Some(sub) = cache.get(p) {
+            merged.launches.extend(sub.launches.iter().cloned());
+            for (id, status) in &sub.done {
+                merged.done.entry(id.clone()).or_insert_with(|| status.clone());
+            }
+        }
+    }
+    merged.launches.sort_by(|a, b| a.3.cmp(&b.3)); // 시작 시각순(최신이 아래, build_tasks가 뒤집는다)
     let procs = live_bash_command_lines();
-    build_tasks(scan, running_count, procs.as_deref())
+    build_tasks(&merged, running_count, procs.as_deref())
 }
 
 fn lead_session_file(lead_id: &str) -> Option<(PathBuf, usize)> {
     let lead = crate::session_registry::load_leads().into_iter().find(|l| l.id == lead_id)?;
     // 데몬이 센 백그라운드 셸 개수(state.json) — 알림 없는 것 중 몇 개가 지금 돌고 있는지 추정하는 기준
-    let running = crate::subagents::live_local_bash_count(&lead.id).unwrap_or(0) as usize;
+    let running = crate::subagents::live_local_bash_count(&lead.id, &lead.target_dir, &lead.session_id).unwrap_or(0) as usize;
     Some((crate::transcript::session_file_path(&lead.target_dir, &lead.session_id), running))
 }
 
@@ -507,6 +539,27 @@ mod tests {
             rec(serde_json::json!({"type":"assistant","timestamp":"2026-10-26T01:00:00Z","message":{"content":[{"type":"tool_use","id":tool_use,"name":"Bash","input":{"command":cmd,"description":"설명","run_in_background":true}}]}})),
             rec(serde_json::json!({"type":"user","timestamp":"2026-10-26T01:00:01Z","message":{"content":[{"type":"tool_result","tool_use_id":tool_use,"content":format!("Command running in background with ID: {id}. Output is being written to: C:\\Temp\\claude\\proj\\sess\\tasks\\{id}.output. You will be notified when it completes — do not poll that file.\nSession cwd remains C:\\x.")}]}})),
         ]
+    }
+
+    #[test]
+    fn background_tasks_started_by_a_subagent_are_found_and_matched_to_its_notification() {
+        let d = std::env::temp_dir().join(format!("ctm_activity_sub_{}", uuid::Uuid::new_v4()));
+        let sub = d.join("sess").join("subagents");
+        std::fs::create_dir_all(&sub).unwrap();
+        let parent = d.join("sess.jsonl");
+        std::fs::write(&parent, launch_lines("par111", "tp1", "nuxt dev").join("\n") + "\n").unwrap();
+        let mut sub_lines = launch_lines("sub222", "ts1", "node img-server.mjs");
+        sub_lines.extend(launch_lines("sub333", "ts2", "gradlew bootRun"));
+        // 서브에이전트 기록에는 완료 알림이 queued_command 첨부로 남는다
+        sub_lines.push(rec(serde_json::json!({"type":"attachment","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>sub333</task-id>\n<status>completed</status>\n</task-notification>"}})));
+        std::fs::write(sub.join("agent-a1.jsonl"), sub_lines.join("\n") + "\n").unwrap();
+        let tasks = background_tasks_for(&parent, 2);
+        let status = |id: &str| tasks.iter().find(|t| t.task_id == id).map(|t| t.status.clone());
+        assert_eq!(tasks.len(), 3);
+        assert_eq!(status("par111").as_deref(), Some("unfinished"));
+        assert_eq!(status("sub222").as_deref(), Some("unfinished"), "서브에이전트가 띄운 것도 보인다");
+        assert_eq!(status("sub333").as_deref(), Some("completed"));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -200,7 +200,7 @@ fn build_row(agent: AgentEntry, lead: Option<&LeadRecord>, member: Option<&Membe
         },
         startup_warning: if is_lead { lead.and_then(|l| l.startup_warning.clone()) } else { None },
         subagents: if is_lead { agent.id.as_deref().and_then(|id| crate::subagents::live_subagents(id, &agent.cwd, &agent.session_id)) } else { None },
-        background_tasks: if is_lead { agent.id.as_deref().and_then(crate::subagents::live_local_bash_count) } else { None },
+        background_tasks: if is_lead { agent.id.as_deref().and_then(|id| crate::subagents::live_local_bash_count(id, &agent.cwd, &agent.session_id)) } else { None },
         background_only: if is_lead && agent.status.as_deref() == Some("busy") { agent.id.as_deref().and_then(crate::subagents::live_background_only) } else { None },
         last_active_at: None,
         project_name,

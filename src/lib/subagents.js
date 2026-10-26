@@ -15,24 +15,45 @@ function readRecords(file) {
   } catch { return []; }
 }
 
-/** @returns {number | null} */
-function daemonCountOfKind(jobsDir, shortId, kind) {
+/** 데몬 state.json의 {tasks, kinds}. tasks가 0이거나 읽을 수 없으면 null. */
+function daemonInFlight(jobsDir, shortId) {
   if (!/^[A-Za-z0-9_-]+$/.test(shortId || '')) return null;
   try {
     const data = JSON.parse(fs.readFileSync(path.join(jobsDir, shortId, 'state.json'), 'utf-8'));
     const f = data && data.inFlight;
-    if (!f || !Array.isArray(f.kinds) || typeof f.tasks !== 'number') return null;
-    return f.kinds.includes(kind) && f.tasks > 0 ? f.tasks : null;
+    if (!f || !Array.isArray(f.kinds) || typeof f.tasks !== 'number' || f.tasks <= 0) return null;
+    return { tasks: f.tasks, kinds: f.kinds };
   } catch { return null; }
 }
 
-function daemonLocalAgentCount(jobsDir, shortId) {
-  return daemonCountOfKind(jobsDir, shortId, 'local_agent');
+/**
+ * 데몬의 tasks는 종류를 가리지 않은 합계다(실측 2026-10-26: 서브에이전트 1 + 서브에이전트가 띄운 백그라운드 명령 1 = tasks 2,
+ * kinds [local_agent, local_bash]). 종류가 섞이면 서브에이전트 수는 파일 규칙으로 센 값을 기준으로 삼고 백그라운드 명령 수는 나머지로 본다.
+ * @returns {{agents: number | null, bash: number | null}}
+ */
+function splitInFlight(tasks, kinds, filesAgents) {
+  const hasAgent = kinds.includes('local_agent');
+  const hasBash = kinds.includes('local_bash');
+  if (hasAgent && !hasBash) return { agents: tasks, bash: null };
+  if (!hasAgent && hasBash) return { agents: null, bash: tasks };
+  if (!hasAgent) return { agents: null, bash: null };
+  const agents = Math.min(Math.max(filesAgents, 1), Math.max(tasks - 1, 1));
+  return { agents, bash: tasks - agents > 0 ? tasks - agents : null };
 }
 
+function daemonLocalAgentCount(jobsDir, shortId) {
+  const f = daemonInFlight(jobsDir, shortId);
+  return f ? splitInFlight(f.tasks, f.kinds, 0).agents : null;
+}
+
+function sessionAgentsDir(sessionFile) { return path.join(sessionFile.replace(/\.jsonl$/, ''), 'subagents'); }
+
 /** 데몬이 센 백그라운드 셸 명령(local_bash) 개수 — 화면의 "백그라운드 작업" 칸이 알림 없는 것 중 몇 개가 지금 돌고 있는지 추정하는 기준. */
-function daemonLocalBashCount(jobsDir, shortId) {
-  return daemonCountOfKind(jobsDir, shortId, 'local_bash');
+function daemonLocalBashCount(jobsDir, shortId, sessionFile) {
+  const f = daemonInFlight(jobsDir, shortId);
+  if (!f) return null;
+  const files = f.kinds.includes('local_agent') && sessionFile ? runningAgentsFromFiles(sessionFile, sessionAgentsDir(sessionFile)).length : 0;
+  return splitInFlight(f.tasks, f.kinds, files).bash;
 }
 
 /**
@@ -105,11 +126,13 @@ function runningAgentsFromFiles(parentJsonl, subagentsDir) {
  * @returns {{count: number, names: string[]} | null}
  */
 function liveSubagents(jobsDir, shortId, sessionFile) {
-  const count = daemonLocalAgentCount(jobsDir, shortId);
+  const f = daemonInFlight(jobsDir, shortId);
+  if (!f || !f.kinds.includes('local_agent')) return null;
+  const all = runningAgentsFromFiles(sessionFile, sessionAgentsDir(sessionFile));
+  const count = splitInFlight(f.tasks, f.kinds, all.length).agents;
   if (count === null) return null;
-  const dir = path.join(sessionFile.replace(/\.jsonl$/, ''), 'subagents');
-  const items = runningAgentsFromFiles(sessionFile, dir).slice(0, count);
+  const items = all.slice(0, count);
   return { count, names: items.map(a => a.name), items };
 }
 
-module.exports = { daemonLocalAgentCount, daemonLocalBashCount, runningNamesFromFiles, runningAgentsFromFiles, liveSubagents, backgroundOnly };
+module.exports = { splitInFlight, daemonLocalAgentCount, daemonLocalBashCount, runningNamesFromFiles, runningAgentsFromFiles, liveSubagents, backgroundOnly };
