@@ -29,12 +29,6 @@ pub struct SubagentInfo {
     pub items: Vec<SubagentRef>,
 }
 
-fn read_records(file: &Path) -> Vec<serde_json::Value> {
-    std::fs::read_to_string(file)
-        .map(|c| c.lines().filter_map(|l| serde_json::from_str(l).ok()).collect())
-        .unwrap_or_default()
-}
-
 /// 데몬 state.json의 (inFlight.tasks, kinds). tasks가 0이거나 읽을 수 없으면 None.
 fn daemon_in_flight_in(jobs_dir: &Path, short_id: &str) -> Option<(u32, Vec<String>)> {
     if !is_safe_id(short_id) {
@@ -126,6 +120,62 @@ fn find_between<'a>(s: &'a str, prefix: &str, end: char) -> Option<&'a str> {
     Some(&rest[..rest.find(end)?])
 }
 
+#[derive(Clone)]
+enum RawEvent {
+    Resumed(String),
+    Launched(String),
+    Notified(String),
+}
+
+/// 팀장 기록은 수십~백 MB, 서브에이전트 기록도 파일마다 수 MB라(실측) 폴링마다 전부 파싱하면 보드 갱신이 수 초씩 걸린다(전송 버튼이
+/// "전송 중..."에 오래 멈춘 원인). 관련 줄만 골라 파싱하고, 파일이 안 바뀌었으면(수정 시각·크기 같음) 지난번 결과를 그대로 쓴다.
+fn file_events(file: &Path, is_parent: bool) -> Vec<(String, RawEvent)> {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::SystemTime;
+    type Cached = (SystemTime, u64, Vec<(String, RawEvent)>);
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, Cached>>> = OnceLock::new();
+    let Ok(meta) = std::fs::metadata(file) else { return Vec::new() };
+    let Ok(mtime) = meta.modified() else { return Vec::new() };
+    let len = meta.len();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some((m, l, events)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(file) {
+        if *m == mtime && *l == len {
+            return events.clone();
+        }
+    }
+    let mut events: Vec<(String, RawEvent)> = Vec::new();
+    let text = std::fs::read_to_string(file).unwrap_or_default();
+    for line in text.lines() {
+        if !(line.contains("resumedAgentId") || line.contains("Async agent launched") || line.contains("<task-notification>")) {
+            continue;
+        }
+        let Ok(r) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let ts = r.get("timestamp").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if let Some(id) = r.get("toolUseResult").and_then(|t| t.get("resumedAgentId")).and_then(|v| v.as_str()) {
+            events.push((ts.clone(), RawEvent::Resumed(id.to_string())));
+        }
+        let s = r.to_string();
+        if s.contains("Async agent launched") {
+            if let Some(t) = find_between(&s, "\"tool_use_id\":\"", '"') {
+                events.push((ts.clone(), RawEvent::Launched(t.to_string())));
+            }
+        }
+        if !s.contains("<task-notification>") {
+            continue;
+        }
+        // 부모 기록에서는 알림이 처음 생긴 시각(queue-operation enqueue)만 종료로 센다.
+        let is_enqueue = r.get("type").and_then(|v| v.as_str()) == Some("queue-operation") && r.get("operation").and_then(|v| v.as_str()) == Some("enqueue");
+        if is_parent && !is_enqueue {
+            continue;
+        }
+        if let Some(id) = find_between(&s, "<task-id>", '<') {
+            events.push((ts, RawEvent::Notified(id.to_string())));
+        }
+    }
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(file.to_path_buf(), (mtime, len, events.clone()));
+    events
+}
+
 /// 파일 기반 규칙으로 지금 실행 중으로 보이는 서브에이전트들의 description.
 fn running_names_from_files(parent_jsonl: &Path, subagents_dir: &Path) -> Vec<String> {
     running_agents_from_files(parent_jsonl, subagents_dir).into_iter().map(|(_, name)| name).collect()
@@ -154,34 +204,22 @@ fn running_agents_from_files(parent_jsonl: &Path, subagents_dir: &Path) -> Vec<(
     }
     // (시각, 에이전트 id, 실행 중이 되는 이벤트인가). 시각은 UTC ISO 문자열이라 사전순 비교가 곧 시간순이다.
     let mut events: Vec<(String, String, bool)> = Vec::new();
-    let mut scan = |recs: Vec<serde_json::Value>, is_parent: bool| {
-        for r in recs {
-            let ts = r.get("timestamp").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if let Some(id) = r.get("toolUseResult").and_then(|t| t.get("resumedAgentId")).and_then(|v| v.as_str()) {
-                events.push((ts.clone(), id.to_string(), true));
-            }
-            let s = r.to_string();
-            if s.contains("Async agent launched") {
-                if let Some(id) = find_between(&s, "\"tool_use_id\":\"", '"').and_then(|t| by_tool.get(t)) {
-                    events.push((ts.clone(), id.clone(), true));
+    let mut add = |file: &Path, is_parent: bool| {
+        for (ts, ev) in file_events(file, is_parent) {
+            match ev {
+                RawEvent::Resumed(id) => events.push((ts, id, true)),
+                RawEvent::Launched(tool_use_id) => {
+                    if let Some(id) = by_tool.get(&tool_use_id) {
+                        events.push((ts, id.clone(), true));
+                    }
                 }
-            }
-            if !s.contains("<task-notification>") {
-                continue;
-            }
-            // 부모 기록에서는 알림이 처음 생긴 시각(queue-operation enqueue)만 종료로 센다.
-            let is_enqueue = r.get("type").and_then(|v| v.as_str()) == Some("queue-operation") && r.get("operation").and_then(|v| v.as_str()) == Some("enqueue");
-            if is_parent && !is_enqueue {
-                continue;
-            }
-            if let Some(id) = find_between(&s, "<task-id>", '<') {
-                events.push((ts, id.to_string(), false));
+                RawEvent::Notified(id) => events.push((ts, id, false)),
             }
         }
     };
-    scan(read_records(parent_jsonl), true);
+    add(parent_jsonl, true);
     for f in &jsonls {
-        scan(read_records(f), false);
+        add(f, false);
     }
     events.sort_by(|a, b| a.0.cmp(&b.0));
     let mut last: HashMap<String, bool> = HashMap::new();

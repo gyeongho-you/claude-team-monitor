@@ -583,21 +583,35 @@ function getTranscript(projectName: string, sessionId: string, cwd: string): Tra
 
 // 최근 몇 턴 — 파일 끝부분만 읽어서(수십 MB 파일을 폴링마다 통째로 파싱하지 않기 위해) 카드 미리보기·정체 감시에 쓴다.
 // 끝부분에 사용자 메시지가 하나도 없으면(긴 도구 실행 구간) 읽는 범위를 넓혀 다시 본다. 원본에서 못 읽으면 daily-journal(있다면).
+const TAIL_WINDOWS = [256 * 1024, 2 * 1024 * 1024, 16 * 1024 * 1024];
+const TAIL_KEEP_TURNS = 8;
+const tailTurnsCache = new Map<string, { mtimeMs: number; size: number; windowIdx: number; entries: TranscriptEntry[] }>();
+
+// 결과는 (수정 시각, 크기)별로 캐시한다 — 팀장이 여러 명이고 세션 파일이 수십~백 MB라(실측) 매 폴링마다 끝부분을 다시 읽고 넓히면
+// 보드 새로고침이 수 초씩 걸린다. 파일이 바뀌어도 지난번에 성공한 범위부터 읽는다.
 function readTailTurns(file: string): TranscriptEntry[] {
   let fd: number | undefined;
   try {
+    const st = fs.statSync(file);
+    const cached = tailTurnsCache.get(file);
+    if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) return cached.entries;
     fd = fs.openSync(file, 'r');
-    const len = fs.fstatSync(fd).size;
-    for (const window of [256 * 1024, 2 * 1024 * 1024, 16 * 1024 * 1024]) {
-      const start = Math.max(0, len - window);
-      const buf = Buffer.alloc(len - start);
+    let found: TranscriptEntry[] = [];
+    let used = cached ? cached.windowIdx : 0;
+    for (let idx = used; idx < TAIL_WINDOWS.length; idx++) {
+      used = idx;
+      const start = Math.max(0, st.size - TAIL_WINDOWS[idx]);
+      const buf = Buffer.alloc(st.size - start);
       fs.readSync(fd, buf, 0, buf.length, start);
       let lines = buf.toString('utf8').split('\n');
       if (start > 0) lines = lines.slice(1); // 시작 위치가 줄 중간일 수 있으니 첫 줄은 버린다
       const entries = parseRawSessionLines(lines);
-      if (entries.length > 0) return entries;
-      if (start === 0) break;
+      if (entries.length > 0) { found = entries; break; }
+      if (st.size <= TAIL_WINDOWS[idx]) break; // 파일 전체를 봤는데도 없다
     }
+    found = found.slice(-TAIL_KEEP_TURNS);
+    tailTurnsCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, windowIdx: used, entries: found });
+    return found;
   } catch { /* 파일 없음 */ } finally {
     if (fd !== undefined) try { fs.closeSync(fd); } catch { /* ignore */ }
   }

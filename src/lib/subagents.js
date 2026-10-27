@@ -83,6 +83,37 @@ function runningNamesFromFiles(parentJsonl, subagentsDir) {
   return runningAgentsFromFiles(parentJsonl, subagentsDir).map(a => a.name);
 }
 
+// 팀장 기록은 수십~백 MB, 서브에이전트 기록도 파일마다 수 MB라(실측) 폴링마다 전부 파싱하면 보드 갱신이 수 초씩 걸린다. 관련 줄만 골라
+// 파싱하고, 파일이 안 바뀌었으면(수정 시각·크기 같음) 지난번 결과를 그대로 쓴다.
+const eventCache = new Map();
+function fileEvents(file, isParent) {
+  let st;
+  try { st = fs.statSync(file); } catch { return []; }
+  const cached = eventCache.get(file);
+  if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) return cached.events;
+  const events = [];
+  let text = '';
+  try { text = fs.readFileSync(file, 'utf-8'); } catch { /* 읽기 실패는 없는 것으로 */ }
+  for (const line of text.split('\n')) {
+    if (!line || !(line.includes('resumedAgentId') || line.includes('Async agent launched') || line.includes('<task-notification>'))) continue;
+    let r; try { r = JSON.parse(line); } catch { continue; }
+    const ts = typeof r.timestamp === 'string' ? r.timestamp : '';
+    if (r.toolUseResult && typeof r.toolUseResult.resumedAgentId === 'string') events.push({ ts, kind: 'resumed', value: r.toolUseResult.resumedAgentId });
+    const s = JSON.stringify(r);
+    if (s.includes('Async agent launched')) {
+      const m = s.match(/"tool_use_id":"([^"]+)"/);
+      if (m) events.push({ ts, kind: 'launched', value: m[1] });
+    }
+    if (!s.includes('<task-notification>')) continue;
+    // 부모 기록에서는 알림이 처음 생긴 시각(queue-operation enqueue)만 종료로 센다.
+    if (isParent && !(r.type === 'queue-operation' && r.operation === 'enqueue')) continue;
+    const m = s.match(/<task-id>([^<]+)</);
+    if (m) events.push({ ts, kind: 'notified', value: m[1] });
+  }
+  eventCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, events });
+  return events;
+}
+
 /** 위와 같은 규칙으로 {id, name}을 돌려준다 — id가 있어야 그 서브에이전트의 대화 파일(agent-<id>.jsonl)을 열 수 있다. @returns {{id: string, name: string}[]} */
 function runningAgentsFromFiles(parentJsonl, subagentsDir) {
   let files;
@@ -99,24 +130,15 @@ function runningAgentsFromFiles(parentJsonl, subagentsDir) {
     } catch { /* 손상된 meta는 건너뛴다 */ }
   }
   const events = []; // [시각(UTC ISO라 사전순=시간순), 에이전트 id, 실행 중이 되는 이벤트인가]
-  const scan = (recs, isParent) => {
-    for (const r of recs) {
-      const ts = typeof r.timestamp === 'string' ? r.timestamp : '';
-      if (r.toolUseResult && typeof r.toolUseResult.resumedAgentId === 'string') events.push([ts, r.toolUseResult.resumedAgentId, true]);
-      const s = JSON.stringify(r);
-      if (s.includes('Async agent launched')) {
-        const m = s.match(/"tool_use_id":"([^"]+)"/);
-        if (m && byTool.has(m[1])) events.push([ts, byTool.get(m[1]), true]);
-      }
-      if (!s.includes('<task-notification>')) continue;
-      // 부모 기록에서는 알림이 처음 생긴 시각(queue-operation enqueue)만 종료로 센다.
-      if (isParent && !(r.type === 'queue-operation' && r.operation === 'enqueue')) continue;
-      const m = s.match(/<task-id>([^<]+)</);
-      if (m) events.push([ts, m[1], false]);
+  const add = (file, isParent) => {
+    for (const e of fileEvents(file, isParent)) {
+      if (e.kind === 'resumed') events.push([e.ts, e.value, true]);
+      else if (e.kind === 'launched') { if (byTool.has(e.value)) events.push([e.ts, byTool.get(e.value), true]); }
+      else events.push([e.ts, e.value, false]);
     }
   };
-  scan(readRecords(parentJsonl), true);
-  for (const f of files.filter(x => x.endsWith('.jsonl'))) scan(readRecords(path.join(subagentsDir, f)), false);
+  add(parentJsonl, true);
+  for (const f of files.filter(x => x.endsWith('.jsonl'))) add(path.join(subagentsDir, f), false);
   events.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   const last = new Map();
   for (const [, id, run] of events) last.set(id, run);

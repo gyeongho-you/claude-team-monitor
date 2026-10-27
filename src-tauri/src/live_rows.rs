@@ -509,9 +509,32 @@ pub async fn get_live_session_rows() -> Vec<SessionRow> {
     get_live_session_rows_inner().await
 }
 
+static STAGE_AGENTS_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static STAGE_LIVE_ROWS_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+// 보드 갱신이 느려지면(전송 버튼이 "전송 중..."에 오래 멈추는 등) 어느 단계가 오래 걸렸는지 앱 로그에 남긴다.
 async fn get_live_session_rows_inner() -> Vec<SessionRow> {
+    use std::sync::atomic::Ordering::Relaxed;
+    let t0 = std::time::Instant::now();
+    let rows = get_live_session_rows_inner_impl().await;
+    let total = t0.elapsed().as_millis();
+    if total > 1500 {
+        log_critical(&format!(
+            "[live_rows] 보드 갱신이 {total}ms 걸렸습니다(agents 조회 {}ms, 라이브 행 구성 {}ms, 그 외 {}ms)",
+            STAGE_AGENTS_MS.load(Relaxed),
+            STAGE_LIVE_ROWS_MS.load(Relaxed),
+            total as u64 - STAGE_AGENTS_MS.load(Relaxed).min(total as u64) - STAGE_LIVE_ROWS_MS.load(Relaxed).min(total as u64)
+        ));
+    }
+    rows
+}
+
+async fn get_live_session_rows_inner_impl() -> Vec<SessionRow> {
+    use std::sync::atomic::Ordering::Relaxed;
     let now = now_ms();
+    let t_agents = std::time::Instant::now();
     let agents = fetch_agents_typed();
+    STAGE_AGENTS_MS.store(t_agents.elapsed().as_millis() as u64, Relaxed);
     let mut agent_id_set: HashSet<String> = agents.iter().filter_map(|a| a.id.clone()).collect();
 
     // reconcileLeadIds(main.ts:1585-1592)와 동일한 순서 — leads.json 쓰기가 필요해서
@@ -544,7 +567,9 @@ async fn get_live_session_rows_inner() -> Vec<SessionRow> {
     let members = reconcile_member_ids(&agents, members);
     let member_by_id: HashMap<String, &MemberRecord> = members.iter().map(|m| (m.member_id.clone(), m)).collect();
 
+    let t_live = std::time::Instant::now();
     let live_rows_raw = compute_live_rows(&agents, &lead_by_id, &member_by_id);
+    STAGE_LIVE_ROWS_MS.store(t_live.elapsed().as_millis() as u64, Relaxed);
     // 워크스페이스 신뢰 다이얼로그에 멈춘 팀장은 정리하고, 이번 폴링 결과에서도 빼서(그대로 두면
     // 다음 폴링에 히스토리로 넘어가기 전까지 한 틱 더 "작업 중"으로 잘못 보인다) 곧바로 히스토리로
     // 넘어가는 것처럼 보이게 한다(main.ts의 buildSessionRowsInternal과 동일한 위치/순서).

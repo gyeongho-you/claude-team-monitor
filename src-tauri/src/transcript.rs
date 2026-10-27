@@ -233,31 +233,58 @@ pub(crate) fn get_transcript(project_name: &str, session_id: &str, cwd: &str) ->
     journal_turns(project_name, session_id)
 }
 
-fn read_tail_turns(file: &Path) -> Vec<TranscriptEntry> {
+const TAIL_WINDOWS: [u64; 3] = [256 * 1024, 2 * 1024 * 1024, 16 * 1024 * 1024];
+const TAIL_KEEP_TURNS: usize = 8;
+
+fn read_tail_with_window(file: &Path, window_idx: usize) -> Option<Vec<TranscriptEntry>> {
     use std::io::{Read, Seek, SeekFrom};
-    let Ok(mut f) = std::fs::File::open(file) else { return Vec::new() };
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    for window in [256 * 1024u64, 2 * 1024 * 1024, 16 * 1024 * 1024] {
-        let start = len.saturating_sub(window);
-        if f.seek(SeekFrom::Start(start)).is_err() {
-            break;
+    let mut f = std::fs::File::open(file).ok()?;
+    let len = f.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL_WINDOWS[window_idx]);
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    // 시작 위치가 줄 중간일 수 있으니 첫 줄은 버린다.
+    let body = if start > 0 { text.split_once('\n').map(|(_, rest)| rest).unwrap_or("") } else { &text };
+    Some(parse_raw_session_text(body).into_iter().map(|(e, _)| e).collect())
+}
+
+/// 파일 끝부분의 최근 턴(최대 TAIL_KEEP_TURNS개). 결과는 (수정 시각, 크기)별로 캐시한다 — 팀장이 여러 명이고 세션 파일이 수십~백 MB라(실측)
+/// 매 폴링마다 끝부분을 다시 읽고 넓히면 보드 새로고침이 수 초씩 걸린다(전송 버튼이 "전송 중..."에 오래 멈춘 원인). 파일이 바뀌어도 지난번에
+/// 성공한 범위부터 읽는다.
+fn read_tail_turns(file: &Path) -> Vec<TranscriptEntry> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::SystemTime;
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, u64, usize, Vec<TranscriptEntry>)>>> = OnceLock::new();
+    let Ok(meta) = std::fs::metadata(file) else { return Vec::new() };
+    let (Ok(mtime), len) = (meta.modified(), meta.len()) else { return Vec::new() };
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut start_idx = 0;
+    if let Some((m, l, idx, entries)) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(file) {
+        if *m == mtime && *l == len {
+            return entries.clone();
         }
-        let mut buf = Vec::new();
-        if f.read_to_end(&mut buf).is_err() {
-            break;
-        }
-        let text = String::from_utf8_lossy(&buf);
-        // 시작 위치가 줄 중간일 수 있으니 첫 줄은 버린다.
-        let body = if start > 0 { text.split_once('\n').map(|(_, rest)| rest).unwrap_or("") } else { &text };
-        let entries: Vec<TranscriptEntry> = parse_raw_session_text(body).into_iter().map(|(e, _)| e).collect();
+        start_idx = *idx;
+    }
+    let mut found: Vec<TranscriptEntry> = Vec::new();
+    let mut used = start_idx;
+    for idx in start_idx..TAIL_WINDOWS.len() {
+        used = idx;
+        let Some(entries) = read_tail_with_window(file, idx) else { break };
         if !entries.is_empty() {
-            return entries;
-        }
-        if start == 0 {
+            found = entries;
             break;
+        }
+        if len <= TAIL_WINDOWS[idx] {
+            break; // 파일 전체를 봤는데도 없다
         }
     }
-    Vec::new()
+    let keep_from = found.len().saturating_sub(TAIL_KEEP_TURNS);
+    let found: Vec<TranscriptEntry> = found.into_iter().skip(keep_from).collect();
+    cache.lock().unwrap_or_else(|e| e.into_inner()).insert(file.to_path_buf(), (mtime, len, used, found.clone()));
+    found
 }
 
 /// 세션의 최근 대화 몇 턴 — 파일 끝부분만 읽어서(수십 MB 파일을 폴링마다 통째로 파싱하지 않기 위해) 카드 미리보기·정체 감시에 쓴다.
