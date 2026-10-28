@@ -88,6 +88,7 @@ const leadChatPanelEl = document.getElementById('lead-chat-panel');
 const leadMembersChipsEl = document.getElementById('lead-members-chips');
 const chatTranscriptEl = document.getElementById('chat-transcript');
 const chatInputEl = document.getElementById('chat-input');
+const chatTargetEl = document.getElementById('chat-target');
 const chatSendBtn = document.getElementById('chat-send-btn');
 // sendMessageToLead가 진행 중 "전송 중..."으로 바꿨다가 끝나면 되돌릴 원래 라벨. 매 호출 시점의
 // chatSendBtn.textContent를 그대로 캡처하면, 먹통 상태에서 "재시도"를 눌러 같은 lead에 대해 두
@@ -761,7 +762,55 @@ function renderLeadCard(row) {
   `;
 }
 
+// ---------------- 보내는 대상 표시 · 팀장별 입력 초안 · 자동 전환 보호 ----------------
+// 팀장 선택이 사용자 모르게 바뀐 채 질문을 보내는 사고(사용자 지적)를 막는다: (1) 입력창 위에 보내는 대상을 항상 보여주고, (2) 쓰던 글을
+// 팀장별로 따로 보관해서 선택이 바뀌면 입력창이 그 팀장의 글로 바뀌게 하며(엉뚱한 팀장에게 글이 따라가지 않는다), (3) 선택이 자동으로 바뀐
+// 직후의 첫 전송은 한 번 더 확인한다.
+const chatDrafts = new Map(); // leadId -> 입력창에 쓰다 만 글(앱이 켜져 있는 동안만 보관)
+let draftOwnerId = null;      // 지금 입력창 내용이 속한 팀장
+let autoSwitch = null;        // { at, fromId, toId, acknowledged } — 선택이 자동으로 바뀐 기록(사용자가 직접 고르면 지운다)
+let selectedMissingSince = null;
+const SELECTED_MISSING_GRACE_MS = 30000; // 선택한 팀장이 목록에서 잠깐 안 보여도 이 시간 동안은 선택을 유지한다
+const AUTO_SWITCH_GUARD_MS = 120000;
+
+function leadDisplayName(id) {
+  const r = lastRows.find(x => x.isLead && x.id === id);
+  return r ? (r.label || r.projectName || id) : (id || '(선택 없음)');
+}
+
+function migrateDraftId(oldId, newId) {
+  if (!oldId || oldId === newId) return;
+  if (chatDrafts.has(oldId)) { chatDrafts.set(newId, chatDrafts.get(oldId)); chatDrafts.delete(oldId); }
+  if (draftOwnerId === oldId) draftOwnerId = newId;
+}
+
+function syncChatDraft() {
+  if (draftOwnerId === selectedLeadId) return;
+  if (draftOwnerId) {
+    if (chatInputEl.value) chatDrafts.set(draftOwnerId, chatInputEl.value); else chatDrafts.delete(draftOwnerId);
+  }
+  chatInputEl.value = (selectedLeadId && chatDrafts.get(selectedLeadId)) || '';
+  draftOwnerId = selectedLeadId;
+}
+
+function autoSwitchPending() {
+  return !!autoSwitch && !autoSwitch.acknowledged && autoSwitch.toId === selectedLeadId && Date.now() - autoSwitch.at < AUTO_SWITCH_GUARD_MS;
+}
+
+function updateChatTarget() {
+  if (!chatTargetEl) return;
+  if (!selectedLeadId) { chatTargetEl.className = 'chat-target'; chatTargetEl.textContent = '보낼 팀장을 위에서 선택하세요'; return; }
+  const name = leadDisplayName(selectedLeadId);
+  const recent = !!autoSwitch && autoSwitch.toId === selectedLeadId && Date.now() - autoSwitch.at < AUTO_SWITCH_GUARD_MS;
+  chatTargetEl.className = recent ? 'chat-target warn' : 'chat-target';
+  const hint = recent && !autoSwitch.acknowledged ? ' — 맞으면 한 번 더 전송을 누르세요' : '';
+  chatTargetEl.innerHTML = recent
+    ? `⚠ 보내는 대상이 자동으로 바뀌었습니다: ${escapeHtml(leadDisplayName(autoSwitch.fromId))} → <strong>${escapeHtml(name)}</strong>${hint}`
+    : `→ <strong>${escapeHtml(name)}</strong>에게 전송`;
+}
+
 async function selectLead(leadId) {
+  autoSwitch = null; // 사용자가 직접 고른 선택
   selectedLeadId = leadId;
   formMode = 'none';
   hideModal(restartLeadPanelEl);
@@ -1113,6 +1162,8 @@ function renderQueuedTurnsHtml(leadId) {
 let renderChatSeq = 0;
 
 async function renderChat() {
+  syncChatDraft();
+  updateChatTarget();
   if (isInteractingWithChatTranscript || hasActiveSelectionInChatTranscript()) return; // 드래그 중이거나 선택이 아직 남아있으면 건너뛴다(위 리스너/함수 참고)
   const mySeq = ++renderChatSeq;
   renderLeadMemberChips();
@@ -1610,9 +1661,16 @@ if (window.api.onFilesDragState) {
 async function sendChatMessage() {
   const paths = (selectedLeadId && attachmentsByLead.get(selectedLeadId)) || [];
   if (!selectedLeadId || busyLeadIds.has(selectedLeadId) || (!chatInputEl.value.trim() && !paths.length)) return;
+  // 선택이 자동으로 바뀐 직후의 첫 전송은 보내지 않고 대상 변경을 알린다 — 맞으면 한 번 더 누르면 전송된다.
+  if (autoSwitchPending()) {
+    autoSwitch.acknowledged = true;
+    updateChatTarget();
+    return;
+  }
   const leadId = selectedLeadId;
   const message = buildMessageWithAttachments(chatInputEl.value, paths);
   chatInputEl.value = '';
+  chatDrafts.delete(leadId);
   attachmentsByLead.delete(leadId);
   dropAttachmentThumbs(paths);
   renderAttachments();
@@ -1692,6 +1750,7 @@ async function sendMessageToLead(leadId, message) {
     // 사이 어디로 이동했든 항상 새 id 밑으로 옮긴다(대기 중이던 메시지 자체는 새 id로 계속
     // 추적돼야 renderChat()이 나중에 그 팀장으로 돌아왔을 때 찾을 수 있다).
     movePendingChatTurns(leadId, result.id);
+    migrateDraftId(leadId, result.id);
     // 그런데 화면 전환(selectedLeadId 갱신)은 사용자가 이 응답을 기다리는 동안 다른 팀장으로
     // 이미 옮겨갔으면 하면 안 된다 — autoStallNudgeToggle 핸들러가 이미 쓰는 것과 같은 가드
     // (요청 시작 시점의 leadId와 지금 selectedLeadId가 같을 때만 갱신). 안 그러면 사용자가
@@ -2269,11 +2328,33 @@ function renderBoard(rows) {
   // 같은 팀장이 새 id로 살아있는 것이므로, internalId로 찾아서 그 새 id로 조용히 따라간다.
   // 이게 없으면 팀장을 여러 개 띄워둔 상황에서 드리프트가 날 때마다 사용자 모르게 대화창이
   // 엉뚱한(그냥 첫 번째) 팀장으로 튀어버렸다.
+  // 선택한 팀장이 목록에서 잠깐 안 보인다고 바로 다른 팀장으로 옮기지 않는다(사용자 모르게 대상이 바뀌어 엉뚱한 팀장에게 질문을 보내던
+  // 문제) — SELECTED_MISSING_GRACE_MS 동안은 선택을 유지하고, 그래도 안 돌아오면 옮기되 옮겼다는 사실을 화면에 알린다(autoSwitch).
+  let switchedFromId = null;
   if (selectedLeadId && !lastLeadIds.has(selectedLeadId)) {
     const followed = selectedLeadInternalId && leads.find(l => l.internalId === selectedLeadInternalId);
-    selectedLeadId = followed ? followed.id : null;
+    if (followed) {
+      migrateDraftId(selectedLeadId, followed.id);
+      selectedLeadId = followed.id;
+      selectedMissingSince = null;
+    } else {
+      if (selectedMissingSince === null) selectedMissingSince = Date.now();
+      if (Date.now() - selectedMissingSince > SELECTED_MISSING_GRACE_MS) {
+        switchedFromId = selectedLeadId;
+        selectedLeadId = null;
+        selectedMissingSince = null;
+      }
+    }
+  } else {
+    selectedMissingSince = null;
   }
-  if (!selectedLeadId && onlineLeads.length > 0 && formMode === 'none') selectedLeadId = onlineLeads[0].id;
+  if (!selectedLeadId && onlineLeads.length > 0 && formMode === 'none') {
+    selectedLeadId = onlineLeads[0].id;
+    if (switchedFromId) {
+      autoSwitch = { at: Date.now(), fromId: switchedFromId, toId: selectedLeadId, acknowledged: false };
+      console.warn(`[선택 자동 전환] ${switchedFromId} → ${selectedLeadId} (선택한 팀장이 ${SELECTED_MISSING_GRACE_MS / 1000}초 넘게 목록에 없음)`);
+    }
+  }
   // 다음 폴링에서도 계속 같은 팀장을 따라갈 수 있게, 지금 선택된 팀장의 internalId로 맞춰둔다 —
   // selectedLeadId를 직접 바꾸는 다른 7군데(selectLead/sendChatMessage/재시작 성공 처리 등)를
   // 전부 따로 고칠 필요 없이 여기 한 곳에서만 동기화하면 된다.

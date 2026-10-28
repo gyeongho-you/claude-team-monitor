@@ -490,6 +490,10 @@ mark.find-match-current { background: var(--accent-2); color: #fff; }
 /* 한 번의 AskUserQuestion 호출에 질문이 여러 개 실렸을 때 — 첫 질문 옆에 붙는 "+N개 더" 배지. */
 .pending-choice-extra { color: var(--text-dim); font-size: 10px; font-weight: normal; }
 .chat-input-row { display: flex; gap: 6px; }
+.chat-target { font-size: 12px; margin: 6px 0 4px; color: var(--text-soft); }
+.chat-target strong { color: var(--text); }
+.chat-target.warn { color: #f14c4c; font-weight: 600; }
+.chat-target.warn strong { color: inherit; }
 .chat-attach-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 .chat-attach-row #chat-attach-btn { font-size: 11px; padding: 2px 8px; cursor: pointer; }
 #chat-attachments { display: flex; flex-wrap: wrap; gap: 4px; }
