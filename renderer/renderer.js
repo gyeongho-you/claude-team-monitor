@@ -2716,13 +2716,28 @@ function renderStallAlerts(alerts) {
 // 디렉토리 중 이 승인이 안 된 곳을 여기서 눈에 띄게 보여주고, "터미널에서 승인하기"를 누르면
 // open-in-terminal과 같은 방식으로 그 디렉토리에서 claude를 인터랙티브로 새 창에 띄워서 사용자가
 // 그 자리에서 바로 다이얼로그를 눌러 넘길 수 있게 한다.
+// "최초 실행 승인이 안 된 디렉토리" 경고는 ~/.claude.json에 그 폴더가 없으면 계속 뜬다 — 앱에서 팀원 폴더로는 이미 승인했어도(approvedMembers)
+// claude를 그 폴더에서 직접 실행해본 적이 없으면 그대로라, 사용자가 필요 없다고 판단하면 ✕로 숨길 수 있게 한다(이 PC에 기억해 둔다).
+const DISMISSED_DIRS_KEY = 'ctm.dismissedUnapprovedDirs';
+function loadDismissedDirs() {
+  try { return new Set(JSON.parse(localStorage.getItem(DISMISSED_DIRS_KEY) || '[]')); } catch { return new Set(); }
+}
+function dismissUnapprovedDir(dir) {
+  const set = loadDismissedDirs();
+  set.add(dir);
+  try { localStorage.setItem(DISMISSED_DIRS_KEY, JSON.stringify([...set])); } catch { /* 저장 실패해도 이번 화면에서는 숨긴다 */ }
+}
+
 function renderUnapprovedDirs(items) {
-  if (!items || items.length === 0) {
+  const dismissed = loadDismissedDirs();
+  items = (items || []).filter(u => !dismissed.has(u.dir));
+  if (items.length === 0) {
     unapprovedDirListEl.innerHTML = '';
     return;
   }
   unapprovedDirListEl.innerHTML = items.map(u => `
     <div class="stall-alert-card">
+      <button class="stall-alert-close" data-dismiss-dir="${escapeHtml(u.dir)}" title="이 경고를 숨깁니다(이 폴더는 다시 표시되지 않습니다)">✕</button>
       <div class="stall-alert-title">⚠ 최초 실행 승인이 안 된 디렉토리</div>
       <div class="stall-alert-reason">${escapeHtml(u.dir)} — ${escapeHtml(u.reason)}</div>
       <div class="stall-alert-actions">
@@ -2730,6 +2745,13 @@ function renderUnapprovedDirs(items) {
       </div>
     </div>
   `).join('');
+
+  unapprovedDirListEl.querySelectorAll('[data-dismiss-dir]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      dismissUnapprovedDir(btn.dataset.dismissDir);
+      btn.closest('.stall-alert-card').remove();
+    });
+  });
 
   unapprovedDirListEl.querySelectorAll('[data-approve-dir]').forEach(btn => {
     btn.addEventListener('click', async () => {
