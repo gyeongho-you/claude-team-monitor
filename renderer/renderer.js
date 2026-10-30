@@ -2719,18 +2719,30 @@ function renderStallAlerts(alerts) {
 // "최초 실행 승인이 안 된 디렉토리" 경고는 ~/.claude.json에 그 폴더가 없으면 계속 뜬다 — 앱에서 팀원 폴더로는 이미 승인했어도(approvedMembers)
 // claude를 그 폴더에서 직접 실행해본 적이 없으면 그대로라, 사용자가 필요 없다고 판단하면 ✕로 숨길 수 있게 한다(이 PC에 기억해 둔다).
 const DISMISSED_DIRS_KEY = 'ctm.dismissedUnapprovedDirs';
+// 폴더 → 숨긴 시각(ms). 그 뒤에 같은 폴더에서 시작이 또 실패하면(failedAt이 더 최근) 다시 띄우고, 승인이 확인돼 목록에서 빠지면 기억도 지운다.
 function loadDismissedDirs() {
-  try { return new Set(JSON.parse(localStorage.getItem(DISMISSED_DIRS_KEY) || '[]')); } catch { return new Set(); }
+  try {
+    const v = JSON.parse(localStorage.getItem(DISMISSED_DIRS_KEY) || '{}');
+    if (Array.isArray(v)) return Object.fromEntries(v.map(d => [d, Date.now()])); // 예전 형식(폴더 목록)
+    return v && typeof v === 'object' ? v : {};
+  } catch { return {}; }
+}
+function saveDismissedDirs(map) {
+  try { localStorage.setItem(DISMISSED_DIRS_KEY, JSON.stringify(map)); } catch { /* 저장 실패해도 이번 화면에서는 숨긴다 */ }
 }
 function dismissUnapprovedDir(dir) {
-  const set = loadDismissedDirs();
-  set.add(dir);
-  try { localStorage.setItem(DISMISSED_DIRS_KEY, JSON.stringify([...set])); } catch { /* 저장 실패해도 이번 화면에서는 숨긴다 */ }
+  const map = loadDismissedDirs();
+  map[dir] = Date.now();
+  saveDismissedDirs(map);
 }
 
 function renderUnapprovedDirs(items) {
   const dismissed = loadDismissedDirs();
-  items = (items || []).filter(u => !dismissed.has(u.dir));
+  const all = items || [];
+  // 목록에서 빠진 폴더(승인이 확인됨)는 기억을 지운다 — 나중에 다시 문제가 생기면 경고가 다시 뜬다.
+  const stale = Object.keys(dismissed).filter(d => !all.some(u => u.dir === d));
+  if (Array.isArray(items) && stale.length) { stale.forEach(d => delete dismissed[d]); saveDismissedDirs(dismissed); }
+  items = all.filter(u => !(u.dir in dismissed) || (u.failedAt && u.failedAt > dismissed[u.dir]));
   if (items.length === 0) {
     unapprovedDirListEl.innerHTML = '';
     return;

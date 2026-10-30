@@ -676,6 +676,9 @@ async fn get_live_session_rows_inner_impl() -> Vec<SessionRow> {
 pub struct UnapprovedDir {
     pub dir: String,
     pub reason: String,
+    /// 이 폴더에서 팀장/팀원 시작이 승인 미완료로 마지막으로 실패한 시각(ms) — 화면에서 ✕로 숨긴 경고라도 그 뒤에 또 실패하면 다시 띄우는 기준.
+    #[serde(rename = "failedAt", skip_serializing_if = "Option::is_none")]
+    pub failed_at: Option<i64>,
 }
 
 // computeUnapprovedDirs(main.ts:1463-1475) — 이 앱이 실제로 claude --bg를 새로 스폰할 수 있는
@@ -691,7 +694,13 @@ fn failed_launch_dirs() -> &'static std::sync::Mutex<Vec<String>> {
     DIRS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
 }
 
+fn failed_launch_at() -> &'static std::sync::Mutex<HashMap<String, i64>> {
+    static AT: std::sync::OnceLock<std::sync::Mutex<HashMap<String, i64>>> = std::sync::OnceLock::new();
+    AT.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
 pub(crate) fn record_failed_launch_dir(dir: &str) {
+    failed_launch_at().lock().unwrap_or_else(|e| e.into_inner()).insert(dir.to_string(), now_ms());
     let mut dirs = failed_launch_dirs().lock().unwrap_or_else(|e| e.into_inner());
     if !dirs.iter().any(|d| d == dir) {
         dirs.push(dir.to_string());
@@ -722,9 +731,11 @@ pub(crate) fn compute_unapproved_dirs(leads: &[LeadRecord]) -> Vec<UnapprovedDir
             let readiness = check_directory_claude_ready(&dir);
             if readiness.ready {
                 failed_launch_dirs().lock().unwrap_or_else(|e| e.into_inner()).retain(|d| d != &dir);
+                failed_launch_at().lock().unwrap_or_else(|e| e.into_inner()).remove(&dir);
                 None
             } else {
-                Some(UnapprovedDir { reason: readiness.reason.unwrap_or_default(), dir })
+                let failed_at = failed_launch_at().lock().unwrap_or_else(|e| e.into_inner()).get(&dir).copied();
+                Some(UnapprovedDir { reason: readiness.reason.unwrap_or_default(), dir, failed_at })
             }
         })
         .collect()

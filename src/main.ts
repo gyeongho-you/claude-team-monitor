@@ -1648,24 +1648,24 @@ function reconcileMemberIds(agents: AgentEntry[], members: MemberRecord[]): Memb
 // 팀장 시작이 승인 미완료로 실패하면 leads.json에 레코드가 만들어지기 전에 끝나서 아래 집합에 아예
 // 안 들어간다 — 그 디렉토리를 기억해뒀다가 배너 후보에 합친다(open-terminal-for-approval도 이 목록에
 // 있는 디렉토리만 허용한다). 승인이 확인되면 computeUnapprovedDirs가 알아서 지운다.
-const failedLaunchDirs = new Set<string>();
+const failedLaunchDirs = new Map<string, number>(); // 폴더 → 마지막 실패 시각(ms). 화면에서 ✕로 숨긴 경고도 그 뒤에 또 실패하면 다시 띄우는 기준
 
-function computeUnapprovedDirs(leads: LeadRecord[]): { dir: string; reason: string }[] {
-  const dirs = new Set<string>(failedLaunchDirs);
+function computeUnapprovedDirs(leads: LeadRecord[]): { dir: string; reason: string; failedAt?: number }[] {
+  const dirs = new Set<string>(failedLaunchDirs.keys());
   for (const lead of leads) {
     dirs.add(lead.targetDir);
     lead.approvedMembers.forEach(dir => dirs.add(dir));
   }
-  const result: { dir: string; reason: string }[] = [];
+  const result: { dir: string; reason: string; failedAt?: number }[] = [];
   for (const dir of dirs) {
     const readiness = checkDirectoryClaudeReady(dir);
-    if (!readiness.ready) result.push({ dir, reason: readiness.reason! });
+    if (!readiness.ready) result.push({ dir, reason: readiness.reason!, failedAt: failedLaunchDirs.get(dir) });
     else failedLaunchDirs.delete(dir);
   }
   return result;
 }
 
-async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; requests: MemberRequest[]; unapprovedDirs: { dir: string; reason: string }[] }> {
+async function buildSessionRowsInternal(): Promise<{ rows: SessionRow[]; requests: MemberRequest[]; unapprovedDirs: { dir: string; reason: string; failedAt?: number }[] }> {
   // 아래 leadFirstMissAt/memberFirstMissAt 유예 판정에 쓸 기준 시각 — 이 함수 실행 도중 한 번만
   // 고정해서 재는다(같은 호출 안에서 Date.now()를 여러 번 부르며 값이 갈리는 걸 방지).
   const now = Date.now();
@@ -2487,7 +2487,7 @@ async function launchTeamLead(targetDir: string, instruction: string, label?: st
   );
   if (!id) {
     if (!readiness.ready) {
-      failedLaunchDirs.add(targetDir);
+      failedLaunchDirs.set(targetDir, Date.now());
       return { error: `팀장 세션 시작에 실패했습니다 — "${targetDir}"에서 ${readiness.reason} 이게 원인일 수 있습니다. 그 디렉토리에서 터미널로 claude를 한 번 실행해 승인창을 눌러준 뒤 다시 시도해보세요.` };
     }
     return { error: `claude --bg가 ${RUN_CLAUDE_TIMEOUT_MS / 1000}초 안에 새 세션 시작을 확인해주지 못했습니다(타임아웃 또는 "backgrounded" 표시를 못 찾음) — 터미널을 직접 열어 claude --version, claude --bg가 정상 동작하는지 확인해보세요(CLI 미설치·PATH 문제·로그인 만료가 흔한 원인입니다).` };
