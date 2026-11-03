@@ -268,7 +268,11 @@ pub async fn restart_lead(internal_id: String, instruction: String) -> RestartLe
 
     // 재시작은 완전히 새 세션(--resume이 아님)이라 SECRET_MODE_CLI_ARGS도 이 시점에 다시 실어야
     // 한다(resumeLead와 정반대 요구사항, A-1 참고).
-    let flags = FreshLaunchArgs::new().secret(current.secret.unwrap_or(false)).into_flags();
+    let mut flags = FreshLaunchArgs::new().secret(current.secret.unwrap_or(false)).into_flags();
+    // 새 세션이라 저장된 옵션이 없다 — 지금 쓰던 모델을 이어받게 한다(안 하면 기본 모델로 돌아간다).
+    if let Some(model) = crate::session_model::read_model(&current.id) {
+        flags.splice(1..1, ["--model".to_string(), model]);
+    }
     let Some(new_id) = run_claude_bg(flags, resolve_long_prompt(&prompt), current.target_dir.clone()).await else {
         return RestartLeadOutcome::Failure {
             error: format!(

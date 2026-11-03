@@ -199,9 +199,37 @@ section h2, .section-header h2 { font-size: 12px; text-transform: uppercase; col
 /* 카드마다 내용 길이가 달라서 버튼 줄 위치가 들쭉날쭉했다 — 카드를 세로 flex로 만들고
    .actions에 margin-top:auto를 줘서 항상 그 카드 박스 맨 아래에 붙게 고정한다. 같은 줄(row)의
    카드들은 flex-wrap 기본 stretch로 이미 높이가 맞춰져 있어서, 버튼 줄도 같이 줄맞춰 보인다. */
-.session-card .actions { margin-top: auto; padding-top: 6px; display: flex; gap: 4px; }
+.session-card .actions { margin-top: auto; padding-top: 8px; display: flex; gap: 6px; align-items: center; }
 .session-card button { font-size: 11px; padding: 2px 6px; cursor: pointer; }
-.session-card .actions .stop-btn { background: var(--danger-strong); margin-left: auto; }
+/* 카드 버튼: 꽉 찬 파란 버튼 여러 개 대신 윤곽선만 있는 가벼운 버튼으로 — 눈에 덜 걸리고 카드가 깔끔해 보인다 */
+.session-card .actions > button, .session-card .menu-pop button {
+  background: transparent; color: var(--text-soft); border: 1px solid var(--border-2); border-radius: 6px; padding: 3px 10px;
+}
+.session-card .actions > button:hover, .session-card .menu-pop button:hover { color: var(--accent-2); border-color: var(--accent-2); background: transparent; }
+/* 모델 알약 — 이름 옆에 작게, 눌러서 바꾼다 */
+.name-with-pill { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.model-pill {
+  background: var(--surface-2); color: var(--accent-3); border: 1px solid var(--border-2); border-radius: 999px;
+  padding: 0 8px; font-size: 10px; line-height: 16px; cursor: pointer; white-space: nowrap;
+}
+.model-pill:hover { border-color: var(--accent-2); color: var(--accent-2); background: var(--surface-2); }
+.model-row { display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 11px; color: var(--text-faint); }
+/* ⋯ 더 보기 메뉴 */
+.card-menu { position: relative; margin-left: auto; }
+.session-card .card-menu > .menu-btn {
+  width: 28px; padding: 3px 0; font-size: 14px; line-height: 1; letter-spacing: 1px;
+  background: transparent; color: var(--text-soft); border: 1px solid var(--border-2); border-radius: 6px;
+}
+.session-card .card-menu > .menu-btn:hover { color: var(--accent-2); border-color: var(--accent-2); background: transparent; }
+.menu-pop {
+  position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 30; min-width: 108px; display: flex; flex-direction: column; gap: 2px; padding: 4px;
+  background: var(--surface); border: 1px solid var(--border-2); border-radius: 8px; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
+}
+.menu-pop[hidden] { display: none; }
+.session-card .menu-pop button { border: none; text-align: left; padding: 6px 10px; border-radius: 5px; }
+.session-card .menu-pop button:hover { background: var(--surface-2); }
+.session-card .menu-pop .stop-btn { color: var(--danger); background: transparent; }
+.session-card .menu-pop .stop-btn:hover { background: var(--surface-2); color: var(--danger); }
 .empty-hint { color: var(--text-dim); text-align: center; padding: 8px; }
 
 /* 팀장과의 대화 */

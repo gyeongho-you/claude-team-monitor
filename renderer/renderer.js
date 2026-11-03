@@ -760,11 +760,11 @@ function renderLeadCard(row) {
       </div>
       ${row.name ? `<div class="lead-topic">${escapeHtml(row.name)}</div>` : ''}
       <div class="meta">${escapeHtml(row.cwd)}</div>
+      ${modelRowHtml(row)}
       ${row.offline ? '<div class="offline-hint">메시지를 보내면 다시 이어집니다</div>' : ''}
       <div class="actions">
         ${row.offline ? '' : `<button data-attach="${escapeHtml(row.id)}">터미널 열기</button>`}
         <button data-files="${escapeHtml(row.cwd)}">커밋 대상</button>
-        ${modelButtonHtml(row)}
       </div>
     </div>
   `;
@@ -2276,7 +2276,12 @@ function modelBase(model) {
 function modelButtonHtml(row) {
   if (!row.id || row.offline) return '';
   const label = row.model ? row.model : '기본';
-  return `<button class="model-btn" data-change-model="${escapeHtml(row.id)}" data-model-name="${escapeHtml(row.label || row.projectName || row.id)}" data-model-current="${escapeHtml(row.model || '')}" title="이 세션의 모델을 바꿉니다(세션을 잠시 멈췄다 같은 대화로 재개)">🧠 ${escapeHtml(label)}</button>`;
+  return `<button class="model-pill" data-change-model="${escapeHtml(row.id)}" data-model-name="${escapeHtml(row.label || row.projectName || row.id)}" data-model-current="${escapeHtml(row.model || '')}" title="이 세션의 모델을 바꿉니다(세션을 잠시 멈췄다 같은 대화로 재개)">${escapeHtml(label)}</button>`;
+}
+
+function modelRowHtml(row) {
+  const pill = modelButtonHtml(row);
+  return pill ? `<div class="model-row"><span>모델</span>${pill}</div>` : '';
 }
 
 function renderMemberCard(row, leadLabelById) {
@@ -2293,16 +2298,21 @@ function renderMemberCard(row, leadLabelById) {
         ${row.secret ? '<span class="secret-badge" title="시크릿 팀장이 만든 팀원입니다">🔒</span>' : ''}
         <span>${escapeHtml(statusLabel)}</span>
       </div>
+      ${modelRowHtml(row)}
       ${row.leadId ? `<div class="member-of">소속 팀장: ${escapeHtml(leadDisplay)}${row.role ? ` · 역할: ${escapeHtml(row.role)}` : ''}</div>` : ''}
       <div class="meta">${escapeHtml(row.cwd)}</div>
       <div class="preview">${preview}</div>
       <div class="actions">
         ${attachBtn}
         ${row.sessionId ? `<button data-member-activity="${escapeHtml(row.sessionId)}" data-activity-cwd="${escapeHtml(row.cwd)}" data-activity-title="${escapeHtml(row.label || row.projectName)}" title="이 팀원이 받은 지시와 한 일(도구 호출 포함)을 봅니다">대화 보기</button>` : ''}
-        <button data-files="${escapeHtml(row.cwd)}">커밋 대상</button>
-        ${modelButtonHtml(row)}
-        <button data-refresh-member="${escapeHtml(row.id)}" title="이 팀원 최신 상태 새로고침">⟳</button>
-        <button class="stop-btn" data-stop-member="${escapeHtml(row.id)}" title="이 팀원 세션 종료">삭제</button>
+        <div class="card-menu">
+          <button class="menu-btn" data-menu-toggle title="더 보기">⋯</button>
+          <div class="menu-pop" hidden>
+            <button data-files="${escapeHtml(row.cwd)}">커밋 대상</button>
+            <button data-refresh-member="${escapeHtml(row.id)}" title="이 팀원 최신 상태 새로고침">새로고침</button>
+            <button class="stop-btn" data-stop-member="${escapeHtml(row.id)}" title="이 팀원 세션 종료">삭제</button>
+          </div>
+        </div>
       </div>
     </div>
   `;
@@ -2394,7 +2404,15 @@ function renderBoard(rows) {
 // 반영되도록 멤버 행 렌더링을 별도 함수로 뺐다 — lastRows는 이미 캐시돼있으니 IPC 없이 즉시
 // 다시 그릴 수 있다. 버튼 클릭 리스너는 아래 workTabEl 위임 하나로 처리하므로 여기서 매번
 // 새로 안 걸어도 된다(그래서 이 함수를 몇 번을 다시 불러도 리스너가 중복되지 않는다).
+function closeCardMenus() {
+  document.querySelectorAll('.menu-pop').forEach(p => { p.hidden = true; });
+}
+// 작업 탭 바깥(헤더 등)을 눌러도 열린 ⋯ 메뉴가 닫히게 한다.
+document.addEventListener('click', e => { if (!e.target.closest('.card-menu')) closeCardMenus(); });
+
 function renderMemberRow() {
+  // 메뉴가 열려 있는 동안엔 다시 그리지 않는다 — 3초 폴링이 innerHTML을 갈아엎으면 열어 둔 메뉴가 닫혀 버린다.
+  if (document.querySelector('.menu-pop:not([hidden])')) return;
   renderSubagentSection();
   renderBackgroundSection();
   renderAttachments(); // 팀장 선택이 바뀌면 그 팀장의 첨부 목록으로 바꿔 보여준다
@@ -2429,6 +2447,16 @@ workTabEl.addEventListener('click', async e => {
     }
     return;
   }
+  const menuToggle = e.target.closest('[data-menu-toggle]');
+  if (menuToggle) {
+    e.stopPropagation();
+    const pop = menuToggle.parentElement.querySelector('.menu-pop');
+    const willOpen = pop.hidden;
+    closeCardMenus();
+    pop.hidden = !willOpen;
+    return;
+  }
+  closeCardMenus(); // 메뉴 밖을 눌렀거나 메뉴 안 버튼을 눌렀으면(동작은 아래 핸들러가 처리) 열린 메뉴를 닫는다
   const modelBtn = e.target.closest('[data-change-model]');
   if (modelBtn) {
     e.stopPropagation();

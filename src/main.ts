@@ -2381,7 +2381,8 @@ async function restartLead(internalId: string, instruction: string): Promise<{ i
   // 재시작은 완전히 새 세션(--resume이 아님)이라 launchTeamLead와 같은 이유로 이 시점에 SECRET_MODE_CLI_ARGS를
   // 다시 실어야 한다 — resumeLead와 달리 "저장된 옵션을 물려받는" 경로가 아니다.
   const newId = await runClaudeBg(
-    ['--bg', ...buildMemberSpawnCliArgs(), ...(current.secret ? SECRET_MODE_CLI_ARGS : [])],
+    // 새 세션이라 저장된 옵션이 없다 — 지금 쓰던 모델을 이어받게 한다(안 하면 기본 모델로 돌아간다).
+    ['--bg', ...(readSessionModel(JOBS_DIR, current.id) ? ['--model', readSessionModel(JOBS_DIR, current.id)!] : []), ...buildMemberSpawnCliArgs(), ...(current.secret ? SECRET_MODE_CLI_ARGS : [])],
     resolveLongPrompt(prompt),
     current.targetDir,
   );
