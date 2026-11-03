@@ -144,6 +144,9 @@
     return invoke('restart_lead_command', { leadId, instruction });
   }
 
+  async function changeSessionModel(id, model) {
+    return invoke('change_session_model_command', { id, model });
+  }
   async function emergencyStopLead(leadId) {
     return invoke('emergency_stop_lead_command', { leadId });
   }
@@ -326,6 +329,7 @@
     updateLeadLabel,
     restartLead,
     emergencyStopLead,
+    changeSessionModel,
     endLeadWork,
   };
 

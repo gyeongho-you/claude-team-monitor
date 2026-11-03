@@ -18,6 +18,7 @@ import { writeJsonFileAtomic } from './lib/jsonFile';
 import { TEAM_MEMBER_BRIEFING, TEAM_MEMBER_STANDBY_NOTE } from './lib/teamMemberBriefing';
 import { looksLikeApprovalRequest, parseStallVerdict, isStatusEligibleForStall, shouldCheckStall, shouldSendNudge } from './lib/stallGuard';
 import { MEMBER_MODEL_OPTIONS, clampMinutes, normalizeMemberModel } from './lib/appSettings';
+import { isKnownModel, readSessionModel, writeSessionModel, modelChangeNotice } from './lib/sessionModel';
 import { extractBackgroundedId, extractStartedCopyId } from './lib/claudeBgOutput';
 import { CLAUDE_HOME, MEMBERS_DIR, LEADS_PATH } from './lib/teamMemberPaths';
 import { hasLiveMember } from './lib/leadPresence';
@@ -258,6 +259,7 @@ type SessionRow = AgentEntry & {
   resumeRetrying?: { attempt: number; max: number };
   secret?: boolean; // 팀장·팀원 카드 공통: LeadRecord.secret/MemberRecord.secret을 그대로 반영 — 🔒 표시용
   startupWarning?: string; // 팀장 카드일 때만: LeadRecord.startupWarning 그대로 반영 — 히스토리 카드에 경고로 표시
+  model?: string; // 이 세션의 모델(데몬이 저장한 --model, 예: "opus"). 없으면 claude 기본값
   backgroundTasks?: number; // 살아있는 팀장 카드일 때만: 데몬이 센 백그라운드 셸 명령(local_bash) 개수
   backgroundOnly?: { count: number; kinds: string[] }; // 살아있는 팀장 카드일 때만: 팀장은 쉬는 중인데 백그라운드 명령(개발 서버 등)만 남아 데몬이 busy로 보고하는 경우
   subagents?: { count: number; names: string[]; items?: { id: string; name: string }[] }; // 살아있는 팀장 카드일 때만: 팀장이 띄운 서브에이전트가 지금 돌고 있으면 개수·이름(읽기 전용 표시용)
@@ -1083,6 +1085,7 @@ function computeLiveRows(
         subagents: isLead ? liveSubagents(JOBS_DIR, a.id!, sessionFilePath(a.cwd, a.sessionId)) ?? undefined : undefined,
         backgroundTasks: isLead ? daemonLocalBashCount(JOBS_DIR, a.id!, sessionFilePath(a.cwd, a.sessionId)) ?? undefined : undefined,
         backgroundOnly: isLead && a.status === 'busy' ? backgroundOnly(JOBS_DIR, a.id!) ?? undefined : undefined,
+        model: readSessionModel(JOBS_DIR, a.id!) ?? undefined,
       };
     });
 }
@@ -2223,6 +2226,9 @@ async function resumeSpawnWithRetry(internalId: string, current: LeadRecord, mes
 // 있으므로, 넘겨받은 값을 그대로 믿지 않고 internalId(절대 안 바뀜)로 leads.json에서 최신
 // 레코드를 실행 시점에 다시 찾아서 사용한다. 호출부는 반드시 queueLeadOperation(internalId, ...)으로
 // 감싸서 호출해야 한다.
+// 팀장 재개(resumeLead)가 "정지가 끝난 뒤, 재개 직전"에 적용할 모델 — 짧은 id → 모델.
+const pendingModelChange = new Map<string, string>();
+
 async function resumeLead(internalId: string, message: string): Promise<string | null> {
   const current = loadLeads().find(l => l.internalId === internalId);
   if (!current) return null;
@@ -2284,6 +2290,15 @@ async function resumeLead(internalId: string, message: string): Promise<string |
     // 짧은 지연이라 없애지는 않았다. 다시 재현되면 ~/.claude/jobs/<id>/state.json의 state/detail
     // 필드로 원인을 더 파볼 수 있다.
     await new Promise(resolve => setTimeout(resolve, 3000));
+  }
+  // 모델 변경 요청이면 정지가 끝난 지금 respawnFlags에 새 모델을 저장한다(lib/sessionModel.js 설명 참고).
+  const pendingModel = pendingModelChange.get(current.id);
+  if (pendingModel) {
+    pendingModelChange.delete(current.id);
+    try { writeSessionModel(JOBS_DIR, current.id, pendingModel); } catch (e) {
+      logCritical(`[resumeLead] 팀장 ${internalId}(${current.id}) 모델 설정을 저장하지 못해 재개를 중단합니다 — ${(e as Error).message}`);
+      return null;
+    }
   }
   const newId = await resumeSpawnWithRetry(internalId, current, message);
   if (newId) {
@@ -3221,6 +3236,48 @@ ipcMain.handle('restart-lead', async (_e, leadId: string, instruction: string) =
 
 // 긴급 중지 — 이 팀장 세션 하나만 그 자리에서 멈춘다(팀원은 건드리지 않는다, 팀원까지 정리하는 건 "작업 종료"). 대화는 그대로 남고
 // 이후 메시지를 보내면 다시 이어진다.
+// 실행 중(또는 쉬는 중)인 팀장/팀원의 모델을 바꾼다 — 정지 → respawnFlags의 모델 저장 → 같은 세션으로 재개(lib/sessionModel.js 설명 참고).
+// 작업 중이면 그 작업은 중단된다. 반환: { ok, error? }
+ipcMain.handle('change-session-model', async (_e, id: string, model: string): Promise<{ ok: boolean; error?: string }> => {
+  if (!isKnownModel(model)) return { ok: false, error: '지원하지 않는 모델입니다.' };
+  if (!/^[A-Za-z0-9_-]+$/.test(id || '')) return { ok: false, error: '세션 id가 올바르지 않습니다.' };
+  const message = modelChangeNotice(model);
+  const lead = loadLeads().find(l => l.id === id);
+  if (lead) {
+    pendingModelChange.set(id, model);
+    try {
+      const resumed = await queueLeadOperation(lead.internalId, () => resumeLead(lead.internalId, message));
+      return resumed ? { ok: true } : { ok: false, error: '세션을 재개하지 못했습니다 — 팀장이 멈춘 채일 수 있으니 목록에서 확인하고 메시지를 보내 다시 이어 주세요.' };
+    } finally {
+      pendingModelChange.delete(id);
+    }
+  }
+  if (!loadMembers().some(m => m.memberId === id)) return { ok: false, error: '등록된 팀장/팀원이 아닙니다.' };
+  let agents: AgentEntry[];
+  try { agents = await fetchAgentsStrict(); } catch { return { ok: false, error: '세션 목록을 확인하지 못했습니다. 잠시 후 다시 시도하세요.' }; }
+  const agent = agents.find(a => a.id === id);
+  if (!agent) return { ok: false, error: '이 팀원이 지금 세션 목록에 없습니다(이미 종료됐을 수 있습니다).' };
+  if (!agent.sessionId || !agent.cwd) return { ok: false, error: '이 팀원의 세션 정보를 찾지 못했습니다.' };
+  if (!hasNoLiveProcess(agent)) {
+    let stopped = await stopSession(id);
+    if (!stopped) stopped = await stopSession(id);
+    if (!stopped) {
+      let noLive = false;
+      try { noLive = hasNoLiveProcess((await fetchAgentsStrict()).find(a => a.id === id)); } catch { /* 확인 불가 → fail-closed */ }
+      if (!noLive) return { ok: false, error: '팀원 세션을 정지하지 못해(세션 포크 위험) 모델 변경을 중단했습니다.' };
+    }
+    await new Promise(resolve => setTimeout(resolve, 3000));
+  }
+  try { writeSessionModel(JOBS_DIR, id, model); } catch (e) { return { ok: false, error: (e as Error).message }; }
+  const candidate = await runClaudeBg(['--bg', '--resume', agent.sessionId], resolveLongPrompt(message), agent.cwd);
+  if (!candidate) return { ok: false, error: '팀원 세션을 재개하지 못했습니다 — 세션이 멈춘 채일 수 있으니 팀장에게 확인하세요.' };
+  if (candidate !== id) {
+    stopSession(candidate).catch(() => undefined);
+    return { ok: false, error: '재개가 다른 세션(복사본)으로 떠서 정리했습니다. 잠시 후 다시 시도하세요.' };
+  }
+  return { ok: true };
+});
+
 ipcMain.handle('emergency-stop-lead', async (_e, leadId: string) => {
   const lead = loadLeads().find(l => l.id === leadId);
   if (!lead) return false;

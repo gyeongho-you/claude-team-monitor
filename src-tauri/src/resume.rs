@@ -703,6 +703,11 @@ pub async fn resume_lead(internal_id: String, message: String) -> Option<String>
         tokio::time::sleep(Duration::from_millis(3000)).await;
     }
 
+    // 모델 변경 요청이면 정지가 끝난 지금 respawnFlags에 새 모델을 저장한다(session_model.rs 설명 참고).
+    if let Err(e) = crate::session_model::apply_pending(&current.id) {
+        log_critical(&format!("[resumeLead] 팀장 {internal_id}({}) 모델 설정을 저장하지 못해 재개를 중단합니다 — {e}", current.id));
+        return None;
+    }
     let new_id = resume_spawn_with_retry(&internal_id, &current, &message).await?;
 
     let new_session_id = find_session_id_by_short_id_retrying(&new_id).await;
@@ -722,6 +727,38 @@ pub async fn resume_lead(internal_id: String, message: String) -> Option<String>
         migrate_last_known_live_lead_row(&current.id, &new_id);
     }
     Some(new_id)
+}
+
+/// 팀원 세션의 모델을 바꾼다 — 정지 → 모델 저장 → 같은 세션으로 재개(session_model.rs 설명 참고). 팀장은 resume_lead가 같은 일을 한다.
+pub async fn resume_member_with_model(id: &str, model: &str, message: &str) -> Result<(), String> {
+    let agents = fetch_agents_typed_strict().await.map_err(|_| "세션 목록을 확인하지 못했습니다. 잠시 후 다시 시도하세요.".to_string())?;
+    let Some(agent) = agents.iter().find(|a| a.id.as_deref() == Some(id)) else {
+        return Err("이 팀원이 지금 세션 목록에 없습니다(이미 종료됐을 수 있습니다).".to_string());
+    };
+    let (session_id, cwd, ghost) = (agent.session_id.clone(), agent.cwd.clone(), is_ghost_agent(agent));
+    if session_id.is_empty() || cwd.is_empty() {
+        return Err("이 팀원의 세션 정보를 찾지 못했습니다.".to_string());
+    }
+    if !ghost {
+        let mut stopped = stop_session(id.to_string()).await;
+        if !stopped {
+            stopped = stop_session(id.to_string()).await;
+        }
+        if !stopped && !has_no_live_process(id).await {
+            return Err("팀원 세션을 정지하지 못해(세션 포크 위험) 모델 변경을 중단했습니다.".to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(3000)).await;
+    }
+    crate::session_model::write_model_in(&crate::paths::jobs_dir(), id, model)?;
+    let flags = vec!["--bg".to_string(), "--resume".to_string(), session_id];
+    let Some(candidate) = run_claude_bg(flags, resolve_long_prompt(message), cwd).await else {
+        return Err("팀원 세션을 재개하지 못했습니다 — 세션이 멈춘 채일 수 있으니 팀장에게 확인하세요.".to_string());
+    };
+    if candidate != id {
+        best_effort_stop(&candidate);
+        return Err("재개가 다른 세션(복사본)으로 떠서 정리했습니다. 잠시 후 다시 시도하세요.".to_string());
+    }
+    Ok(())
 }
 
 /// send-to-lead 등 IPC 커맨드(서브청크 δ)가 resumeLead를 호출할 때 반드시 거쳐야 하는 진입점 —

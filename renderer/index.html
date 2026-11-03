@@ -100,6 +100,20 @@
             </div>
             <div id="activity-body"></div>
           </div>
+          <div id="model-change-panel" class="modal-panel" hidden>
+            <p class="form-hint" id="model-change-target"></p>
+            <select id="model-change-select">
+              <option value="default">기본 모델 (claude CLI 기본값)</option>
+              <option value="haiku">Haiku (가장 저렴)</option>
+              <option value="sonnet">Sonnet</option>
+              <option value="opus">Opus (가장 고성능)</option>
+              <option value="fable">Fable</option>
+            </select>
+            <p class="form-hint model-change-warning">⚠ 세션을 잠시 멈췄다가 같은 대화로 이어서 새 모델로 재개합니다. 작업 중이던 세션은 그 작업이 중단되고, 재개 직후 새 모델이 한 번 응답합니다(대화가 길면 그만큼 비용이 듭니다).</p>
+            <button id="model-change-yes-btn">모델 바꾸기</button>
+            <button id="model-change-no-btn">취소</button>
+            <div id="model-change-status"></div>
+          </div>
           <div id="emergency-stop-panel" class="modal-panel" hidden>
             <p class="form-hint emergency-stop-warning">⚠ 이 팀장이 지금 하던 작업을 그 자리에서 중단합니다(진행 중이던 응답은 잘릴 수 있음). 대화 내용은 그대로 남고, 메시지를 보내면 다시 이어집니다. 긴급 중지할까요?</p>
             <button id="emergency-stop-yes-btn" class="stop-btn">예</button>
@@ -261,6 +275,7 @@
             <option value="haiku">Haiku (가장 저렴)</option>
             <option value="sonnet">Sonnet</option>
             <option value="opus">Opus (가장 고성능)</option>
+            <option value="fable">Fable</option>
           </select>
         </div>
         <textarea id="new-tpl-instruction" placeholder="이 팀원에게 줄 기본 지시 (예: 최근 diff를 코드리뷰만 해라, 직접 고치지 마라)"></textarea>

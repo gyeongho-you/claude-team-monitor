@@ -165,7 +165,7 @@ server.registerTool(
       instruction: z.string().describe('이 팀원에게 줄 구체적인 작업 지시.'),
       label: z.string().describe('이 팀원을 구분할, 사람이 읽을 수 있는 이름.'),
       role: z.string().optional().describe('선택: 이 팀원의 역할(예: reviewer, implementer). 화면 표시 및 팀원 자신에게도 전달된다.'),
-      model: z.enum(['default', 'haiku', 'sonnet', 'opus']).optional().describe('선택: 이 팀원에 쓸 모델. 생략하면 기본값.'),
+      model: z.enum(['default', 'haiku', 'sonnet', 'opus', 'fable']).optional().describe('선택: 이 팀원에 쓸 모델. 생략하면 기본값.'),
     },
   },
   async ({ targetDir, instruction, label, role, model }) => {

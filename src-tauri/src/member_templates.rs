@@ -19,7 +19,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 // lib/appSettings.js의 MEMBER_MODEL_OPTIONS/normalizeMemberModel과 동일 — 'default'는 이 앱이
 // 모델을 따로 지정하지 않고 claude CLI 기본값을 그대로 쓴다는 뜻.
-const MEMBER_MODEL_OPTIONS: [&str; 4] = ["default", "haiku", "sonnet", "opus"];
+const MEMBER_MODEL_OPTIONS: [&str; 5] = ["default", "haiku", "sonnet", "opus", "fable"];
 
 /// normalizeMemberModel(lib/appSettings.js)와 동일 — 화이트리스트 밖 값(구버전 템플릿·조작된 값
 /// 등)은 'default'로 취급한다.

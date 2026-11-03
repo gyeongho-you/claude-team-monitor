@@ -692,7 +692,7 @@ pub const TEAM_MEMBER_BRIEFING: &str = "너는 지금 \"팀장\" 세션이 배�
 
 pub const TEAM_MEMBER_STANDBY_NOTE: &str = "아래는 앞으로 맡을 작업에 대한 참고용 사전 지시다 — 이번 턴에서 곧바로 실행하지 마라. 내용을 확인했다는 짧은 준비 완료 응답만 남기고(예: \"확인했습니다. 아래 작업을 맡을 준비가 됐습니다.\"), 실제로 작업을 시작하라는 팀장의 다음 메시지가 올 때까지 기다려라. 팀장이 다시 메시지를 보내기 전까지는 어떤 파일도 고치거나 만들지 마라.";
 
-const MEMBER_MODEL_OPTIONS: [&str; 4] = ["default", "haiku", "sonnet", "opus"];
+const MEMBER_MODEL_OPTIONS: [&str; 5] = ["default", "haiku", "sonnet", "opus", "fable"];
 
 /// normalizeMemberModel(lib/appSettings.js)과 동일 — 화이트리스트 밖이면 'default'로 취급한다.
 fn normalize_member_model(model: Option<&str>) -> &'static str {

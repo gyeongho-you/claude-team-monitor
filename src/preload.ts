@@ -70,5 +70,6 @@ contextBridge.exposeInMainWorld('api', {
   updateLeadLabel: (leadId: string, label: string) => ipcRenderer.invoke('update-lead-label', leadId, label),
   restartLead: (leadId: string, instruction: string) => ipcRenderer.invoke('restart-lead', leadId, instruction),
   emergencyStopLead: (leadId: string) => ipcRenderer.invoke('emergency-stop-lead', leadId),
+  changeSessionModel: (id: string, model: string) => ipcRenderer.invoke('change-session-model', id, model),
   endLeadWork: (leadId: string) => ipcRenderer.invoke('end-lead-work', leadId),
 });

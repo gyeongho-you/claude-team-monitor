@@ -2,7 +2,7 @@
 // main.ts는 이 값을 읽고 쓰는 쪽(loadSettings/saveSettings/normalizeMemberModel 호출부)만 맡는다.
 
 // 'default'는 이 앱이 모델을 따로 지정하지 않고 claude CLI 기본값을 그대로 쓴다는 뜻.
-const MEMBER_MODEL_OPTIONS = ['default', 'haiku', 'sonnet', 'opus'];
+const MEMBER_MODEL_OPTIONS = ['default', 'haiku', 'sonnet', 'opus', 'fable'];
 
 /**
  * 분 단위 숫자 하나를 안전 범위로 정리한다 — 파일이 손상됐거나(수동 편집 등) 렌더러가 이상한

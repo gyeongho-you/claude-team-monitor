@@ -341,6 +341,7 @@ mod tests {
             subagents: None,
             background_only: None,
             background_tasks: None,
+            model: None,
         }
     }
 

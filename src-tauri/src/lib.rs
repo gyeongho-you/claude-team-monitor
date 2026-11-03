@@ -24,6 +24,7 @@ mod native_dialog;
 mod notice_queue;
 mod paths;
 mod resume;
+mod session_model;
 mod session_registry;
 mod settings;
 mod stall_watchdog;
@@ -78,6 +79,7 @@ pub fn run() {
       transcript::get_lead_transcript_command,
       daemon_state::get_pending_choice_command,
       daemon_state::get_chat_unresolvable_detail_command,
+      session_model::change_session_model_command,
       daemon_state::get_blocked_needs_command,
       lead_admin::delete_lead_history_command,
       lead_admin::set_lead_auto_stall_nudge_command,

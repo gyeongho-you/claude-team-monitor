@@ -132,14 +132,21 @@ const helpBtn = document.getElementById('help-btn');
 const helpPanelEl = document.getElementById('help-panel');
 const helpCloseBtn = document.getElementById('help-close-btn');
 const activityPanelEl = document.getElementById('activity-panel');
+const modelChangePanelEl = document.getElementById('model-change-panel');
+const modelChangeTargetEl = document.getElementById('model-change-target');
+const modelChangeSelectEl = document.getElementById('model-change-select');
+const modelChangeYesBtn = document.getElementById('model-change-yes-btn');
+const modelChangeNoBtn = document.getElementById('model-change-no-btn');
+const modelChangeStatusEl = document.getElementById('model-change-status');
 const emergencyStopPanelEl = document.getElementById('emergency-stop-panel');
 const emergencyStopYesBtn = document.getElementById('emergency-stop-yes-btn');
 const emergencyStopNoBtn = document.getElementById('emergency-stop-no-btn');
 const emergencyStopStatusEl = document.getElementById('emergency-stop-status');
-const ALL_MODAL_PANELS = () => [restartLeadPanelEl, endWorkPanelEl, fileListPanelEl, cleanupStopPanelEl, historyDeletePanelEl, helpPanelEl, emergencyStopPanelEl, activityPanelEl];
+const ALL_MODAL_PANELS = () => [restartLeadPanelEl, endWorkPanelEl, fileListPanelEl, cleanupStopPanelEl, historyDeletePanelEl, helpPanelEl, emergencyStopPanelEl, activityPanelEl, modelChangePanelEl];
 // 긴급 중지 모달이 지금 누구 앞으로 뜬 건지 — 배너 버튼을 누른 시점의 리드 id를 기억해뒀다가
 // "예"를 눌렀을 때(그 사이 selectedLeadId가 바뀌었을 수 있으므로) 그 리드를 정확히 멈춘다.
 let emergencyStopLeadId = null;
+let modelChangeId = null;
 
 // "새 작업 시작"/"작업 종료"/"변경 파일" 같은 확인창·상세창은 대화창 아래쪽에 인라인으로 뜨면
 // 스크롤 밖이라 눈에 안 띄어서(사용자 피드백), 화면 가운데 팝업(모달)으로 띄운다 — 배경을
@@ -757,11 +764,11 @@ function renderLeadCard(row) {
       <div class="actions">
         ${row.offline ? '' : `<button data-attach="${escapeHtml(row.id)}">터미널 열기</button>`}
         <button data-files="${escapeHtml(row.cwd)}">커밋 대상</button>
+        ${modelButtonHtml(row)}
       </div>
     </div>
   `;
 }
-
 // ---------------- 보내는 대상 표시 · 팀장별 입력 초안 · 자동 전환 보호 ----------------
 // 팀장 선택이 사용자 모르게 바뀐 채 질문을 보내는 사고(사용자 지적)를 막는다: (1) 입력창 위에 보내는 대상을 항상 보여주고, (2) 쓰던 글을
 // 팀장별로 따로 보관해서 선택이 바뀌면 입력창이 그 팀장의 글로 바뀌게 하며(엉뚱한 팀장에게 글이 따라가지 않는다), (3) 선택이 자동으로 바뀐
@@ -2261,6 +2268,17 @@ document.querySelector('.tab-btn[data-tab="history"]').addEventListener('click',
 
 // ---------------- 작업 탭: 보드(팀장 목록 / 팀원) ----------------
 
+// 데몬이 저장한 모델 문자열("opus", "sonnet[1m]" 등)을 선택지 값/표시 이름으로 바꾼다. 없으면 기본 모델.
+function modelBase(model) {
+  const m = String(model || '').toLowerCase();
+  return ['haiku', 'sonnet', 'opus', 'fable'].find(x => m.startsWith(x)) || (m ? 'custom' : 'default');
+}
+function modelButtonHtml(row) {
+  if (!row.id || row.offline) return '';
+  const label = row.model ? row.model : '기본';
+  return `<button class="model-btn" data-change-model="${escapeHtml(row.id)}" data-model-name="${escapeHtml(row.label || row.projectName || row.id)}" data-model-current="${escapeHtml(row.model || '')}" title="이 세션의 모델을 바꿉니다(세션을 잠시 멈췄다 같은 대화로 재개)">🧠 ${escapeHtml(label)}</button>`;
+}
+
 function renderMemberCard(row, leadLabelById) {
   const statusLabel = statusLabelKo(row);
   const preview = formatPreview(row.preview, 100, 220);
@@ -2282,6 +2300,7 @@ function renderMemberCard(row, leadLabelById) {
         ${attachBtn}
         ${row.sessionId ? `<button data-member-activity="${escapeHtml(row.sessionId)}" data-activity-cwd="${escapeHtml(row.cwd)}" data-activity-title="${escapeHtml(row.label || row.projectName)}" title="이 팀원이 받은 지시와 한 일(도구 호출 포함)을 봅니다">대화 보기</button>` : ''}
         <button data-files="${escapeHtml(row.cwd)}">커밋 대상</button>
+        ${modelButtonHtml(row)}
         <button data-refresh-member="${escapeHtml(row.id)}" title="이 팀원 최신 상태 새로고침">⟳</button>
         <button class="stop-btn" data-stop-member="${escapeHtml(row.id)}" title="이 팀원 세션 종료">삭제</button>
       </div>
@@ -2410,6 +2429,18 @@ workTabEl.addEventListener('click', async e => {
     }
     return;
   }
+  const modelBtn = e.target.closest('[data-change-model]');
+  if (modelBtn) {
+    e.stopPropagation();
+    modelChangeId = modelBtn.dataset.changeModel;
+    const base = modelBase(modelBtn.dataset.modelCurrent);
+    modelChangeSelectEl.value = base === 'custom' ? 'default' : base;
+    modelChangeTargetEl.textContent = `"${modelBtn.dataset.modelName}"의 모델을 바꿉니다(지금: ${modelBtn.dataset.modelCurrent || '기본 모델'}).`;
+    modelChangeStatusEl.textContent = '';
+    modelChangeYesBtn.disabled = false;
+    showModal(modelChangePanelEl);
+    return;
+  }
   const filesBtn = e.target.closest('[data-files]');
   if (filesBtn) {
     e.stopPropagation();
@@ -2448,6 +2479,38 @@ workTabEl.addEventListener('click', async e => {
     showModal(emergencyStopPanelEl);
   }
 }, true);
+
+modelChangeNoBtn.addEventListener('click', () => {
+  if (modelChangeYesBtn.disabled) return; // 바꾸는 중에는 닫지 않는다
+  hideModal(modelChangePanelEl);
+  modelChangeId = null;
+});
+
+modelChangeYesBtn.addEventListener('click', async () => {
+  const id = modelChangeId;
+  if (!id) return;
+  const model = modelChangeSelectEl.value;
+  modelChangeYesBtn.disabled = true;
+  modelChangeStatusEl.textContent = '모델을 바꾸는 중입니다(세션을 멈췄다 다시 이어요, 최대 1분 정도)...';
+  busyLeadIds.add(id);
+  updateBusyUI();
+  try {
+    const result = await window.api.changeSessionModel(id, model);
+    if (result && result.ok) {
+      hideModal(modelChangePanelEl);
+      modelChangeId = null;
+      await refreshBoardNow();
+    } else {
+      modelChangeStatusEl.textContent = (result && result.error) || '모델을 바꾸지 못했습니다.';
+    }
+  } catch (err) {
+    modelChangeStatusEl.textContent = `모델을 바꾸지 못했습니다: ${errMsg(err)}`;
+  } finally {
+    busyLeadIds.delete(id);
+    updateBusyUI();
+    modelChangeYesBtn.disabled = false;
+  }
+});
 
 emergencyStopNoBtn.addEventListener('click', () => {
   hideModal(emergencyStopPanelEl);
@@ -2925,7 +2988,7 @@ launchBtn.addEventListener('click', async () => {
 
 // ---------------- 설정 탭 ②: 팀원 등록(역할 템플릿) ----------------
 
-const MEMBER_MODEL_LABELS = { default: '기본 모델', haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus' };
+const MEMBER_MODEL_LABELS = { default: '기본 모델', haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus', fable: 'Fable' };
 
 function renderTemplateCard(t, favNameByPath) {
   const dirLine = t.path
