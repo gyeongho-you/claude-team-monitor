@@ -29,6 +29,7 @@ mod session_registry;
 mod settings;
 mod stall_watchdog;
 mod timing;
+mod update_check;
 mod transcript;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -80,6 +81,9 @@ pub fn run() {
       daemon_state::get_pending_choice_command,
       daemon_state::get_chat_unresolvable_detail_command,
       session_model::change_session_model_command,
+      update_check::get_app_version_command,
+      update_check::check_for_update_command,
+      update_check::open_release_page_command,
       daemon_state::get_blocked_needs_command,
       lead_admin::delete_lead_history_command,
       lead_admin::set_lead_auto_stall_nudge_command,

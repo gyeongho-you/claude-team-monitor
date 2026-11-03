@@ -144,6 +144,15 @@
     return invoke('restart_lead_command', { leadId, instruction });
   }
 
+  async function getAppVersion() {
+    return invoke('get_app_version_command');
+  }
+  async function checkForUpdate() {
+    return invoke('check_for_update_command');
+  }
+  async function openReleasePage(url) {
+    return invoke('open_release_page_command', { url });
+  }
   async function changeSessionModel(id, model) {
     return invoke('change_session_model_command', { id, model });
   }
@@ -330,6 +339,9 @@
     restartLead,
     emergencyStopLead,
     changeSessionModel,
+    getAppVersion,
+    checkForUpdate,
+    openReleasePage,
     endLeadWork,
   };
 

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -19,6 +19,7 @@ import { TEAM_MEMBER_BRIEFING, TEAM_MEMBER_STANDBY_NOTE } from './lib/teamMember
 import { looksLikeApprovalRequest, parseStallVerdict, isStatusEligibleForStall, shouldCheckStall, shouldSendNudge } from './lib/stallGuard';
 import { MEMBER_MODEL_OPTIONS, clampMinutes, normalizeMemberModel } from './lib/appSettings';
 import { isKnownModel, readSessionModel, writeSessionModel, modelChangeNotice } from './lib/sessionModel';
+import { interpretResponse, isSafeReleaseUrl, LATEST_RELEASE_API } from './lib/updateCheck';
 import { extractBackgroundedId, extractStartedCopyId } from './lib/claudeBgOutput';
 import { CLAUDE_HOME, MEMBERS_DIR, LEADS_PATH } from './lib/teamMemberPaths';
 import { hasLiveMember } from './lib/leadPresence';
@@ -3277,6 +3278,26 @@ ipcMain.handle('change-session-model', async (_e, id: string, model: string): Pr
     return { ok: false, error: '재개가 다른 세션(복사본)으로 떠서 정리했습니다. 잠시 후 다시 시도하세요.' };
   }
   return { ok: true };
+});
+
+// 새 버전 확인 — GitHub 최신 릴리스와 지금 앱 버전을 비교한다(lib/updateCheck.js). 자동 설치는 하지 않는다.
+ipcMain.handle('get-app-version', () => app.getVersion());
+ipcMain.handle('check-for-update', async () => {
+  const current = app.getVersion();
+  try {
+    const res = await fetch(LATEST_RELEASE_API, {
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'claude-team-monitor' },
+      signal: AbortSignal.timeout(10000),
+    });
+    return interpretResponse(current, res.status, await res.text());
+  } catch (e) {
+    return { current, latest: null, updateAvailable: false, url: null, name: null, publishedAt: null, noRelease: false, error: `GitHub에 연결하지 못했습니다(인터넷 연결을 확인하세요): ${(e as Error).message}` };
+  }
+});
+ipcMain.handle('open-release-page', async (_e, url: string) => {
+  if (!isSafeReleaseUrl(url)) return false;
+  await shell.openExternal(url);
+  return true;
 });
 
 ipcMain.handle('emergency-stop-lead', async (_e, leadId: string) => {

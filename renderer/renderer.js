@@ -769,6 +769,75 @@ function renderLeadCard(row) {
     </div>
   `;
 }
+// ---------------- 앱 버전 · 새 버전 확인 ----------------
+// 헤더의 버전 표시를 누르면 GitHub 최신 릴리스와 비교한다. 시작 직후와 6시간마다 조용히 확인하고(실패·릴리스 없음은 알리지 않는다), 새 버전이 있으면
+// 배너로 알린다 — 자동 설치는 하지 않고 릴리스 페이지를 열어 준다. "이 버전 알림 끄기"는 그 버전에 대해서만 이 PC에 기억한다.
+const versionBtnEl = document.getElementById('version-btn');
+const updateBannerEl = document.getElementById('update-banner');
+const DISMISSED_UPDATE_KEY = 'ctm.dismissedUpdateVersion';
+let appVersion = '';
+let infoBannerTimer = null;
+
+function dismissedUpdateVersion() {
+  try { return localStorage.getItem(DISMISSED_UPDATE_KEY) || ''; } catch { return ''; }
+}
+
+function showUpdateBanner(html, kind, autoHideMs) {
+  clearTimeout(infoBannerTimer);
+  updateBannerEl.innerHTML = `<div class="update-card ${kind}">${html}<button class="update-close" data-update-close title="닫기">✕</button></div>`;
+  if (autoHideMs) infoBannerTimer = setTimeout(() => { updateBannerEl.innerHTML = ''; }, autoHideMs);
+}
+
+async function runUpdateCheck(manual) {
+  if (manual) versionBtnEl.disabled = true;
+  try {
+    const r = await window.api.checkForUpdate();
+    if (r.updateAvailable) {
+      versionBtnEl.classList.add('has-update');
+      if (!manual && dismissedUpdateVersion() === r.latest) return;
+      const when = r.publishedAt ? ` · ${escapeHtml(String(r.publishedAt).slice(0, 10))}` : '';
+      showUpdateBanner(
+        `<span>🆕 새 버전 <strong>${escapeHtml(r.latest)}</strong>이(가) 나왔습니다 (현재 ${escapeHtml(r.current)}${when})</span>` +
+          (r.url ? `<button data-update-open="${escapeHtml(r.url)}">릴리스 페이지 열기</button>` : '') +
+          `<button data-update-skip="${escapeHtml(r.latest)}">이 버전 알림 끄기</button>`,
+        'available', 0);
+    } else if (manual) {
+      versionBtnEl.classList.remove('has-update');
+      if (r.error) showUpdateBanner(`${escapeHtml(r.error)}`, 'error', 8000);
+      else if (r.noRelease) showUpdateBanner(`현재 ${escapeHtml(r.current)} — 아직 GitHub에 올라온 릴리스가 없습니다.`, 'info', 6000);
+      else showUpdateBanner(`최신 버전입니다 (현재 ${escapeHtml(r.current)}, 최신 릴리스 ${escapeHtml(r.latest || '-')}).`, 'info', 6000);
+    } else {
+      versionBtnEl.classList.remove('has-update');
+    }
+  } catch (err) {
+    if (manual) showUpdateBanner(`업데이트 확인에 실패했습니다: ${escapeHtml(errMsg(err))}`, 'error', 8000);
+  } finally {
+    versionBtnEl.disabled = false;
+  }
+}
+
+updateBannerEl.addEventListener('click', async e => {
+  if (e.target.closest('[data-update-close]')) { clearTimeout(infoBannerTimer); updateBannerEl.innerHTML = ''; return; }
+  const openBtn = e.target.closest('[data-update-open]');
+  if (openBtn) { try { await window.api.openReleasePage(openBtn.dataset.updateOpen); } catch (err) { console.error('릴리스 페이지 열기 실패:', err); } return; }
+  const skipBtn = e.target.closest('[data-update-skip]');
+  if (skipBtn) {
+    try { localStorage.setItem(DISMISSED_UPDATE_KEY, skipBtn.dataset.updateSkip); } catch { /* 저장 실패해도 이번에는 닫는다 */ }
+    updateBannerEl.innerHTML = '';
+  }
+});
+
+versionBtnEl.addEventListener('click', () => runUpdateCheck(true));
+
+(async () => {
+  try {
+    appVersion = await window.api.getAppVersion();
+    versionBtnEl.textContent = `v${appVersion}`;
+  } catch { versionBtnEl.hidden = true; return; }
+  setTimeout(() => runUpdateCheck(false), 8000);
+  setInterval(() => runUpdateCheck(false), 6 * 60 * 60 * 1000);
+})();
+
 // ---------------- 보내는 대상 표시 · 팀장별 입력 초안 · 자동 전환 보호 ----------------
 // 팀장 선택이 사용자 모르게 바뀐 채 질문을 보내는 사고(사용자 지적)를 막는다: (1) 입력창 위에 보내는 대상을 항상 보여주고, (2) 쓰던 글을
 // 팀장별로 따로 보관해서 선택이 바뀌면 입력창이 그 팀장의 글로 바뀌게 하며(엉뚱한 팀장에게 글이 따라가지 않는다), (3) 선택이 자동으로 바뀐

@@ -71,5 +71,8 @@ contextBridge.exposeInMainWorld('api', {
   restartLead: (leadId: string, instruction: string) => ipcRenderer.invoke('restart-lead', leadId, instruction),
   emergencyStopLead: (leadId: string) => ipcRenderer.invoke('emergency-stop-lead', leadId),
   changeSessionModel: (id: string, model: string) => ipcRenderer.invoke('change-session-model', id, model),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  checkForUpdate: () => ipcRenderer.invoke('check-for-update'),
+  openReleasePage: (url: string) => ipcRenderer.invoke('open-release-page', url),
   endLeadWork: (leadId: string) => ipcRenderer.invoke('end-lead-work', leadId),
 });

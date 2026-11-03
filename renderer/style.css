@@ -891,5 +891,14 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 .stall-alert-close:hover { opacity: 1; }
 
 .model-btn { font-size: 11px; }
+/* 버전 표시/업데이트 확인 */
+.version-chip { background: transparent; color: var(--text-faint); border: 1px solid var(--border-2); border-radius: 999px; padding: 1px 9px; font-size: 11px; cursor: pointer; }
+.version-chip:hover { color: var(--accent-2); border-color: var(--accent-2); background: transparent; }
+.version-chip.has-update { color: var(--warning); border-color: var(--warning); }
+#update-banner:empty { display: none; }
+#update-banner .update-card { position: relative; margin: 6px 16px; padding: 8px 36px 8px 12px; border: 1px solid var(--accent-2); border-radius: 8px; background: var(--surface); font-size: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+#update-banner .update-card.info { border-color: var(--border-2); color: var(--text-soft); }
+#update-banner .update-card.error { border-color: var(--danger); color: var(--danger); }
+#update-banner .update-card .update-close { position: absolute; top: 4px; right: 6px; background: transparent; border: none; color: inherit; cursor: pointer; font-size: 14px; padding: 2px 6px; opacity: 0.7; }
 .model-change-warning { margin: 8px 0; }
 #model-change-status { margin-top: 8px; font-size: 12px; color: var(--text-soft); }
