@@ -31,6 +31,40 @@ const os = require('os');
 // 쓸지"만 호출부에서 바꿨다(설정 화면의 미승인 디렉토리 안내 배너 용도는 여전히 이 판정을 그대로
 // 쓴다). CLI 동작이 다시 바뀌면 이 재검증도 다시 해야 한다 — 위와 같은 방식(새 디렉토리에서
 // 직접 `claude --bg` 스폰해서 멈추는지 확인)으로 재현하면 된다.
+// ~/.claude.json은 키를 항상 슬래시(/)로 정규화해서 저장한다 — targetDir은 Windows 백슬래시(\)일 수 있어 정규화 없이 조회하면 실제로 존재하는
+// 프로젝트도 못 찾아 항상 "실행해본 적 없음"으로 오판한다(실측 확인).
+// 신뢰는 상위 폴더에서 이어받는다(실측 2026-11-03, claude 2.1.310: ~/.claude.json에 없는 하위 폴더도 신뢰된 저장소 안이면 --bg가 바로 뜬다) — 정확히
+// 그 폴더의 기록만 보면 멀쩡한 폴더를 "승인 안 됨"으로 오판하니, 상위 폴더 중 하나라도 신뢰돼 있으면 통과시킨다.
+function isTrustedInConfig(data, normalizedDir) {
+  const projects = data && data.projects;
+  if (!projects) return false;
+  let cur = normalizedDir;
+  for (;;) {
+    if (projects[cur] && projects[cur].hasTrustDialogAccepted === true) return true;
+    const i = cur.lastIndexOf('/');
+    if (i <= 0) return false;
+    cur = cur.slice(0, i);
+  }
+}
+
+/** 순수 판정부(디스크 I/O 없음). @returns {{ ready: boolean, reason?: string }} */
+function checkReadinessFromConfig(data, targetDir) {
+  const normalized = targetDir.replace(/\\/g, '/').replace(/\/+$/, '');
+  if (isTrustedInConfig(data, normalized)) return { ready: true };
+  const proj = data && data.projects && data.projects[normalized];
+  if (!proj) return { ready: false, reason: '이 디렉토리에서 claude를 인터랙티브로 실행해본 적이 없습니다' };
+  return { ready: false, reason: '워크스페이스 신뢰(trust) 승인이 안 돼 있습니다' };
+}
+
+/** git worktree 폴더의 .git 파일("gitdir: <원본>/.git/worktrees/<이름>") 내용에서 원본 저장소 폴더를 뽑는다. 아니면 null. */
+function worktreeMainRepo(gitFileContent) {
+  const m = String(gitFileContent || '').split('\n').map(l => l.trim()).find(l => l.startsWith('gitdir:'));
+  if (!m) return null;
+  const p = m.slice('gitdir:'.length).trim().replace(/\\/g, '/');
+  const idx = p.indexOf('/.git/worktrees/');
+  return idx === -1 ? null : p.slice(0, idx);
+}
+
 /**
  * @param {string} targetDir
  * @returns {{ ready: boolean, reason?: string }}
@@ -39,18 +73,14 @@ function checkDirectoryClaudeReady(targetDir) {
   try {
     const raw = fs.readFileSync(path.join(os.homedir(), '.claude.json'), 'utf-8');
     const data = JSON.parse(raw);
-    // ~/.claude.json은 이 키를 항상 슬래시(/)로 정규화해서 저장한다 — 우리 쪽 targetDir은
-    // Windows 백슬래시(\)라 정규화 없이 그대로 조회하면 실제로 존재하는 프로젝트도 못 찾아서
-    // 항상 "실행해본 적 없음"으로 오판한다(실측 확인).
-    const normalizedTarget = targetDir.replace(/\\/g, '/');
-    const proj = data && data.projects && data.projects[normalizedTarget];
-    if (!proj) {
-      return { ready: false, reason: '이 디렉토리에서 claude를 인터랙티브로 실행해본 적이 없습니다' };
-    }
-    if (!proj.hasTrustDialogAccepted) {
-      return { ready: false, reason: '워크스페이스 신뢰(trust) 승인이 안 돼 있습니다' };
-    }
-    return { ready: true };
+    const result = checkReadinessFromConfig(data, targetDir);
+    if (result.ready) return result;
+    // worktree라면 원본 저장소의 신뢰를 이어받는다.
+    try {
+      const mainRepo = worktreeMainRepo(fs.readFileSync(path.join(targetDir, '.git'), 'utf-8'));
+      if (mainRepo && checkReadinessFromConfig(data, mainRepo).ready) return { ready: true };
+    } catch { /* .git 파일이 없거나 폴더가 아니면 worktree가 아니다 */ }
+    return result;
   } catch {
     // ~/.claude.json을 못 읽으면 판단할 근거가 없다 — 이 경우 막지 않고 통과시킨다(이 사전 검사가
     // 없었던 예전과 동일한 상태로 fail-open — 검사 실패가 정상적인 스폰까지 막으면 안 된다).
@@ -63,4 +93,4 @@ function claudeNotReadyMessage(targetDir, reason) {
   return `"${targetDir}" 디렉토리가 아직 claude 최초 실행 승인이 안 돼 있어(${reason}) headless 세션이 시작 단계에서 영원히 멈출 수 있습니다 — 그 디렉토리에서 터미널로 'claude'를 한 번 실행해 뜨는 승인창을 눌러준 뒤 다시 시도하세요.`;
 }
 
-module.exports = { checkDirectoryClaudeReady, claudeNotReadyMessage };
+module.exports = { checkDirectoryClaudeReady, checkReadinessFromConfig, worktreeMainRepo, claudeNotReadyMessage };
