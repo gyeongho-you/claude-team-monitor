@@ -66,45 +66,8 @@ header h1 { font-size: 15px; margin: 0; }
 #theme-toggle-btn { background: transparent; border: 1px solid var(--border-2); font-size: 14px; padding: 3px 8px; }
 #last-updated { color: var(--text-faint); font-size: 11px; }
 
-/* 오른쪽 끝으로 밀어내는 auto-margin은 이 그룹(도움말/설정/테마) 중 맨 앞인 help-btn에 준다 —
-   app-settings-wrap에 있던 걸 여기로 옮겼다(help-btn을 그 앞에 추가했으므로). */
+/* 오른쪽 끝으로 밀어내는 auto-margin은 이 그룹(도움말/테마/버전/마지막 갱신) 중 맨 앞인 help-btn에 준다. */
 #help-btn { background: transparent; border: 1px solid var(--border-2); font-size: 14px; padding: 3px 8px; margin-left: auto; }
-#app-settings-wrap { position: relative; }
-#app-settings-btn { background: transparent; border: 1px solid var(--border-2); font-size: 14px; padding: 3px 8px; }
-#app-settings-panel {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 40;
-  background: var(--surface);
-  border: 1px solid var(--border-2);
-  border-radius: 6px;
-  padding: 10px 12px;
-  box-shadow: 0 8px 24px rgba(0,0,0,.3);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: 220px;
-}
-/* author 스타일의 display 선언은 origin이 달라 브라우저 기본 [hidden]{display:none}보다 항상
-   우선 적용된다 — 위 display:flex가 hidden 속성을 완전히 무력화시켜 패널이 절대 안 닫히던
-   버그(실사용 재현: 2026-09-17)라, hidden일 때는 명시적으로 다시 꺼준다. */
-#app-settings-panel[hidden] { display: none; }
-#app-settings-panel label {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-#app-settings-panel input[type="number"] {
-  width: 100%;
-  background: var(--bg);
-  border: 1px solid var(--border-2);
-  color: var(--text);
-  padding: 4px 6px;
-  border-radius: 3px;
-}
 #app-settings-status { font-size: 11px; color: var(--text-faint); min-height: 14px; }
 
 /* header의 아래쪽 padding(10px)만큼 탭이 header 경계선보다 위에 떠서, active 탭의
@@ -891,10 +854,23 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 .stall-alert-close:hover { opacity: 1; }
 
 .model-btn { font-size: 11px; }
-/* 버전 표시/업데이트 확인 */
-.version-chip { background: transparent; color: var(--text-faint); border: 1px solid var(--border-2); border-radius: 999px; padding: 1px 9px; font-size: 11px; cursor: pointer; }
-.version-chip:hover { color: var(--accent-2); border-color: var(--accent-2); background: transparent; }
-.version-chip.has-update { color: var(--warning); border-color: var(--warning); }
+/* 버전 표시(헤더 오른쪽) / 앱 설정 탭 */
+.version-text { white-space: nowrap; background: transparent; border: none; color: var(--text-faint); font-size: 11px; padding: 2px 4px; cursor: pointer; }
+.version-text:hover { color: var(--accent-2); background: transparent; }
+.version-text.has-update { color: var(--warning); font-weight: 600; }
+.version-text.has-update::before { content: "● "; }
+#app-settings-tab { max-width: 620px; margin: 0 auto; padding: 4px 0 24px; }
+.settings-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px 14px; margin-bottom: 12px; }
+.settings-card h2 { margin-bottom: 6px; }
+.settings-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--text-soft); margin-top: 10px; }
+.settings-field input[type="number"] { width: 72px; background: var(--bg); border: 1px solid var(--border-2); color: var(--text); padding: 4px 6px; border-radius: 4px; text-align: right; }
+.info-grid { display: grid; grid-template-columns: 90px 1fr; gap: 6px 12px; font-size: 12px; color: var(--text-soft); margin: 8px 0; }
+.info-grid strong { color: var(--text-bright); }
+.settings-actions { display: flex; gap: 8px; margin-top: 10px; }
+.settings-actions button { background: transparent; color: var(--text-soft); border: 1px solid var(--border-2); border-radius: 6px; padding: 4px 12px; font-size: 12px; }
+.settings-actions button:hover { color: var(--accent-2); border-color: var(--accent-2); background: transparent; }
+.settings-actions button:disabled { color: var(--text-dim); border-color: var(--border); }
+.settings-check { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 12px; color: var(--text-soft); }
 #update-banner:empty { display: none; }
 #update-banner .update-card { position: relative; margin: 6px 16px; padding: 8px 36px 8px 12px; border: 1px solid var(--accent-2); border-radius: 8px; background: var(--surface); font-size: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 #update-banner .update-card.info { border-color: var(--border-2); color: var(--text-soft); }

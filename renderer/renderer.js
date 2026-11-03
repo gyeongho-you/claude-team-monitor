@@ -24,8 +24,6 @@ document.getElementById('theme-toggle-btn').addEventListener('click', () => {
 
 // --- 정체 감시 설정(idle 임계값/쿨다운) ---
 (function initAppSettings() {
-  const btn = document.getElementById('app-settings-btn');
-  const panel = document.getElementById('app-settings-panel');
   const idleInput = document.getElementById('stall-idle-threshold-input');
   const cooldownInput = document.getElementById('stall-cooldown-input');
   const statusEl = document.getElementById('app-settings-status');
@@ -35,20 +33,15 @@ document.getElementById('theme-toggle-btn').addEventListener('click', () => {
       const settings = await window.api.getSettings();
       idleInput.value = settings.stallIdleThresholdMin;
       cooldownInput.value = settings.stallCooldownMin;
+      statusEl.textContent = '';
     } catch (err) {
       statusEl.textContent = `설정을 불러오지 못했습니다: ${err.message || err}`;
     }
   }
 
-  btn.addEventListener('click', async () => {
-    const willOpen = panel.hidden;
-    panel.hidden = !willOpen;
-    if (willOpen) await loadIntoInputs();
-  });
-
-  document.addEventListener('click', e => {
-    if (!panel.hidden && !panel.contains(e.target) && e.target !== btn) panel.hidden = true;
-  });
+  // 앱 설정 탭을 열 때마다 저장된 값을 다시 불러온다.
+  document.querySelector('.tab-btn[data-tab="app-settings"]').addEventListener('click', loadIntoInputs);
+  loadIntoInputs();
 
   async function saveField(key, input) {
     const value = Number(input.value);
@@ -56,8 +49,7 @@ document.getElementById('theme-toggle-btn').addEventListener('click', () => {
     try {
       // 백엔드가 소수점 반올림·범위 클램프를 할 수 있어서(clampMinutes), 저장 후 실제 반영된
       // 값을 다시 받아와 입력창에 채운다 — 안 그러면 예를 들어 9999를 입력했을 때 "저장됨"은
-      // 뜨지만 입력창은 여전히 9999를 보여줘서, 패널을 닫았다 열기 전까지 실제 값(1440으로
-      // 클램프됨)과 화면이 다르게 보이는 문제가 있었다.
+      // 뜨지만 입력창은 여전히 9999를 보여줘서, 실제 값(1440으로 클램프됨)과 화면이 다르게 보인다.
       const saved = await window.api.updateSettings({ [key]: value });
       idleInput.value = saved.stallIdleThresholdMin;
       cooldownInput.value = saved.stallCooldownMin;
@@ -788,12 +780,50 @@ function showUpdateBanner(html, kind, autoHideMs) {
   if (autoHideMs) infoBannerTimer = setTimeout(() => { updateBannerEl.innerHTML = ''; }, autoHideMs);
 }
 
+const aboutVersionEl = document.getElementById('about-version');
+const aboutLatestEl = document.getElementById('about-latest');
+const aboutCheckBtn = document.getElementById('about-check-btn');
+const aboutOpenBtn = document.getElementById('about-open-release-btn');
+const aboutStatusEl = document.getElementById('about-update-status');
+const autoUpdateCheckEl = document.getElementById('auto-update-check-input');
+const AUTO_UPDATE_KEY = 'ctm.autoUpdateCheck';
+let lastReleaseUrl = null;
+
+function autoUpdateCheckEnabled() {
+  try { return localStorage.getItem(AUTO_UPDATE_KEY) !== 'off'; } catch { return true; }
+}
+autoUpdateCheckEl.checked = autoUpdateCheckEnabled();
+autoUpdateCheckEl.addEventListener('change', () => {
+  try { localStorage.setItem(AUTO_UPDATE_KEY, autoUpdateCheckEl.checked ? 'on' : 'off'); } catch { /* 저장 실패해도 이번 실행에서는 적용 */ }
+});
+
+// 앱 설정 탭의 "앱 정보 · 업데이트" 칸을 확인 결과로 채운다. manual이면 결과 문장도 보여준다.
+function renderAboutUpdate(r, manual) {
+  aboutVersionEl.textContent = `v${r.current}`;
+  const checkedAt = new Date().toLocaleTimeString('ko-KR');
+  if (r.error) {
+    aboutLatestEl.textContent = '확인하지 못했습니다';
+    if (manual) aboutStatusEl.textContent = r.error;
+  } else if (r.noRelease) {
+    aboutLatestEl.textContent = '아직 GitHub에 올라온 릴리스가 없습니다';
+    if (manual) aboutStatusEl.textContent = `${checkedAt} 확인 — 새 버전을 알려면 저장소에 릴리스가 올라와 있어야 합니다.`;
+  } else {
+    const when = r.publishedAt ? ` (${String(r.publishedAt).slice(0, 10)})` : '';
+    aboutLatestEl.textContent = `${r.latest}${when}`;
+    if (manual) aboutStatusEl.textContent = r.updateAvailable ? `${checkedAt} 확인 — 새 버전이 있습니다.` : `${checkedAt} 확인 — 최신 버전입니다.`;
+  }
+  lastReleaseUrl = r.url || null;
+  aboutOpenBtn.hidden = !(r.updateAvailable && r.url);
+}
+
 async function runUpdateCheck(manual) {
-  if (manual) versionBtnEl.disabled = true;
+  if (manual) { aboutCheckBtn.disabled = true; aboutStatusEl.textContent = '확인하는 중...'; }
   try {
     const r = await window.api.checkForUpdate();
+    renderAboutUpdate(r, manual);
     if (r.updateAvailable) {
       versionBtnEl.classList.add('has-update');
+      versionBtnEl.title = `새 버전 ${r.latest}이(가) 있습니다 — 누르면 앱 설정 탭에서 확인합니다`;
       if (!manual && dismissedUpdateVersion() === r.latest) return;
       const when = r.publishedAt ? ` · ${escapeHtml(String(r.publishedAt).slice(0, 10))}` : '';
       showUpdateBanner(
@@ -801,20 +831,29 @@ async function runUpdateCheck(manual) {
           (r.url ? `<button data-update-open="${escapeHtml(r.url)}">릴리스 페이지 열기</button>` : '') +
           `<button data-update-skip="${escapeHtml(r.latest)}">이 버전 알림 끄기</button>`,
         'available', 0);
-    } else if (manual) {
-      versionBtnEl.classList.remove('has-update');
-      if (r.error) showUpdateBanner(`${escapeHtml(r.error)}`, 'error', 8000);
-      else if (r.noRelease) showUpdateBanner(`현재 ${escapeHtml(r.current)} — 아직 GitHub에 올라온 릴리스가 없습니다.`, 'info', 6000);
-      else showUpdateBanner(`최신 버전입니다 (현재 ${escapeHtml(r.current)}, 최신 릴리스 ${escapeHtml(r.latest || '-')}).`, 'info', 6000);
     } else {
       versionBtnEl.classList.remove('has-update');
+      versionBtnEl.title = '앱 버전 — 누르면 앱 설정 탭에서 새 버전을 확인합니다';
     }
   } catch (err) {
-    if (manual) showUpdateBanner(`업데이트 확인에 실패했습니다: ${escapeHtml(errMsg(err))}`, 'error', 8000);
+    if (manual) aboutStatusEl.textContent = `업데이트 확인에 실패했습니다: ${errMsg(err)}`;
   } finally {
-    versionBtnEl.disabled = false;
+    aboutCheckBtn.disabled = false;
   }
 }
+
+aboutCheckBtn.addEventListener('click', () => runUpdateCheck(true));
+aboutOpenBtn.addEventListener('click', async () => {
+  if (!lastReleaseUrl) return;
+  try { await window.api.openReleasePage(lastReleaseUrl); } catch (err) { console.error('릴리스 페이지 열기 실패:', err); }
+});
+document.getElementById('reset-dismissed-btn').addEventListener('click', async () => {
+  try { localStorage.removeItem('ctm.dismissedUnapprovedDirs'); localStorage.removeItem(DISMISSED_UPDATE_KEY); } catch { /* 접근 안 되면 지울 것도 없다 */ }
+  document.getElementById('reset-dismissed-status').textContent = '숨긴 알림을 모두 되돌렸습니다.';
+  setTimeout(() => { document.getElementById('reset-dismissed-status').textContent = ''; }, 3000);
+  await refreshBoardNow();
+  runUpdateCheck(false);
+});
 
 updateBannerEl.addEventListener('click', async e => {
   if (e.target.closest('[data-update-close]')) { clearTimeout(infoBannerTimer); updateBannerEl.innerHTML = ''; return; }
@@ -827,15 +866,19 @@ updateBannerEl.addEventListener('click', async e => {
   }
 });
 
-versionBtnEl.addEventListener('click', () => runUpdateCheck(true));
+versionBtnEl.addEventListener('click', () => {
+  document.querySelector('.tab-btn[data-tab="app-settings"]').click();
+  runUpdateCheck(true);
+});
 
 (async () => {
   try {
     appVersion = await window.api.getAppVersion();
     versionBtnEl.textContent = `v${appVersion}`;
+    aboutVersionEl.textContent = `v${appVersion}`;
   } catch { versionBtnEl.hidden = true; return; }
-  setTimeout(() => runUpdateCheck(false), 8000);
-  setInterval(() => runUpdateCheck(false), 6 * 60 * 60 * 1000);
+  if (autoUpdateCheckEnabled()) setTimeout(() => runUpdateCheck(false), 8000);
+  setInterval(() => { if (autoUpdateCheckEnabled()) runUpdateCheck(false); }, 6 * 60 * 60 * 1000);
 })();
 
 // ---------------- 보내는 대상 표시 · 팀장별 입력 초안 · 자동 전환 보호 ----------------

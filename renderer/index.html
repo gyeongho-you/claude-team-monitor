@@ -14,22 +14,11 @@
       <button class="tab-btn" data-tab="history">히스토리</button>
       <button class="tab-btn" data-tab="settings">팀장/팀원 셋팅</button>
       <button class="tab-btn" data-tab="cleanup">세션 정리</button>
+      <button class="tab-btn" data-tab="app-settings">앱 설정</button>
     </nav>
-    <button id="version-btn" class="version-chip" title="앱 버전 — 누르면 새 버전이 있는지 확인합니다"></button>
     <button id="help-btn" title="도움말 — 화면별 기능 안내">?</button>
-    <div id="app-settings-wrap">
-      <button id="app-settings-btn" title="정체 감시 설정">⚙</button>
-      <div id="app-settings-panel" hidden>
-        <label>몇 분 이상 idle이면 방치로 볼지
-          <input type="number" id="stall-idle-threshold-input" min="1" max="1440" step="1" />분
-        </label>
-        <label>한 번 확인 후 다시 확인까지 쿨다운
-          <input type="number" id="stall-cooldown-input" min="1" max="1440" step="1" />분
-        </label>
-        <div id="app-settings-status"></div>
-      </div>
-    </div>
     <button id="theme-toggle-btn" title="다크/라이트 모드 전환">🌙</button>
+    <button id="version-btn" class="version-text" title="앱 버전 — 누르면 앱 설정 탭에서 새 버전을 확인합니다"></button>
     <span id="last-updated"></span>
   </header>
 
@@ -297,6 +286,42 @@
         <div id="cleanup-list"></div>
       </div>
     </section>
+
+    <!-- 앱 설정 탭: 정체 감시 기준, 앱 버전/업데이트 확인, 숨긴 알림 되돌리기 -->
+    <section id="app-settings-tab" class="tab-page">
+      <div class="settings-card">
+        <h2>정체 감시</h2>
+        <p class="form-hint">팀장이 일을 멈춘 채 방치된 것처럼 보일 때 자동으로 확인·재촉하는 기준입니다. 값을 바꾸면 바로 저장됩니다.</p>
+        <label class="settings-field">몇 분 이상 idle이면 방치로 볼지
+          <span><input type="number" id="stall-idle-threshold-input" min="1" max="1440" step="1" /> 분</span>
+        </label>
+        <label class="settings-field">한 번 확인 후 다시 확인까지 쿨다운
+          <span><input type="number" id="stall-cooldown-input" min="1" max="1440" step="1" /> 분</span>
+        </label>
+        <div id="app-settings-status"></div>
+      </div>
+
+      <div class="settings-card">
+        <h2>앱 정보 · 업데이트</h2>
+        <div class="info-grid">
+          <span>현재 버전</span><strong id="about-version">-</strong>
+          <span>최신 릴리스</span><span id="about-latest">아직 확인하지 않았습니다</span>
+        </div>
+        <div class="settings-actions">
+          <button id="about-check-btn">업데이트 확인</button>
+          <button id="about-open-release-btn" hidden>릴리스 페이지 열기</button>
+        </div>
+        <div id="about-update-status" class="form-hint"></div>
+        <label class="settings-check"><input type="checkbox" id="auto-update-check-input" checked /> 앱을 켤 때와 6시간마다 새 버전을 자동으로 확인</label>
+      </div>
+
+      <div class="settings-card">
+        <h2>숨긴 알림</h2>
+        <p class="form-hint">"최초 실행 승인이 안 된 디렉토리" 경고나 새 버전 알림을 ✕/"알림 끄기"로 숨겼다면 여기서 다시 보이게 할 수 있습니다.</p>
+        <div class="settings-actions"><button id="reset-dismissed-btn">숨긴 알림 모두 다시 표시</button></div>
+        <div id="reset-dismissed-status" class="form-hint"></div>
+      </div>
+    </section>
   </main>
 
   <div id="modal-backdrop" hidden></div>
@@ -360,7 +385,7 @@
       <section class="help-section">
         <h3>5. 팀장/팀원 셋팅 탭 — 즐겨찾기와 템플릿</h3>
         <img src="help/05-settings-tab.png" alt="팀장/팀원 셋팅 탭" />
-        <p>자주 쓰는 작업 디렉토리를 즐겨찾기로 등록해두면 새 팀장/팀원을 띄울 때 목록에서 바로 고를 수 있습니다. 팀원 템플릿은 "이 디렉토리엔 항상 이 역할·이 지시로 팀원을 붙인다" 같은 프리셋입니다 — 사전승인 체크박스를 켜두면 팀장이 승인 요청 없이 바로 그 디렉토리에 팀원을 띄울 수 있습니다. 오른쪽 위 톱니바퀴(⚙)에서는 정체(방치) 감지 기준 시간을 조정할 수 있습니다.</p>
+        <p>자주 쓰는 작업 디렉토리를 즐겨찾기로 등록해두면 새 팀장/팀원을 띄울 때 목록에서 바로 고를 수 있습니다. 팀원 템플릿은 "이 디렉토리엔 항상 이 역할·이 지시로 팀원을 붙인다" 같은 프리셋입니다 — 사전승인 체크박스를 켜두면 팀장이 승인 요청 없이 바로 그 디렉토리에 팀원을 띄울 수 있습니다. "앱 설정" 탭에서는 정체(방치) 감지 기준 시간과 새 버전 확인을 할 수 있습니다.</p>
       </section>
       <section class="help-section">
         <h3>6. 세션 정리 탭</h3>
