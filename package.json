@@ -1,6 +1,6 @@
 {
   "name": "claude-team-monitor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Claude Code 세션 모니터링 + 팀장 세션 런처 (로컬 Electron 앱)",
   "main": "dist/main.js",
   "scripts": {

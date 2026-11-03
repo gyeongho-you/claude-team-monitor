@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "claude-team-monitor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "identifier": "net.g1project.claude-team-monitor",
   "build": {
     "frontendDist": "../renderer"
