@@ -115,7 +115,8 @@ pub async fn add_member_template_command(
     instruction: String,
     model: Option<String>,
 ) -> Vec<MemberTemplate> {
-    with_member_templates_lock(move |templates| {
+    let (old, new) = with_member_templates_lock(move |templates| {
+        let old = templates.clone();
         let id = format!("tpl-{}", now_ms());
         let resolved_name = if !name.is_empty() {
             name.clone()
@@ -136,9 +137,20 @@ pub async fn add_member_template_command(
             approved: false,
             model: Some(normalize_member_model(model.as_deref())),
         });
-        (true, templates.clone())
+        (true, (old, templates.clone()))
     })
-    .await
+    .await;
+    notify_leads(&old, &new).await;
+    new
+}
+
+/// 템플릿 변경을 이미 있는 팀장에게 알린다(떠 있는 팀장은 바로, 히스토리 팀장은 다시 이어질 때) — lead_lifecycle.rs의 on_member_templates_changed 참고.
+async fn notify_leads(old: &[MemberTemplate], new: &[MemberTemplate]) {
+    crate::lead_lifecycle::on_member_templates_changed(
+        &crate::lead_lifecycle::briefing_templates_from(old),
+        &crate::lead_lifecycle::briefing_templates_from(new),
+    )
+    .await;
 }
 
 /// main.ts의 `Partial<Pick<MemberTemplate, 'name'|'role'|'instruction'|'model'>>`과 동일한 부분
@@ -159,9 +171,10 @@ pub struct MemberTemplateUpdateFields {
 
 #[tauri::command]
 pub async fn update_member_template_command(id: String, fields: MemberTemplateUpdateFields) -> Vec<MemberTemplate> {
-    with_member_templates_lock(move |templates| {
+    let (old, new) = with_member_templates_lock(move |templates| {
+        let old = templates.clone();
         let Some(t) = templates.iter_mut().find(|t| t.id == id) else {
-            return (false, templates.clone());
+            return (false, (old, templates.clone()));
         };
         if let Some(name) = &fields.name {
             t.name = name.clone();
@@ -175,32 +188,39 @@ pub async fn update_member_template_command(id: String, fields: MemberTemplateUp
         if fields.model.is_some() {
             t.model = Some(normalize_member_model(fields.model.as_deref()));
         }
-        (true, templates.clone())
+        (true, (old, templates.clone()))
     })
-    .await
+    .await;
+    notify_leads(&old, &new).await;
+    new
 }
 
 #[tauri::command]
 pub async fn toggle_member_template_approved_command(id: String) -> Vec<MemberTemplate> {
-    with_member_templates_lock(move |templates| {
+    let (old, new) = with_member_templates_lock(move |templates| {
+        let old = templates.clone();
         let Some(t) = templates.iter_mut().find(|t| t.id == id) else {
-            return (false, templates.clone());
+            return (false, (old, templates.clone()));
         };
         t.approved = !t.approved;
-        (true, templates.clone())
+        (true, (old, templates.clone()))
     })
-    .await
+    .await;
+    notify_leads(&old, &new).await;
+    new
 }
 
 #[tauri::command]
 pub async fn delete_member_template_command(id: String) -> Vec<MemberTemplate> {
-    with_member_templates_lock(move |templates| {
-        let before = templates.len();
+    let (old, new) = with_member_templates_lock(move |templates| {
+        let old = templates.clone();
         templates.retain(|t| t.id != id);
-        let changed = templates.len() != before;
-        (changed, templates.clone())
+        let changed = templates.len() != old.len();
+        (changed, (old, templates.clone()))
     })
-    .await
+    .await;
+    notify_leads(&old, &new).await;
+    new
 }
 
 #[cfg(test)]

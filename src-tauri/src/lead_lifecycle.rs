@@ -125,6 +125,77 @@ fn build_member_briefing(templates: &[MemberTemplate], caller_dir: &str) -> (Vec
     (paths, parts.join("\n\n"))
 }
 
+// ---------------------------------------------------------------------------------------------
+// 팀원 템플릿이 바뀔 때 이미 있는 팀장에게 알린다 — 팀원 안내(approved_member_briefing)는 팀장을 띄울 때 첫 지시문에 한 번 실려 갈 뿐이라, 그 뒤에 만들거나
+// 고친 템플릿은 떠 있는 팀장도, 히스토리의 팀장도 몰랐다. (1) 안내가 달라지는 팀장에게 새 안내 전체를 알림으로 대기열에 넣고(떠 있으면 바로, 히스토리
+// 팀장은 다시 이어질 때 배달된다), (2) 사전 승인 폴더도 팀장 기록에 반영한다(추가만 한다 — 승인 요청으로 따로 허용된 폴더는 그대로 둔다).
+// ---------------------------------------------------------------------------------------------
+
+pub(crate) const TEMPLATE_NOTICE_MARKER: &str = "[알림:팀원 템플릿]";
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct TemplateChangePlan {
+    pub internal_id: String,
+    /// 이 팀장의 approvedMembers에 새로 넣을 폴더(이미 있는 건 제외).
+    pub add_approved: Vec<String>,
+    pub message: String,
+}
+
+/// 템플릿 변경 전/후를 비교해서, 안내가 실제로 달라지는 팀장마다 할 일을 계산한다(순수 함수).
+pub(crate) fn plan_template_change(old: &[MemberTemplate], new: &[MemberTemplate], leads: &[LeadRecord]) -> Vec<TemplateChangePlan> {
+    leads
+        .iter()
+        .filter_map(|lead| {
+            let internal_id = lead.internal_id.clone()?;
+            let (old_paths, old_text) = build_member_briefing(old, &lead.target_dir);
+            let (new_paths, new_text) = build_member_briefing(new, &lead.target_dir);
+            if old_paths == new_paths && old_text == new_text {
+                return None;
+            }
+            let add_approved: Vec<String> = new_paths.into_iter().filter(|p| !lead.approved_members.contains(p)).collect();
+            let message = format!(
+                "{TEMPLATE_NOTICE_MARKER} 사용자가 팀원 템플릿을 바꿨습니다. 지금부터 이 팀장이 쓸 수 있는 팀원 안내는 아래와 같습니다(이전에 받은 안내를 대체합니다):\n\n{new_text}"
+            );
+            Some(TemplateChangePlan { internal_id, add_approved, message })
+        })
+        .collect()
+}
+
+/// 팀원 템플릿을 만들거나 고치거나 지울 때(변경 전/후 목록을 넘긴다) 호출한다. 알림 대기열에 넣는 것까지만 하고 배달은 기존 대기열이 맡는다.
+pub async fn on_member_templates_changed(old: &[MemberTemplate], new: &[MemberTemplate]) {
+    let leads = load_leads();
+    let plans = plan_template_change(old, new, &leads);
+    if plans.is_empty() {
+        return;
+    }
+    let approvals: Vec<(String, Vec<String>)> = plans.iter().filter(|p| !p.add_approved.is_empty()).map(|p| (p.internal_id.clone(), p.add_approved.clone())).collect();
+    if !approvals.is_empty() {
+        with_leads_lock(move |leads| {
+            let mut dirty = false;
+            for (internal_id, paths) in &approvals {
+                if let Some(rec) = leads.iter_mut().find(|l| l.internal_id.as_deref() == Some(internal_id.as_str())) {
+                    for p in paths {
+                        if !rec.approved_members.contains(p) {
+                            rec.approved_members.push(p.clone());
+                            dirty = true;
+                        }
+                    }
+                }
+            }
+            (dirty, ())
+        })
+        .await;
+    }
+    for plan in plans {
+        crate::notice_queue::queue_replacing_notice(&plan.internal_id, TEMPLATE_NOTICE_MARKER, &plan.message, crate::notice_queue::NoticeOrigin::System).await;
+    }
+}
+
+/// member_templates.rs의 템플릿 타입을 안내 조립용 타입으로 바꾼다(공통 필드만 쓴다).
+pub fn briefing_templates_from<T: Serialize>(templates: &[T]) -> Vec<MemberTemplate> {
+    serde_json::to_value(templates).ok().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
+}
+
 /// approvedMemberBriefing(main.ts)과 동일.
 pub fn approved_member_briefing(caller_dir: &str) -> (Vec<String>, String) {
     build_member_briefing(&load_member_templates(), caller_dir)
@@ -913,6 +984,66 @@ mod tests {
             session_id: None,
             secret: None,
         }
+    }
+
+    fn tpl(scope: &str, path: Option<&str>, name: &str, approved: bool) -> MemberTemplate {
+        MemberTemplate { scope: scope.to_string(), path: path.map(str::to_string), name: name.to_string(), role: "reviewer".to_string(), instruction: "리뷰만".to_string(), approved }
+    }
+
+    fn lead_in(dir: &str, internal: Option<&str>, approved: &[&str]) -> LeadRecord {
+        LeadRecord {
+            id: "aaaa1111".into(),
+            session_id: String::new(),
+            target_dir: dir.into(),
+            launched_at: 0,
+            approved_members: approved.iter().map(|s| s.to_string()).collect(),
+            label: None,
+            ai_title: None,
+            internal_id: internal.map(str::to_string),
+            auto_stall_nudge: None,
+            secret: None,
+            startup_warning: None,
+        }
+    }
+
+    #[test]
+    fn a_new_shared_template_is_announced_to_every_lead_and_preapproves_its_folder() {
+        let old: Vec<MemberTemplate> = vec![];
+        let new = vec![tpl("shared", Some("C:/proj/web"), "웹 리뷰어", true)];
+        let leads = vec![lead_in("C:/a", Some("i-a"), &[]), lead_in("C:/b", Some("i-b"), &["C:/proj/web"]), lead_in("C:/c", None, &[])];
+        let plans = plan_template_change(&old, &new, &leads);
+        assert_eq!(plans.len(), 2, "internalId가 없는 낡은 기록은 알림 대상이 아니다");
+        assert_eq!(plans[0].internal_id, "i-a");
+        assert_eq!(plans[0].add_approved, vec!["C:/proj/web".to_string()]);
+        assert!(plans[0].message.starts_with(TEMPLATE_NOTICE_MARKER) && plans[0].message.contains("C:/proj/web"), "안내에는 사전 승인된 폴더가 나온다");
+        assert!(plans[1].add_approved.is_empty(), "이미 승인된 폴더는 다시 넣지 않는다");
+    }
+
+    #[test]
+    fn a_template_scoped_to_one_dir_only_concerns_leads_in_that_dir() {
+        let new = vec![tpl("C:/a", Some("C:/x"), "전용", true)];
+        let leads = vec![lead_in("C:/a", Some("i-a"), &[]), lead_in("C:/b", Some("i-b"), &[])];
+        let plans = plan_template_change(&[], &new, &leads);
+        assert_eq!(plans.iter().map(|p| p.internal_id.as_str()).collect::<Vec<_>>(), vec!["i-a"]);
+    }
+
+    #[test]
+    fn nothing_is_announced_when_the_briefing_does_not_change() {
+        let t = vec![tpl("shared", Some("C:/x"), "같음", true)];
+        let leads = vec![lead_in("C:/a", Some("i-a"), &[])];
+        assert!(plan_template_change(&t, &t, &leads).is_empty());
+        // 승인 표시만 달라도 안내(사전 승인 목록)가 달라지면 알린다
+        let unapproved = vec![tpl("shared", Some("C:/x"), "같음", false)];
+        assert_eq!(plan_template_change(&t, &unapproved, &leads).len(), 1);
+    }
+
+    #[test]
+    fn deleting_a_template_is_announced_too() {
+        let old = vec![tpl("shared", None, "역할만", false)];
+        let leads = vec![lead_in("C:/a", Some("i-a"), &[])];
+        let plans = plan_template_change(&old, &[], &leads);
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].add_approved.is_empty());
     }
 
     #[test]

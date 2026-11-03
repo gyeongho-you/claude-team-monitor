@@ -235,6 +235,39 @@ pub(crate) async fn queue_lead_notice_at(
     id
 }
 
+/// 같은 팀장에게 대기 중인 알림 중 message가 marker로 시작하는 것을 지우고 새 알림을 넣는다 — "최신 상태 전체를 알려 주는" 종류의 알림(팀원 템플릿
+/// 안내 등)이 여러 번 쌓여 낡은 안내가 함께 배달되는 걸 막는다.
+pub(crate) async fn queue_replacing_notice_at(
+    path: &Path,
+    lock: &AsyncMutex<()>,
+    lead_internal_id: &str,
+    marker: &str,
+    message: &str,
+    origin: NoticeOrigin,
+) -> String {
+    let id = format!("notice-{}-{}", now_ms(), uuid::Uuid::new_v4().simple());
+    let notice = PendingNotice {
+        id: id.clone(),
+        lead_internal_id: lead_internal_id.to_string(),
+        message: message.to_string(),
+        created_at: now_ms(),
+        origin,
+        attempts: None,
+    };
+    let (lead, marker) = (lead_internal_id.to_string(), marker.to_string());
+    with_pending_notices_lock_at(path, lock, move |notices| {
+        notices.retain(|n| !(n.lead_internal_id == lead && n.message.starts_with(&marker)));
+        notices.push(notice);
+        (true, ())
+    })
+    .await;
+    id
+}
+
+pub async fn queue_replacing_notice(lead_internal_id: &str, marker: &str, message: &str, origin: NoticeOrigin) -> String {
+    queue_replacing_notice_at(&pending_notices_path(), pending_notices_lock(), lead_internal_id, marker, message, origin).await
+}
+
 /// queueLeadNotice(main.ts)와 동일 — 생성한 알림의 id를 반환한다.
 pub async fn queue_lead_notice(lead_internal_id: &str, message: &str, origin: NoticeOrigin) -> String {
     queue_lead_notice_at(&pending_notices_path(), pending_notices_lock(), lead_internal_id, message, origin).await
@@ -801,6 +834,22 @@ mod tests {
 
     fn temp_pending_notices_path(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("claude_team_monitor_test_pending_notices_{tag}_{}.json", uuid::Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn replacing_notice_keeps_only_the_latest_of_the_same_kind_per_lead() {
+        let path = temp_pending_notices_path("replacing");
+        let lock = AsyncMutex::new(());
+        let marker = "[알림:팀원 템플릿]";
+        queue_lead_notice_at(&path, &lock, "lead-a", "사용자가 보낸 일반 메시지", NoticeOrigin::User).await;
+        queue_replacing_notice_at(&path, &lock, "lead-a", marker, &format!("{marker} 옛 안내"), NoticeOrigin::System).await;
+        queue_replacing_notice_at(&path, &lock, "lead-b", marker, &format!("{marker} 다른 팀장 안내"), NoticeOrigin::System).await;
+        queue_replacing_notice_at(&path, &lock, "lead-a", marker, &format!("{marker} 새 안내"), NoticeOrigin::System).await;
+        let left = load_pending_notices_from(&path);
+        let a: Vec<&str> = left.iter().filter(|n| n.lead_internal_id == "lead-a").map(|n| n.message.as_str()).collect();
+        assert_eq!(a, vec!["사용자가 보낸 일반 메시지", "[알림:팀원 템플릿] 새 안내"], "같은 종류의 옛 알림만 교체되고 일반 메시지는 그대로");
+        assert_eq!(left.iter().filter(|n| n.lead_internal_id == "lead-b").count(), 1, "다른 팀장의 알림은 건드리지 않는다");
+        let _ = std::fs::remove_file(&path);
     }
 
     fn fake_lead(internal_id: &str, id: &str) -> LeadRecord {
