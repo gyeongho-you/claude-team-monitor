@@ -761,6 +761,108 @@ function renderLeadCard(row) {
     </div>
   `;
 }
+// ---------------- 공통 스킬(앱 설정 탭) ----------------
+// 등록한 스킬은 모든 팀장이 쓴다(~/.claude/skills에 설치 + 팀장에게 안내) — 자세한 동작은 src-tauri/src/app_skills.rs 맨 위 설명 참고.
+const skillsListEl = document.getElementById('skills-list');
+const skillImportEl = document.getElementById('skill-import-select');
+const skillNameEl = document.getElementById('skill-name-input');
+const skillDescEl = document.getElementById('skill-desc-input');
+const skillContentEl = document.getElementById('skill-content-input');
+const skillSaveBtn = document.getElementById('skill-save-btn');
+const skillCancelBtn = document.getElementById('skill-cancel-btn');
+const skillStatusEl = document.getElementById('skill-status');
+let appSkills = [];
+let editingSkillId = null;
+
+function renderSkillList() {
+  skillsListEl.innerHTML = appSkills.map(s => `
+    <div class="skill-item ${s.enabled ? '' : 'off'}">
+      <label title="끄면 설치된 스킬이 지워지고 팀장에게도 빠집니다"><input type="checkbox" data-skill-toggle="${escapeHtml(s.id)}" ${s.enabled ? 'checked' : ''} /> ${escapeHtml(s.name)}</label>
+      <span class="skill-desc" title="${escapeHtml(s.description)}">${escapeHtml(s.description || '(설명 없음)')}</span>
+      <button data-skill-edit="${escapeHtml(s.id)}">수정</button>
+      <button data-skill-del="${escapeHtml(s.id)}">삭제</button>
+    </div>`).join('');
+}
+
+async function loadSkills() {
+  try { appSkills = await window.api.getAppSkills(); } catch (err) { skillStatusEl.textContent = `스킬 목록을 불러오지 못했습니다: ${errMsg(err)}`; return; }
+  renderSkillList();
+  try {
+    const existing = await window.api.listUserSkills();
+    skillImportEl.innerHTML = '<option value="">기존 스킬에서 불러오기…</option>' + existing.map(s => `<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)}${s.description ? ' — ' + escapeHtml(s.description.slice(0, 40)) : ''}</option>`).join('');
+  } catch { /* 불러오기 목록은 없어도 된다 */ }
+}
+
+function resetSkillForm() {
+  editingSkillId = null;
+  skillNameEl.value = ''; skillNameEl.readOnly = false;
+  skillDescEl.value = ''; skillContentEl.value = ''; skillImportEl.value = '';
+  skillSaveBtn.textContent = '스킬 추가';
+  skillCancelBtn.hidden = true;
+}
+
+skillImportEl.addEventListener('change', async () => {
+  if (!skillImportEl.value || editingSkillId) return;
+  try {
+    const s = await window.api.readUserSkill(skillImportEl.value);
+    if (!s) { skillStatusEl.textContent = '그 스킬을 읽지 못했습니다.'; return; }
+    skillNameEl.value = s.name; skillDescEl.value = s.description; skillContentEl.value = s.content;
+    skillStatusEl.textContent = '불러왔습니다. 같은 이름은 등록할 수 없으니 이름을 바꿔서 추가하세요(원본은 건드리지 않습니다).';
+  } catch (err) { skillStatusEl.textContent = `불러오지 못했습니다: ${errMsg(err)}`; }
+});
+
+skillSaveBtn.addEventListener('click', async () => {
+  skillSaveBtn.disabled = true;
+  skillStatusEl.textContent = '저장하는 중...';
+  try {
+    appSkills = editingSkillId
+      ? await window.api.updateAppSkill(editingSkillId, skillDescEl.value, skillContentEl.value)
+      : await window.api.addAppSkill(skillNameEl.value, skillDescEl.value, skillContentEl.value);
+    renderSkillList();
+    resetSkillForm();
+    skillStatusEl.textContent = '저장했습니다. 팀장들에게 알렸습니다.';
+    setTimeout(() => { skillStatusEl.textContent = ''; }, 3000);
+    loadSkills();
+  } catch (err) {
+    skillStatusEl.textContent = errMsg(err);
+  } finally {
+    skillSaveBtn.disabled = false;
+  }
+});
+skillCancelBtn.addEventListener('click', () => { resetSkillForm(); skillStatusEl.textContent = ''; });
+
+skillsListEl.addEventListener('click', async e => {
+  const editBtn = e.target.closest('[data-skill-edit]');
+  if (editBtn) {
+    const s = appSkills.find(x => x.id === editBtn.dataset.skillEdit);
+    if (!s) return;
+    editingSkillId = s.id;
+    skillNameEl.value = s.name; skillNameEl.readOnly = true;
+    skillDescEl.value = s.description; skillContentEl.value = s.content;
+    skillSaveBtn.textContent = '수정 저장'; skillCancelBtn.hidden = false;
+    skillStatusEl.textContent = `"${s.name}" 수정 중 — 이름은 바꿀 수 없습니다(바꾸려면 삭제 후 새로 추가).`;
+    return;
+  }
+  const delBtn = e.target.closest('[data-skill-del]');
+  if (delBtn) {
+    if (!delBtn.classList.contains('confirm')) {
+      delBtn.classList.add('confirm'); delBtn.textContent = '정말 삭제';
+      setTimeout(() => { delBtn.classList.remove('confirm'); delBtn.textContent = '삭제'; }, 3000);
+      return;
+    }
+    try { appSkills = await window.api.deleteAppSkill(delBtn.dataset.skillDel); renderSkillList(); skillStatusEl.textContent = '삭제했습니다. 팀장들에게 알렸습니다.'; }
+    catch (err) { skillStatusEl.textContent = errMsg(err); }
+  }
+});
+skillsListEl.addEventListener('change', async e => {
+  const t = e.target.closest('[data-skill-toggle]');
+  if (!t) return;
+  try { appSkills = await window.api.toggleAppSkill(t.dataset.skillToggle); renderSkillList(); skillStatusEl.textContent = ''; }
+  catch (err) { skillStatusEl.textContent = errMsg(err); t.checked = !t.checked; }
+});
+document.querySelector('.tab-btn[data-tab="app-settings"]').addEventListener('click', loadSkills);
+loadSkills();
+
 // ---------------- 앱 버전 · 새 버전 확인 ----------------
 // 헤더의 버전 표시를 누르면 GitHub 최신 릴리스와 비교한다. 시작 직후와 6시간마다 조용히 확인하고(실패·릴리스 없음은 알리지 않는다), 새 버전이 있으면
 // 배너로 알린다 — 자동 설치는 하지 않고 릴리스 페이지를 열어 준다. "이 버전 알림 끄기"는 그 버전에 대해서만 이 PC에 기억한다.

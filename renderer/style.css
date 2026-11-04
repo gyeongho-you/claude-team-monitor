@@ -870,6 +870,20 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 .settings-actions button { background: transparent; color: var(--text-soft); border: 1px solid var(--border-2); border-radius: 6px; padding: 4px 12px; font-size: 12px; }
 .settings-actions button:hover { color: var(--accent-2); border-color: var(--accent-2); background: transparent; }
 .settings-actions button:disabled { color: var(--text-dim); border-color: var(--border); }
+/* 공통 스킬 */
+#skills-list:empty::before { content: "등록된 스킬이 없습니다."; color: var(--text-dim); font-size: 12px; display: block; padding: 6px 0; }
+.skill-item { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-top: 1px solid var(--border); font-size: 12px; }
+.skill-item:first-child { border-top: none; }
+.skill-item label { display: flex; align-items: center; gap: 6px; min-width: 150px; color: var(--text-bright); }
+.skill-item.off { opacity: 0.55; }
+.skill-item .skill-desc { flex: 1; min-width: 0; color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-item button { background: transparent; color: var(--text-soft); border: 1px solid var(--border-2); border-radius: 6px; padding: 2px 9px; font-size: 11px; }
+.skill-item button:hover { color: var(--accent-2); border-color: var(--accent-2); background: transparent; }
+.skill-item button.confirm { color: var(--danger); border-color: var(--danger); }
+.skill-form { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.skill-form input, .skill-form select, .skill-form textarea { background: var(--bg); border: 1px solid var(--border-2); color: var(--text); padding: 5px 7px; border-radius: 4px; font-size: 12px; font-family: inherit; }
+.skill-form textarea { min-height: 120px; resize: vertical; }
+.skill-form input[readonly] { opacity: 0.6; }
 .settings-check { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 12px; color: var(--text-soft); }
 #update-banner:empty { display: none; }
 #update-banner .update-card { position: relative; margin: 6px 16px; padding: 8px 36px 8px 12px; border: 1px solid var(--accent-2); border-radius: 8px; background: var(--surface); font-size: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }

@@ -335,7 +335,7 @@ pub async fn restart_lead(internal_id: String, instruction: String) -> RestartLe
 
     install_team_lead_skill();
     let (approved_members, approved_text) = approved_member_briefing(&current.target_dir);
-    let prompt = format!("/team-lead {instruction}\n\n{approved_text}");
+    let prompt = format!("/team-lead {instruction}\n\n{approved_text}{}", crate::app_skills::prompt_section());
 
     // 재시작은 완전히 새 세션(--resume이 아님)이라 SECRET_MODE_CLI_ARGS도 이 시점에 다시 실어야
     // 한다(resumeLead와 정반대 요구사항, A-1 참고).
@@ -601,7 +601,7 @@ pub async fn launch_team_lead(target_dir: String, instruction: String, label: Op
     }
     install_team_lead_skill();
     let (approved_members, approved_text) = approved_member_briefing(&target_dir);
-    let prompt = format!("/team-lead {instruction}\n\n{approved_text}");
+    let prompt = format!("/team-lead {instruction}\n\n{approved_text}{}", crate::app_skills::prompt_section());
 
     let flags = FreshLaunchArgs::new().secret(secret).into_flags();
     let Some(id) = run_claude_bg(flags, resolve_long_prompt(&prompt), target_dir.clone()).await else {

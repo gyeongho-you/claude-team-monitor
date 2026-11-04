@@ -7,6 +7,7 @@ mod concurrency;
 mod daemon_state;
 mod subagents;
 mod activity;
+mod app_skills;
 mod daemon_reply;
 mod pasted_images;
 mod retired_members;
@@ -81,6 +82,13 @@ pub fn run() {
       daemon_state::get_pending_choice_command,
       daemon_state::get_chat_unresolvable_detail_command,
       session_model::change_session_model_command,
+      app_skills::get_app_skills_command,
+      app_skills::add_app_skill_command,
+      app_skills::update_app_skill_command,
+      app_skills::toggle_app_skill_command,
+      app_skills::delete_app_skill_command,
+      app_skills::list_user_skills_command,
+      app_skills::read_user_skill_command,
       update_check::get_app_version_command,
       update_check::check_for_update_command,
       update_check::open_release_page_command,

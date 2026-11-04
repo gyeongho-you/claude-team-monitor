@@ -84,6 +84,11 @@ pub fn member_templates_path() -> PathBuf {
     app_data_dir().join("memberTemplates.json")
 }
 
+// 앱 설정에서 등록한 공통 스킬 목록(app_skills.rs).
+pub fn app_skills_path() -> PathBuf {
+    app_data_dir().join("appSkills.json")
+}
+
 // src/lib/teamMemberPaths.js의 PROMPTS_DIR과 정확히 같은 경로여야 한다 — long_prompt_guard.rs가
 // argv 길이 한도를 넘는 지시문을 파일로 대신 써두는 곳(resolveLongPrompt와 동일한 이유).
 pub fn prompts_dir() -> PathBuf {

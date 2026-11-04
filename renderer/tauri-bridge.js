@@ -144,6 +144,13 @@
     return invoke('restart_lead_command', { leadId, instruction });
   }
 
+  async function getAppSkills() { return invoke('get_app_skills_command'); }
+  async function addAppSkill(name, description, content) { return invoke('add_app_skill_command', { name, description, content }); }
+  async function updateAppSkill(id, description, content) { return invoke('update_app_skill_command', { id, description, content }); }
+  async function toggleAppSkill(id) { return invoke('toggle_app_skill_command', { id }); }
+  async function deleteAppSkill(id) { return invoke('delete_app_skill_command', { id }); }
+  async function listUserSkills() { return invoke('list_user_skills_command'); }
+  async function readUserSkill(name) { return invoke('read_user_skill_command', { name }); }
   async function getAppVersion() {
     return invoke('get_app_version_command');
   }
@@ -339,6 +346,13 @@
     restartLead,
     emergencyStopLead,
     changeSessionModel,
+    getAppSkills,
+    addAppSkill,
+    updateAppSkill,
+    toggleAppSkill,
+    deleteAppSkill,
+    listUserSkills,
+    readUserSkill,
     getAppVersion,
     checkForUpdate,
     openReleasePage,
