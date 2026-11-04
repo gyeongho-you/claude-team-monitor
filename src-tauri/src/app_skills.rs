@@ -1,9 +1,11 @@
-// 앱 설정에서 등록하는 "공통 스킬" — 모든 팀장이 쓴다.
+// 앱 설정에서 등록하는 스킬 — 이 앱이 띄운 팀장들이 쓴다(기본은 이 앱에만 한정).
 //
-// 등록한 스킬은 (1) ~/.claude/skills/<이름>/SKILL.md에 설치돼서(앱이 만든 폴더에는 .ctm-managed 표식 파일을 둔다) claude의 Skill 도구로 바로 쓸 수 있고,
-// (2) 팀장에게 "이런 스킬이 있다"고 안내된다 — 새로 띄우는 팀장은 첫 지시문에, 이미 있는 팀장은 알림으로(떠 있으면 바로, 히스토리 팀장은 다시 이어질 때,
-// 팀원 템플릿 변경 알림과 같은 방식). 안내문에 SKILL.md의 전체 경로를 같이 적어서, 시크릿 모드처럼 사용자 스킬 폴더를 안 읽는 팀장도 파일을 직접 읽어 쓸 수 있다.
-// 사용자가 직접 만든 같은 이름의 스킬 폴더는 덮어쓰지도 지우지도 않는다(표식 파일이 있는 폴더만 앱이 관리한다).
+// 등록한 스킬은 앱 전용 폴더(~/.claude/claude-team-monitor/skills/<이름>/SKILL.md)에 저장되고, 팀장에게 "이런 스킬이 있다"고 안내된다 — 새로 띄우는 팀장은
+// 첫 지시문에, 이미 있는 팀장은 알림으로(떠 있으면 바로, 히스토리 팀장은 다시 이어질 때, 팀원 템플릿 변경 알림과 같은 방식). 안내문에 SKILL.md의 전체 경로를
+// 적어서 팀장이 파일을 읽고 그대로 따른다(앱이 긴 지시문을 파일로 넘길 때 ~/.claude/claude-team-monitor/prompts의 파일을 읽게 하는 것과 같은 방식).
+// 이 폴더는 claude의 스킬 폴더가 아니라서 이 앱과 무관한 세션(사용자가 터미널에서 직접 여는 claude 등)에는 보이지 않는다.
+// 스킬마다 "전역에도 설치"를 켜면 ~/.claude/skills/<이름>에도 설치돼서(앱이 만든 폴더에는 .ctm-managed 표식 파일을 둔다) 모든 claude 세션에서 Skill 도구로
+// 쓸 수 있다. 사용자가 직접 만든 같은 이름의 전역 스킬은 덮어쓰지도 지우지도 않는다(표식 파일이 있는 폴더만 앱이 관리한다).
 
 use crate::json_file::write_json_file_atomic;
 use crate::paths::{app_skills_path, claude_home};
@@ -32,6 +34,9 @@ pub struct AppSkill {
     pub content: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// ~/.claude/skills에도 설치할지(모든 claude 세션에서 Skill 도구로 쓰려면). 기본은 꺼짐 — 앱 전용.
+    #[serde(default)]
+    pub global: bool,
     #[serde(rename = "createdAt", default)]
     pub created_at: i64,
 }
@@ -85,20 +90,21 @@ fn skill_file(root: &Path, name: &str) -> PathBuf {
     skill_dir(root, name).join("SKILL.md")
 }
 
-/// 팀장에게 줄 안내문(켜져 있는 스킬만). 스킬이 없으면 빈 문자열.
-pub(crate) fn build_skills_briefing(skills: &[AppSkill], root: &Path) -> String {
+/// 팀장에게 줄 안내문(켜져 있는 스킬만). 스킬이 없으면 빈 문자열. app_root는 앱 전용 스킬 폴더.
+pub(crate) fn build_skills_briefing(skills: &[AppSkill], app_root: &Path) -> String {
     let lines: Vec<String> = skills
         .iter()
         .filter(|s| s.enabled)
         .map(|s| {
             let desc = if s.description.trim().is_empty() { String::new() } else { format!(" — {}", s.description.trim().replace('\n', " ")) };
-            format!("- {}{desc} (파일: {})", s.name, skill_file(root, &s.name).display())
+            let global = if s.global { " · 전역 설치돼 Skill 도구로도 호출 가능" } else { "" };
+            format!("- {}{desc} (파일: {}{global})", s.name, skill_file(app_root, &s.name).display())
         })
         .collect();
     if lines.is_empty() {
         return String::new();
     }
-    format!("사용자가 이 앱에 등록한 공통 스킬(작업이 설명에 해당하면 그 스킬을 Skill 도구로 먼저 호출해 그대로 따라라 — 호출이 안 되면 파일을 직접 읽어라):\n{}", lines.join("\n"))
+    format!("사용자가 이 앱에 등록한 스킬(이 앱이 띄운 팀장 전용 — 작업이 설명에 해당하면 그 스킬 파일을 먼저 읽고 그대로 따라라):\n{}", lines.join("\n"))
 }
 
 /// 스킬 안내가 달라졌을 때 알림을 보낼 팀장과 문구를 계산한다(순수 함수).
@@ -112,7 +118,7 @@ pub(crate) fn plan_skills_notice(old_text: &str, new_text: &str, leads: &[LeadRe
 }
 
 // ---------------------------------------------------------------------------------------------
-// 설치 폴더 동기화(~/.claude/skills)
+// 폴더 동기화 — 앱 전용 폴더(항상) + ~/.claude/skills(전역 설치를 켠 것만)
 // ---------------------------------------------------------------------------------------------
 
 fn is_managed_dir(root: &Path, name: &str) -> bool {
@@ -124,35 +130,53 @@ fn foreign_skill_exists(root: &Path, name: &str) -> bool {
     skill_dir(root, name).exists() && !is_managed_dir(root, name)
 }
 
-fn install_skill(root: &Path, skill: &AppSkill) -> Result<(), String> {
-    if foreign_skill_exists(root, &skill.name) {
+/// 앱 전용 폴더에 쓴다(이 폴더는 앱만 쓰므로 그대로 덮어쓴다).
+fn write_app_copy(app_root: &Path, skill: &AppSkill) -> Result<(), String> {
+    std::fs::create_dir_all(skill_dir(app_root, &skill.name)).map_err(|e| format!("스킬 폴더를 만들지 못했습니다: {e}"))?;
+    std::fs::write(skill_file(app_root, &skill.name), render_skill_md(skill)).map_err(|e| format!("SKILL.md를 쓰지 못했습니다: {e}"))
+}
+
+fn remove_app_copy(app_root: &Path, name: &str) {
+    let _ = std::fs::remove_dir_all(skill_dir(app_root, name));
+}
+
+/// 전역 스킬 폴더에 설치한다. 사용자가 직접 만든 같은 이름이 있으면 덮어쓰지 않고 거부한다.
+fn install_global(global_root: &Path, skill: &AppSkill) -> Result<(), String> {
+    if foreign_skill_exists(global_root, &skill.name) {
         return Err(format!("\"{}\" 이름의 스킬이 이미 ~/.claude/skills에 있습니다(앱이 만든 것이 아니라 덮어쓰지 않습니다). 다른 이름을 쓰세요.", skill.name));
     }
-    let dir = skill_dir(root, &skill.name);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("스킬 폴더를 만들지 못했습니다: {e}"))?;
-    std::fs::write(skill_file(root, &skill.name), render_skill_md(skill)).map_err(|e| format!("SKILL.md를 쓰지 못했습니다: {e}"))?;
-    std::fs::write(dir.join(MANAGED_MARKER_FILE), "claude-team-monitor가 설치한 스킬입니다. 앱 설정에서 지우면 이 폴더도 지워집니다.\n").map_err(|e| format!("표식 파일을 쓰지 못했습니다: {e}"))?;
-    Ok(())
+    let dir = skill_dir(global_root, &skill.name);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("전역 스킬 폴더를 만들지 못했습니다: {e}"))?;
+    std::fs::write(skill_file(global_root, &skill.name), render_skill_md(skill)).map_err(|e| format!("전역 SKILL.md를 쓰지 못했습니다: {e}"))?;
+    std::fs::write(dir.join(MANAGED_MARKER_FILE), "claude-team-monitor가 설치한 스킬입니다. 앱 설정에서 전역 설치를 끄거나 스킬을 지우면 이 폴더도 지워집니다.\n").map_err(|e| format!("표식 파일을 쓰지 못했습니다: {e}"))
 }
 
-fn uninstall_skill(root: &Path, name: &str) {
-    if is_managed_dir(root, name) {
-        let _ = std::fs::remove_dir_all(skill_dir(root, name));
+fn uninstall_global(global_root: &Path, name: &str) {
+    if is_managed_dir(global_root, name) {
+        let _ = std::fs::remove_dir_all(skill_dir(global_root, name));
     }
 }
 
-/// 등록 목록(old → new)에 맞춰 설치 폴더를 맞춘다: 켜진 것은 설치, 꺼졌거나 지워진 것은 앱이 만든 폴더만 지운다.
-pub(crate) fn sync_installed(root: &Path, old: &[AppSkill], new: &[AppSkill]) -> Result<(), String> {
+/// 등록 목록(old → new)에 맞춰 폴더를 맞춘다. 켜진 스킬은 앱 전용 폴더에 쓰고(꺼졌거나 지워졌으면 지운다), 전역 설치가 켜진 스킬만 ~/.claude/skills에도 설치한다
+/// (아니면 앱이 만든 전역 폴더만 지운다).
+pub(crate) fn sync_installed(app_root: &Path, global_root: &Path, old: &[AppSkill], new: &[AppSkill]) -> Result<(), String> {
     for o in old {
         if !new.iter().any(|n| n.name == o.name) {
-            uninstall_skill(root, &o.name);
+            remove_app_copy(app_root, &o.name);
+            uninstall_global(global_root, &o.name);
         }
     }
     for n in new {
         if n.enabled {
-            install_skill(root, n)?;
+            write_app_copy(app_root, n)?;
+            if n.global {
+                install_global(global_root, n)?;
+            } else {
+                uninstall_global(global_root, &n.name);
+            }
         } else {
-            uninstall_skill(root, &n.name);
+            remove_app_copy(app_root, &n.name);
+            uninstall_global(global_root, &n.name);
         }
     }
     Ok(())
@@ -175,13 +199,19 @@ fn skills_lock() -> &'static AsyncMutex<()> {
     LOCK.get_or_init(|| AsyncMutex::new(()))
 }
 
-fn install_root() -> PathBuf {
+/// 앱 전용 스킬 폴더 — 팀장이 안내문의 경로로 읽는 곳.
+fn app_root() -> PathBuf {
+    claude_home().join("claude-team-monitor").join("skills")
+}
+
+/// 전역 스킬 폴더(모든 claude 세션이 읽는 곳).
+fn global_root() -> PathBuf {
     claude_home().join("skills")
 }
 
 /// 새 팀장/재시작 팀장의 첫 지시문 뒤에 붙일 안내(없으면 빈 문자열, 있으면 앞에 빈 줄 포함).
 pub fn prompt_section() -> String {
-    let text = build_skills_briefing(&load_app_skills(), &install_root());
+    let text = build_skills_briefing(&load_app_skills(), &app_root());
     if text.is_empty() {
         String::new()
     } else {
@@ -190,22 +220,22 @@ pub fn prompt_section() -> String {
 }
 
 async fn notify_leads(old: &[AppSkill], new: &[AppSkill]) {
-    let root = install_root();
+    let root = app_root();
     let plans = plan_skills_notice(&build_skills_briefing(old, &root), &build_skills_briefing(new, &root), &load_leads());
     for (internal_id, message) in plans {
         crate::notice_queue::queue_replacing_notice(&internal_id, SKILLS_NOTICE_MARKER, &message, crate::notice_queue::NoticeOrigin::System).await;
     }
 }
 
-/// 목록을 바꾸고(mutate), 설치 폴더를 맞추고, 저장한다 → (바꾸기 전, 바꾼 후). mutate나 설치가 실패하면 아무것도 저장하지 않는다(경로를 받아서 임시 폴더로 시험할 수 있다).
-fn commit_core<F>(path: &Path, root: &Path, mutate: F) -> Result<(Vec<AppSkill>, Vec<AppSkill>), String>
+/// 목록을 바꾸고(mutate), 폴더를 맞추고, 저장한다 → (바꾸기 전, 바꾼 후). mutate나 설치가 실패하면 아무것도 저장하지 않는다(경로를 받아서 임시 폴더로 시험할 수 있다).
+fn commit_core<F>(path: &Path, app_root: &Path, global_root: &Path, mutate: F) -> Result<(Vec<AppSkill>, Vec<AppSkill>), String>
 where
     F: FnOnce(&mut Vec<AppSkill>) -> Result<(), String>,
 {
     let old = load_skills_from(path);
     let mut new = old.clone();
     mutate(&mut new)?;
-    sync_installed(root, &old, &new)?;
+    sync_installed(app_root, global_root, &old, &new)?;
     write_json_file_atomic(path, &new).map_err(|e| format!("스킬 목록을 저장하지 못했습니다: {e}"))?;
     Ok((old, new))
 }
@@ -216,7 +246,7 @@ where
     F: FnOnce(&mut Vec<AppSkill>) -> Result<(), String>,
 {
     let guard = skills_lock().lock().await;
-    let (old, new) = commit_core(&app_skills_path(), &install_root(), mutate)?;
+    let (old, new) = commit_core(&app_skills_path(), &app_root(), &global_root(), mutate)?;
     drop(guard);
     notify_leads(&old, &new).await;
     Ok(new)
@@ -255,7 +285,7 @@ pub async fn add_app_skill_command(name: String, description: String, content: S
         if skills.iter().any(|s| s.name == name) {
             return Err(format!("\"{name}\" 스킬이 이미 등록돼 있습니다."));
         }
-        skills.push(AppSkill { id: format!("skill-{}", now_ms()), name, description, content: body, enabled: true, created_at: now_ms() });
+        skills.push(AppSkill { id: format!("skill-{}", now_ms()), name, description, content: body, enabled: true, global: false, created_at: now_ms() });
         Ok(())
     })
     .await
@@ -283,6 +313,17 @@ pub async fn toggle_app_skill_command(id: String) -> Result<Vec<AppSkill>, Strin
     .await
 }
 
+/// 전역 설치(~/.claude/skills에도 설치)를 켜고 끈다. 켤 때 사용자가 직접 만든 같은 이름이 있으면 실패하고 아무것도 바뀌지 않는다.
+#[tauri::command]
+pub async fn toggle_app_skill_global_command(id: String) -> Result<Vec<AppSkill>, String> {
+    commit(move |skills| {
+        let Some(s) = skills.iter_mut().find(|s| s.id == id) else { return Err("그 스킬을 찾지 못했습니다.".to_string()) };
+        s.global = !s.global;
+        Ok(())
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn delete_app_skill_command(id: String) -> Result<Vec<AppSkill>, String> {
     commit(move |skills| {
@@ -301,15 +342,15 @@ pub struct UserSkillInfo {
 /// ~/.claude/skills에 이미 있는(앱이 만든 것이 아닌) 스킬 목록 — "기존 스킬에서 불러오기"용.
 #[tauri::command]
 pub fn list_user_skills_command() -> Vec<UserSkillInfo> {
-    let root = install_root();
+    let root = global_root();
     let mut out: Vec<UserSkillInfo> = std::fs::read_dir(&root)
         .map(|rd| {
             rd.flatten()
                 .filter(|e| e.path().join("SKILL.md").exists() && !e.path().join(MANAGED_MARKER_FILE).exists())
-                .filter_map(|e| {
+                .map(|e| {
                     let name = e.file_name().to_string_lossy().to_string();
                     let (_, desc, _) = split_frontmatter(&std::fs::read_to_string(e.path().join("SKILL.md")).unwrap_or_default());
-                    Some(UserSkillInfo { name, description: desc.unwrap_or_default() })
+                    UserSkillInfo { name, description: desc.unwrap_or_default() }
                 })
                 .collect()
         })
@@ -331,7 +372,7 @@ pub fn read_user_skill_command(name: String) -> Option<UserSkillContent> {
     if name.is_empty() || name.contains(['/', '\\']) || name.contains("..") {
         return None;
     }
-    let raw = std::fs::read_to_string(skill_file(&install_root(), &name)).ok()?;
+    let raw = std::fs::read_to_string(skill_file(&global_root(), &name)).ok()?;
     let (_, desc, body) = split_frontmatter(&raw);
     Some(UserSkillContent { name, description: desc.unwrap_or_default(), content: body })
 }
@@ -347,7 +388,7 @@ mod tests {
     }
 
     fn skill(name: &str, enabled: bool) -> AppSkill {
-        AppSkill { id: format!("id-{name}"), name: name.into(), description: "설명: 한 줄 \"인용\"".into(), content: "# 본문\n단계 1".into(), enabled, created_at: 1 }
+        AppSkill { id: format!("id-{name}"), name: name.into(), description: "설명: 한 줄 \"인용\"".into(), content: "# 본문\n단계 1".into(), enabled, global: false, created_at: 1 }
     }
 
     fn lead(internal: Option<&str>) -> LeadRecord {
@@ -407,72 +448,102 @@ mod tests {
     }
 
     #[test]
-    fn briefing_lists_only_enabled_skills_with_paths() {
+    fn briefing_lists_only_enabled_skills_with_app_folder_paths() {
         let root = tmp("brief");
         assert_eq!(build_skills_briefing(&[], &root), "");
         assert_eq!(build_skills_briefing(&[skill("off", false)], &root), "");
         let text = build_skills_briefing(&[skill("on", true), skill("off", false)], &root);
         assert!(text.contains("- on — 설명: 한 줄") && text.contains("SKILL.md") && !text.contains("off"));
+        assert!(text.contains("이 앱이 띄운 팀장 전용") && !text.contains("전역 설치돼"), "기본은 앱 전용");
+        let global = AppSkill { global: true, ..skill("g", true) };
+        assert!(build_skills_briefing(&[global], &root).contains("전역 설치돼 Skill 도구로도 호출 가능"));
     }
 
     #[test]
-    fn install_creates_files_and_never_overwrites_a_users_own_skill() {
-        let root = tmp("install");
-        let s = skill("mine", true);
-        sync_installed(&root, &[], &[s.clone()]).unwrap();
-        assert!(skill_file(&root, "mine").exists() && is_managed_dir(&root, "mine"));
-        // 사용자가 직접 만든 같은 이름의 폴더는 덮어쓰지 않고 거부한다
-        let own = root.join("theirs");
+    fn app_only_skills_stay_out_of_the_global_skills_folder() {
+        let (app, glob) = (tmp("app"), tmp("glob"));
+        sync_installed(&app, &glob, &[], &[skill("mine", true)]).unwrap();
+        assert!(skill_file(&app, "mine").exists(), "앱 전용 폴더에는 쓴다");
+        assert!(!skill_dir(&glob, "mine").exists(), "기본은 전역 폴더에 설치하지 않는다");
+    }
+
+    #[test]
+    fn global_install_is_opt_in_and_never_overwrites_a_users_own_skill() {
+        let (app, glob) = (tmp("app2"), tmp("glob2"));
+        let on = AppSkill { global: true, ..skill("mine", true) };
+        sync_installed(&app, &glob, &[], &[on.clone()]).unwrap();
+        assert!(skill_file(&app, "mine").exists() && skill_file(&glob, "mine").exists() && is_managed_dir(&glob, "mine"));
+        // 전역 설치를 끄면 앱이 만든 전역 폴더만 지워지고 앱 전용 폴더는 남는다
+        let off_global = AppSkill { global: false, ..on.clone() };
+        sync_installed(&app, &glob, &[on.clone()], &[off_global.clone()]).unwrap();
+        assert!(!skill_dir(&glob, "mine").exists() && skill_file(&app, "mine").exists());
+        // 사용자가 직접 만든 같은 이름의 전역 스킬은 덮어쓰지 않고 거부한다(앱 전용으로는 상관없다)
+        let own = glob.join("theirs");
         std::fs::create_dir_all(&own).unwrap();
         std::fs::write(own.join("SKILL.md"), "사용자 것").unwrap();
-        assert!(sync_installed(&root, &[], &[skill("theirs", true)]).is_err());
+        assert!(sync_installed(&app, &glob, &[], &[AppSkill { global: true, ..skill("theirs", true) }]).is_err());
         assert_eq!(std::fs::read_to_string(own.join("SKILL.md")).unwrap(), "사용자 것");
-        // 지워도 사용자 폴더는 남는다
-        sync_installed(&root, &[skill("theirs", true)], &[]).unwrap();
+        sync_installed(&app, &glob, &[], &[skill("theirs", true)]).unwrap();
+        assert_eq!(std::fs::read_to_string(own.join("SKILL.md")).unwrap(), "사용자 것", "앱 전용 등록은 전역의 같은 이름을 건드리지 않는다");
+    }
+
+    #[test]
+    fn disabling_or_deleting_removes_both_copies_but_never_a_users_own_folder() {
+        let (app, glob) = (tmp("app3"), tmp("glob3"));
+        let on = AppSkill { global: true, ..skill("x", true) };
+        sync_installed(&app, &glob, &[], &[on.clone()]).unwrap();
+        let off = AppSkill { enabled: false, ..on.clone() };
+        sync_installed(&app, &glob, &[on.clone()], &[off.clone()]).unwrap();
+        assert!(!skill_dir(&app, "x").exists() && !skill_dir(&glob, "x").exists(), "꺼지면 두 곳 모두 지워진다");
+        sync_installed(&app, &glob, &[off.clone()], &[on.clone()]).unwrap();
+        assert!(skill_file(&app, "x").exists() && skill_file(&glob, "x").exists(), "다시 켜면 다시 설치된다");
+        sync_installed(&app, &glob, &[on], &[]).unwrap();
+        assert!(!skill_dir(&app, "x").exists() && !skill_dir(&glob, "x").exists(), "삭제하면 둘 다 지워진다");
+        // 사용자 전역 폴더는 목록에 이름이 있어도 표식이 없으면 지우지 않는다
+        let own = glob.join("keep");
+        std::fs::create_dir_all(&own).unwrap();
+        std::fs::write(own.join("SKILL.md"), "내 것").unwrap();
+        sync_installed(&app, &glob, &[skill("keep", true)], &[]).unwrap();
         assert!(own.join("SKILL.md").exists());
     }
 
     #[test]
-    fn disabling_or_deleting_removes_only_managed_folders() {
-        let root = tmp("remove");
-        let on = skill("x", true);
-        sync_installed(&root, &[], &[on.clone()]).unwrap();
-        let off = AppSkill { enabled: false, ..on.clone() };
-        sync_installed(&root, &[on.clone()], &[off.clone()]).unwrap();
-        assert!(!skill_dir(&root, "x").exists(), "꺼지면 설치 폴더가 지워진다");
-        sync_installed(&root, &[off.clone()], &[on.clone()]).unwrap();
-        assert!(skill_file(&root, "x").exists(), "다시 켜면 다시 설치된다");
-        sync_installed(&root, &[on], &[]).unwrap();
-        assert!(!skill_dir(&root, "x").exists(), "삭제하면 폴더도 지워진다");
+    fn commit_core_saves_installs_and_leaves_nothing_behind_on_failure() {
+        let dir = tmp("commit");
+        let (json, app, glob) = (dir.join("appSkills.json"), dir.join("app-skills"), dir.join("global"));
+        std::fs::create_dir_all(&glob).unwrap();
+        // 추가: 저장 + 앱 전용 폴더에 설치, 전역에는 없음
+        let (old, new) = commit_core(&json, &app, &glob, |v| { v.push(skill("alpha", true)); Ok(()) }).unwrap();
+        assert!(old.is_empty() && new.len() == 1);
+        assert_eq!(load_skills_from(&json), new);
+        assert!(skill_file(&app, "alpha").exists() && !skill_dir(&glob, "alpha").exists());
+        // 전역 설치 켜기: 사용자가 직접 만든 같은 이름이 있으면 실패하고 목록은 그대로(저장 안 됨)
+        std::fs::create_dir_all(glob.join("alpha")).unwrap();
+        std::fs::write(glob.join("alpha").join("SKILL.md"), "사용자 것").unwrap();
+        assert!(commit_core(&json, &app, &glob, |v| { v[0].global = true; Ok(()) }).is_err());
+        assert!(!load_skills_from(&json)[0].global, "실패하면 목록이 저장되지 않는다");
+        assert_eq!(std::fs::read_to_string(glob.join("alpha").join("SKILL.md")).unwrap(), "사용자 것");
+        std::fs::remove_dir_all(glob.join("alpha")).unwrap();
+        // 이제 켜진다
+        commit_core(&json, &app, &glob, |v| { v[0].global = true; Ok(()) }).unwrap();
+        assert!(skill_file(&glob, "alpha").exists());
+        // 끄기 → 두 폴더 삭제, 목록에는 남음
+        commit_core(&json, &app, &glob, |v| { v[0].enabled = false; Ok(()) }).unwrap();
+        assert!(!skill_dir(&app, "alpha").exists() && !skill_dir(&glob, "alpha").exists() && load_skills_from(&json).len() == 1);
+        // 켜기 + 설명 수정 → SKILL.md에 반영
+        commit_core(&json, &app, &glob, |v| { v[0].enabled = true; v[0].description = "바뀐 설명".into(); Ok(()) }).unwrap();
+        assert!(std::fs::read_to_string(skill_file(&app, "alpha")).unwrap().contains("바뀐 설명"));
+        // mutate 자체가 실패하면 그대로
+        assert!(commit_core(&json, &app, &glob, |_| Err("싫어".into())).is_err());
+        // 삭제 → 목록과 폴더 모두 사라짐
+        commit_core(&json, &app, &glob, |v| { v.clear(); Ok(()) }).unwrap();
+        assert!(load_skills_from(&json).is_empty() && !skill_dir(&app, "alpha").exists() && !skill_dir(&glob, "alpha").exists());
     }
 
     #[test]
-    fn commit_core_saves_installs_and_rolls_back_nothing_on_failure() {
-        let dir = tmp("commit");
-        let (json, root) = (dir.join("appSkills.json"), dir.join("skills"));
-        std::fs::create_dir_all(&root).unwrap();
-        // 추가: 저장 + 설치
-        let (old, new) = commit_core(&json, &root, |v| { v.push(skill("alpha", true)); Ok(()) }).unwrap();
-        assert!(old.is_empty() && new.len() == 1);
-        assert_eq!(load_skills_from(&json), new);
-        assert!(skill_file(&root, "alpha").exists());
-        // 사용자가 직접 만든 같은 이름이 있으면 실패하고 목록은 그대로(저장 안 됨)
-        std::fs::create_dir_all(root.join("beta")).unwrap();
-        std::fs::write(root.join("beta").join("SKILL.md"), "사용자 것").unwrap();
-        assert!(commit_core(&json, &root, |v| { v.push(skill("beta", true)); Ok(()) }).is_err());
-        assert_eq!(load_skills_from(&json).len(), 1, "실패하면 목록이 저장되지 않는다");
-        assert_eq!(std::fs::read_to_string(root.join("beta").join("SKILL.md")).unwrap(), "사용자 것");
-        // 끄기 → 설치 폴더 삭제, 목록에는 남음
-        commit_core(&json, &root, |v| { v[0].enabled = false; Ok(()) }).unwrap();
-        assert!(!skill_dir(&root, "alpha").exists() && load_skills_from(&json).len() == 1);
-        // 켜기 → 다시 설치, 설명 수정 → SKILL.md에 반영
-        commit_core(&json, &root, |v| { v[0].enabled = true; v[0].description = "바뀐 설명".into(); Ok(()) }).unwrap();
-        assert!(std::fs::read_to_string(skill_file(&root, "alpha")).unwrap().contains("바뀐 설명"));
-        // mutate 자체가 실패하면 그대로
-        assert!(commit_core(&json, &root, |_| Err("싫어".into())).is_err());
-        // 삭제 → 목록과 폴더 모두 사라짐(사용자 폴더 beta는 그대로)
-        commit_core(&json, &root, |v| { v.clear(); Ok(()) }).unwrap();
-        assert!(load_skills_from(&json).is_empty() && !skill_dir(&root, "alpha").exists() && root.join("beta").exists());
+    fn old_saved_skills_without_the_global_field_default_to_app_only() {
+        let s: AppSkill = serde_json::from_str(r#"{"id":"s","name":"n","description":"d","content":"c","enabled":true,"createdAt":1}"#).unwrap();
+        assert!(!s.global);
     }
 
     #[test]

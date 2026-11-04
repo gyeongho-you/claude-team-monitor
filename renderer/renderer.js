@@ -777,8 +777,9 @@ let editingSkillId = null;
 function renderSkillList() {
   skillsListEl.innerHTML = appSkills.map(s => `
     <div class="skill-item ${s.enabled ? '' : 'off'}">
-      <label title="끄면 설치된 스킬이 지워지고 팀장에게도 빠집니다"><input type="checkbox" data-skill-toggle="${escapeHtml(s.id)}" ${s.enabled ? 'checked' : ''} /> ${escapeHtml(s.name)}</label>
+      <label title="끄면 팀장 안내에서 빠지고 설치된 파일도 지워집니다"><input type="checkbox" data-skill-toggle="${escapeHtml(s.id)}" ${s.enabled ? 'checked' : ''} /> ${escapeHtml(s.name)}</label>
       <span class="skill-desc" title="${escapeHtml(s.description)}">${escapeHtml(s.description || '(설명 없음)')}</span>
+      <label class="skill-global" title="켜면 ~/.claude/skills에도 설치되어 이 앱과 무관한 claude 세션에서도 Skill 도구로 쓸 수 있습니다"><input type="checkbox" data-skill-global="${escapeHtml(s.id)}" ${s.global ? 'checked' : ''} ${s.enabled ? '' : 'disabled'} /> 전역</label>
       <button data-skill-edit="${escapeHtml(s.id)}">수정</button>
       <button data-skill-del="${escapeHtml(s.id)}">삭제</button>
     </div>`).join('');
@@ -855,6 +856,12 @@ skillsListEl.addEventListener('click', async e => {
   }
 });
 skillsListEl.addEventListener('change', async e => {
+  const g = e.target.closest('[data-skill-global]');
+  if (g) {
+    try { appSkills = await window.api.toggleAppSkillGlobal(g.dataset.skillGlobal); renderSkillList(); skillStatusEl.textContent = ''; }
+    catch (err) { skillStatusEl.textContent = errMsg(err); g.checked = !g.checked; }
+    return;
+  }
   const t = e.target.closest('[data-skill-toggle]');
   if (!t) return;
   try { appSkills = await window.api.toggleAppSkill(t.dataset.skillToggle); renderSkillList(); skillStatusEl.textContent = ''; }

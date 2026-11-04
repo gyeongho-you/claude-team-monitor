@@ -302,8 +302,8 @@
       </div>
 
       <div class="settings-card" id="skills-card">
-        <h2>스킬 (모든 팀장 공통)</h2>
-        <p class="form-hint">등록한 스킬은 <code>~/.claude/skills</code>에 설치되어 팀장이 Skill 도구로 쓸 수 있고, 팀장에게도 안내됩니다(떠 있는 팀장은 바로, 히스토리 팀장은 다시 이어질 때, 새 팀장은 첫 지시문에 포함). 끄거나 지우면 설치된 폴더도 같이 지워집니다.</p>
+        <h2>스킬 (이 앱의 모든 팀장 공통)</h2>
+        <p class="form-hint">등록한 스킬은 이 앱이 띄운 팀장에게만 안내되고(떠 있는 팀장은 바로, 히스토리 팀장은 다시 이어질 때, 새 팀장은 첫 지시문에 포함) 팀장이 그 파일을 읽고 따릅니다. 이 앱과 무관한 claude 세션에는 보이지 않습니다. 항목의 <strong>전역</strong>을 켜면 <code>~/.claude/skills</code>에도 설치되어 모든 claude 세션에서 쓸 수 있고, 끄면 거기서만 지워집니다.</p>
         <div id="skills-list"></div>
         <div class="skill-form">
           <select id="skill-import-select"><option value="">기존 스킬에서 불러오기…</option></select>

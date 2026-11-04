@@ -876,6 +876,7 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 .skill-item:first-child { border-top: none; }
 .skill-item label { display: flex; align-items: center; gap: 6px; min-width: 150px; color: var(--text-bright); }
 .skill-item.off { opacity: 0.55; }
+.skill-item label.skill-global { min-width: 0; color: var(--text-soft); font-size: 11px; }
 .skill-item .skill-desc { flex: 1; min-width: 0; color: var(--text-soft); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .skill-item button { background: transparent; color: var(--text-soft); border: 1px solid var(--border-2); border-radius: 6px; padding: 2px 9px; font-size: 11px; }
 .skill-item button:hover { color: var(--accent-2); border-color: var(--accent-2); background: transparent; }

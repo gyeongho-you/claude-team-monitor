@@ -148,6 +148,7 @@
   async function addAppSkill(name, description, content) { return invoke('add_app_skill_command', { name, description, content }); }
   async function updateAppSkill(id, description, content) { return invoke('update_app_skill_command', { id, description, content }); }
   async function toggleAppSkill(id) { return invoke('toggle_app_skill_command', { id }); }
+  async function toggleAppSkillGlobal(id) { return invoke('toggle_app_skill_global_command', { id }); }
   async function deleteAppSkill(id) { return invoke('delete_app_skill_command', { id }); }
   async function listUserSkills() { return invoke('list_user_skills_command'); }
   async function readUserSkill(name) { return invoke('read_user_skill_command', { name }); }
@@ -350,6 +351,7 @@
     addAppSkill,
     updateAppSkill,
     toggleAppSkill,
+    toggleAppSkillGlobal,
     deleteAppSkill,
     listUserSkills,
     readUserSkill,

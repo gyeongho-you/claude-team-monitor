@@ -86,6 +86,7 @@ pub fn run() {
       app_skills::add_app_skill_command,
       app_skills::update_app_skill_command,
       app_skills::toggle_app_skill_command,
+      app_skills::toggle_app_skill_global_command,
       app_skills::delete_app_skill_command,
       app_skills::list_user_skills_command,
       app_skills::read_user_skill_command,
