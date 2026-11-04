@@ -106,7 +106,14 @@ pub fn get_agents_json() -> Result<Value, String> {
 pub fn fetch_agents_typed() -> Vec<AgentEntry> {
     match run_claude_agents_json() {
         Ok(raw) => serde_json::from_str::<Vec<AgentEntry>>(&raw).unwrap_or_default(),
-        Err(_) => Vec::new(),
+        Err(e) => {
+            // 실패하면 빈 목록으로 넘어가서 화면에는 세션이 하나도 안 보인다 — 원인(claude를 못 찾음 등)을 알 수 있게 첫 실패만 앱 로그에 남긴다.
+            static LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                crate::logging::log_critical(&format!("[agents] claude agents --json을 실행하지 못해 앱이 세션을 볼 수 없습니다 — {e}"));
+            }
+            Vec::new()
+        }
     }
 }
 

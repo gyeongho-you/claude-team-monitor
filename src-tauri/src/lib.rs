@@ -23,6 +23,7 @@ mod member_requests;
 mod member_templates;
 mod native_dialog;
 mod notice_queue;
+mod path_fix;
 mod paths;
 mod resume;
 mod session_model;
@@ -35,6 +36,8 @@ mod transcript;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+  // macOS에서 Dock/Finder로 연 앱은 터미널의 PATH를 못 물려받아 claude/node를 못 찾는다 — 시작할 때 보정한다(path_fix.rs 설명 참고).
+  path_fix::fix_path_env();
   tauri::Builder::default()
     // pick-directory(main.ts:2467, dialog.showOpenDialog)의 Tauri 대응 — 네이티브 폴더 선택
     // 다이얼로그는 tauri 코어가 아니라 공식 플러그인(tauri-plugin-dialog)으로 제공된다.

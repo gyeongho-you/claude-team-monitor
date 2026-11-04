@@ -151,13 +151,26 @@ pub fn open_release_page_command(url: String) -> bool {
     if !is_safe_release_url(&url) {
         return false;
     }
-    let mut cmd = Command::new("rundll32");
-    cmd.args(["url.dll,FileProtocolHandler", &url]);
     #[cfg(windows)]
-    {
+    let mut cmd = {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
+        let mut c = Command::new("rundll32");
+        c.args(["url.dll,FileProtocolHandler", &url]);
+        c.creation_flags(0x0800_0000);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = Command::new("open");
+        c.arg(&url);
+        c
+    };
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = Command::new("xdg-open");
+        c.arg(&url);
+        c
+    };
     cmd.spawn().is_ok()
 }
 

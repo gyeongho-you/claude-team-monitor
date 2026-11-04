@@ -59,7 +59,7 @@ fn hide_console_window(_cmd: &mut Command) {}
 static CLAUDE_BINARY_CHECK: OnceCell<()> = OnceCell::const_new();
 
 fn check_claude_binary_blocking() {
-    let mut cmd = Command::new("where");
+    let mut cmd = Command::new(if cfg!(windows) { "where" } else { "which" });
     cmd.arg("claude");
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -106,7 +106,7 @@ fn check_claude_binary_blocking() {
             }
             let stdout_text = String::from_utf8_lossy(&stdout_bytes);
             let Some(first_path) = stdout_text.lines().map(str::trim).find(|s| !s.is_empty()) else { return };
-            if !first_path.to_lowercase().ends_with(".exe") {
+            if cfg!(windows) && !first_path.to_lowercase().ends_with(".exe") {
                 eprintln!(
                     "[check_claude_binary_once] 경고: claude 실행 파일이 .exe가 아닙니다({first_path}). \
 Windows에서 .cmd/.bat 스크립트는 spawn 시 셸을 거쳐 실행되어 인자 이스케이프 방식이 달라질 수 있습니다 \
