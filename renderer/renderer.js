@@ -1244,6 +1244,108 @@ document.getElementById('ps-example-btn').addEventListener('click', () => {
   psInterp.value = 'node'; psFormat.value = 'markdown'; psScript.value = PS_EXAMPLE_NODE; clearPsTest();
   if (!psName.value.trim()) psName.value = '브랜치·워크트리';
 });
+const PS_EXAMPLE_GRAPH = String.raw`// git 그래프(HTML): 선택한 팀장 저장소의 최근 커밋과 브랜치 흐름을 그리고, 워크트리가 어느 커밋에 있는지 표시합니다(읽기만 하는 git 명령).
+const { execFileSync } = require('child_process');
+const LIMIT = 40; // 그릴 커밋 수(많을수록 느려집니다)
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const dir = process.env.CTM_LEAD_DIR;
+if (!dir) { console.log('<p style="color:var(--text-soft)">작업 탭에서 팀장을 선택하세요.</p>'); process.exit(0); }
+const git = (...a) => { try { return execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 32 * 1024 * 1024 }); } catch { return null; } };
+if ((git('rev-parse', '--is-inside-work-tree') || '').trim() !== 'true') { console.log('<p>git 저장소가 아닙니다: <code>' + esc(dir) + '</code></p>'); process.exit(0); }
+
+// 1) 커밋 목록(최신순, 모든 브랜치)
+const S = '\x1f';
+const commits = (git('log', '--all', '--date-order', '-n', String(LIMIT), '--format=%H' + S + '%P' + S + '%D' + S + '%s' + S + '%cr' + S + '%an') || '')
+  .split('\n').filter(Boolean).map(l => {
+    const [sha, parents, refs, subject, when, author] = l.split(S);
+    return { sha, parents: parents ? parents.split(' ') : [], refs: refs ? refs.split(', ').filter(Boolean) : [], subject, when, author };
+  });
+if (!commits.length) { console.log('<p>커밋이 없습니다.</p>'); process.exit(0); }
+
+// 2) 워크트리 목록
+const wts = []; let cur = null;
+for (const l of (git('worktree', 'list', '--porcelain') || '').split('\n')) {
+  if (l.startsWith('worktree ')) { cur = { path: l.slice(9), head: '', branch: '' }; wts.push(cur); }
+  else if (cur && l.startsWith('HEAD ')) cur.head = l.slice(5);
+  else if (cur && l.startsWith('branch ')) cur.branch = l.slice(7).replace('refs/heads/', '');
+  else if (cur && l === 'detached') cur.branch = '(분리된 HEAD)';
+}
+const norm = p => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+wts.forEach((w, i) => { w.name = i === 0 ? '메인' : w.path.split(/[\\/]/).filter(Boolean).pop(); w.mine = norm(w.path) === norm(dir); });
+
+// 3) 레인 배치: 칸(lane)마다 "다음에 기다리는 커밋"을 기억하며 위에서 아래로 내려간다
+const idx = new Map(commits.map((c, i) => [c.sha, i]));
+const lanes = [];
+const edges = [];
+commits.forEach((c, i) => {
+  let col = lanes.indexOf(c.sha);
+  if (col === -1) { col = lanes.indexOf(null); if (col === -1) { col = lanes.length; lanes.push(null); } }
+  c.row = i; c.col = col;
+  lanes.forEach((s, k) => { if (s === c.sha && k !== col) lanes[k] = null; }); // 같은 커밋을 기다리던 다른 칸은 여기서 합쳐지고 끝난다
+  lanes[col] = null;
+  c.parents.forEach((p, n) => {
+    let lane = lanes.indexOf(p);
+    if (lane === -1) {
+      lane = n === 0 ? col : lanes.indexOf(null);
+      if (lane === -1) { lane = lanes.length; lanes.push(null); }
+      lanes[lane] = p;
+    }
+    edges.push({ from: c, to: p, lane });
+  });
+});
+const maxLane = Math.max(...commits.map(c => c.col), ...edges.map(e => e.lane));
+
+// 4) 그리기
+const ROW = 24, COL = 14, PAD = 10;
+const COLORS = ['#58a6ff', '#3fb950', '#d29922', '#f778ba', '#a371f7', '#39c5cf', '#ff7b72', '#8b949e'];
+const GW = PAD * 2 + (maxLane + 1) * COL, H = commits.length * ROW;
+const X = l => PAD + l * COL, Y = r => ROW / 2 + r * ROW;
+const edgePath = e => {
+  const xa = X(e.from.col), ya = Y(e.from.row), xl = X(e.lane);
+  const pi = idx.get(e.to), hasP = pi !== undefined;
+  const yb = hasP ? Y(pi) : H, xb = hasP ? X(commits[pi].col) : xl;
+  let d = 'M' + xa + ' ' + ya, y = ya;
+  if (xl !== xa) { d += ' C' + xa + ' ' + (ya + ROW * 0.6) + ' ' + xl + ' ' + (ya + ROW * 0.4) + ' ' + xl + ' ' + (ya + ROW); y = ya + ROW; }
+  if (hasP && xl !== xb) {
+    const yc = Math.max(y, yb - ROW);
+    d += ' L' + xl + ' ' + yc + ' C' + xl + ' ' + (yc + ROW * 0.4) + ' ' + xb + ' ' + (yc + ROW * 0.6) + ' ' + xb + ' ' + yb;
+  } else d += ' L' + xb + ' ' + yb;
+  return d;
+};
+const lines = edges.map(e => '<path d="' + edgePath(e) + '" stroke="' + COLORS[e.lane % COLORS.length] + '" stroke-width="2" fill="none" stroke-linecap="round"' + (idx.has(e.to) ? '' : ' stroke-dasharray="2 3"') + '/>').join('');
+const dots = commits.map(c => '<circle cx="' + X(c.col) + '" cy="' + Y(c.row) + '" r="4.5" fill="' + COLORS[c.col % COLORS.length] + '" stroke="var(--bg)" stroke-width="1.5"><title>' + esc(c.sha.slice(0, 7) + ' ' + c.subject + '\n' + c.author + ' · ' + c.when) + '</title></circle>' + (c.parents.length > 1 ? '<circle cx="' + X(c.col) + '" cy="' + Y(c.row) + '" r="1.8" fill="var(--bg)"/>' : '')).join('');
+
+const badge = (txt, style) => '<span style="flex:none;border-radius:4px;padding:0 5px;font-size:10px;line-height:16px;' + style + '">' + esc(txt) + '</span>';
+const rows = commits.map(c => {
+  const refs = c.refs.map(r => {
+    if (r.startsWith('tag: ')) return badge('🏷 ' + r.slice(5), 'background:#d2992233;color:#d29922');
+    if (r.startsWith('HEAD -> ')) return badge('● ' + r.slice(8), 'background:var(--accent);color:var(--bg);font-weight:600');
+    if (r === 'HEAD') return badge('HEAD', 'background:var(--border-2);color:var(--text)');
+    if (r.includes('/')) return badge(r, 'border:1px solid var(--border-2);color:var(--text-soft)');
+    return badge(r, 'background:#3fb95033;color:#3fb950');
+  });
+  const shown = refs.slice(0, 3).join('') + (refs.length > 3 ? badge('+' + (refs.length - 3), 'color:var(--text-soft)') : '');
+  const here = wts.filter(w => w.head === c.sha).map(w => badge('📁 ' + w.name + (w.mine ? ' ◀ 여기' : ''), 'border:1px dashed var(--accent);color:var(--accent)' + (w.mine ? ';font-weight:600' : ''))).join('');
+  return '<div style="display:flex;align-items:center;gap:5px;height:' + ROW + 'px;font-size:11px;white-space:nowrap">' + here + shown +
+    '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis" title="' + esc(c.subject) + '">' + esc(c.subject) + '</span>' +
+    '<span style="flex:none;color:var(--text-soft);font-size:10px">' + esc(c.when) + '</span></div>';
+}).join('');
+
+const outside = wts.filter(w => !commits.some(c => c.sha === w.head));
+console.log('<div style="font-size:11px;color:var(--text-soft);margin-bottom:6px">' + esc(process.env.CTM_LEAD_LABEL || '팀장') + ' · 최근 커밋 ' + commits.length + '개 · 워크트리 ' + wts.length + '개 &nbsp; <span style="border:1px dashed var(--accent);color:var(--accent);border-radius:4px;padding:0 4px">📁 워크트리 위치</span></div>');
+console.log('<div style="position:relative;padding-left:' + GW + 'px">');
+console.log('<svg width="' + GW + '" height="' + H + '" viewBox="0 0 ' + GW + ' ' + H + '" style="position:absolute;left:0;top:0">' + lines + dots + '</svg>');
+console.log(rows + '</div>');
+if (outside.length) {
+  console.log('<div style="margin-top:8px;font-size:11px;color:var(--text-soft)">그래프 밖(더 오래된 커밋)에 있는 워크트리:</div>');
+  console.log(outside.map(w => '<div style="font-size:11px;padding:2px 0">📁 ' + esc(w.name) + ' <code style="color:var(--accent)">' + esc(w.branch || w.head.slice(0, 7)) + '</code></div>').join(''));
+}
+`;
+document.getElementById('ps-example-graph-btn').addEventListener('click', () => {
+  if (psScript.value.trim() && !confirm('입력해 둔 스크립트를 예제로 바꿉니다. 계속할까요?')) return;
+  psInterp.value = 'node'; psFormat.value = 'html'; psTimeout.value = 15000; psScript.value = PS_EXAMPLE_GRAPH; clearPsTest();
+  if (!psName.value.trim()) psName.value = '깃 그래프';
+});
 document.getElementById('ps-example-html-btn').addEventListener('click', () => {
   if (psScript.value.trim() && !confirm('입력해 둔 스크립트를 예제로 바꿉니다. 계속할까요?')) return;
   psInterp.value = 'node'; psFormat.value = 'html'; psScript.value = PS_EXAMPLE_HTML; clearPsTest();
