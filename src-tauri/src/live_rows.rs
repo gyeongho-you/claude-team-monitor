@@ -640,6 +640,10 @@ async fn get_live_session_rows_inner_impl() -> Vec<SessionRow> {
         });
     }
 
+    // 오른쪽 패널의 AI 슬롯: 일을 마친 팀장의 기록이 바뀌었으면 가볍게 갱신한다(조건이 안 맞으면 바로 끝난다). 테스트 빌드에서는 실제 모델을 부르지 않게 뺀다.
+    #[cfg(not(test))]
+    crate::side_panel::on_rows_tick(&live_rows);
+
     // runStallWatchdog(main.ts)와 동일하게 fire-and-forget으로 건다 — Haiku 호출이 몇 초~몇십 초
     // 걸릴 수 있어서 이 함수(3초 폴링마다 불림)의 반환을 막으면 안 된다. 내부적으로 원자적
     // in-flight 플래그로 중복 실행만 막는다(stall_watchdog.rs 참고).

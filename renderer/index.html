@@ -318,6 +318,52 @@
         </div>
       </div>
 
+      <div class="settings-card" id="panel-card">
+        <h2>오른쪽 패널</h2>
+        <p class="form-hint">작업 탭 오른쪽에 내가 정한 내용을 띄웁니다(정적인 글만 표시). 슬롯마다 채우는 방법을 고릅니다 — 자동 수집은 앱이 대화 기록에서 모으고, 팀장이 채움은 내가 적은 지침을 모든 팀장이 따르고, AI가 정리는 팀장이 일을 마칠 때마다 선택한 모델이 내가 적은 요청대로 갱신합니다.</p>
+        <label class="settings-check"><input type="checkbox" id="panel-enabled-input" /> 오른쪽 패널 표시</label>
+        <div id="panel-slot-list"></div>
+        <div class="skill-form" id="panel-form">
+          <input id="ps-name" type="text" maxlength="30" placeholder="슬롯 이름 (예: 보고서)" />
+          <select id="ps-mode">
+            <option value="auto">자동 수집 — 앱이 대화 기록에서 모음</option>
+            <option value="lead">팀장이 채움 — 내 지침을 팀장이 따름</option>
+            <option value="ai">AI가 정리 — 모델이 내 요청대로 갱신</option>
+            <option value="manual">직접 쓰기</option>
+          </select>
+          <div class="ps-group" data-mode="auto">
+            <select id="ps-preset">
+              <option value="artifact-reports">Artifact 보고서 링크</option>
+              <option value="github-pr">GitHub PR 링크</option>
+            </select>
+            <select id="ps-scope">
+              <option value="all">모든 팀장</option>
+              <option value="selected">선택한 팀장만</option>
+            </select>
+          </div>
+          <div class="ps-group" data-mode="lead">
+            <textarea id="ps-lead-instruction" placeholder="팀장에게 줄 지침 — 예: 보고서를 만들면 날짜·제목·링크를 한 줄로 이 패널 파일에 추가해라"></textarea>
+            <p class="form-hint">모든 팀장에게 항상 적용되는 지침으로 들어갑니다(새 팀장은 첫 지시문, 떠 있는 팀장은 알림, 히스토리 팀장은 다시 이어질 때). 팀장이 따르는 방식이라 빠뜨릴 수 있습니다.</p>
+          </div>
+          <div class="ps-group" data-mode="ai">
+            <textarea id="ps-ai-instruction" placeholder="AI에게 줄 요청 — 예: 보고서 링크를 날짜순 표(제목·팀장·링크·한 줄 설명)로 정리해"></textarea>
+            <select id="ps-model">
+              <option value="haiku">Haiku — 거의 무료(정확도 낮음)</option>
+              <option value="sonnet" selected>Sonnet — 기본(권장)</option>
+              <option value="opus">Opus — 정확, 호출당 약 2센트</option>
+              <option value="fable">Fable — 가장 정확, 호출당 약 0.2달러</option>
+            </select>
+            <label class="settings-check"><input type="checkbox" id="ps-auto-update" /> 팀장이 일을 마칠 때마다 자동으로 갱신</label>
+            <p class="form-hint" id="ps-cost-hint"></p>
+          </div>
+          <div class="settings-actions">
+            <button id="ps-save-btn">슬롯 추가</button>
+            <button id="ps-cancel-btn" hidden>수정 취소</button>
+          </div>
+          <div id="ps-status" class="form-hint"></div>
+        </div>
+      </div>
+
       <div class="settings-card">
         <h2>앱 정보 · 업데이트</h2>
         <div class="info-grid">
@@ -418,6 +464,23 @@
    </div>
   </div>
 
+  <aside id="side-panel" hidden>
+    <div class="sp-head">
+      <div id="sp-tabs" class="sp-tabs"></div>
+      <button id="sp-refresh-btn" class="sp-icon" title="새로고침">⟳</button>
+      <button id="sp-edit-btn" class="sp-icon" title="내용 고치기" hidden>✎</button>
+      <button id="sp-collapse-btn" class="sp-icon" title="패널 접기">▸</button>
+    </div>
+    <div id="sp-meta" class="sp-meta"></div>
+    <div id="sp-body" class="sp-body md"></div>
+    <div id="sp-editor" class="sp-editor" hidden>
+      <textarea id="sp-editor-text"></textarea>
+      <div class="sp-editor-actions"><button id="sp-editor-save">저장</button><button id="sp-editor-cancel">취소</button></div>
+    </div>
+  </aside>
+  <button id="sp-expand-btn" class="sp-expand" hidden title="패널 열기">◂ 패널</button>
+
+  <script src="lib/markdown.js"></script>
   <script src="lib/status.js"></script>
   <script src="lib/cleanupGrouping.js"></script>
   <script src="lib/chatDelivery.js"></script>

@@ -761,6 +761,225 @@ function renderLeadCard(row) {
     </div>
   `;
 }
+// ---------------- 오른쪽 사용자 패널 ----------------
+// 설정(앱 설정 탭의 "오른쪽 패널")에서 슬롯을 만들면 작업 탭 오른쪽에 정적 마크다운으로 띄운다 — 동작 설명은 src-tauri/src/side_panel.rs 맨 위 참고.
+const spEl = document.getElementById('side-panel');
+const spTabsEl = document.getElementById('sp-tabs');
+const spBodyEl = document.getElementById('sp-body');
+const spMetaEl = document.getElementById('sp-meta');
+const spRefreshBtn = document.getElementById('sp-refresh-btn');
+const spEditBtn = document.getElementById('sp-edit-btn');
+const spCollapseBtn = document.getElementById('sp-collapse-btn');
+const spExpandBtn = document.getElementById('sp-expand-btn');
+const spEditorEl = document.getElementById('sp-editor');
+const spEditorText = document.getElementById('sp-editor-text');
+const PANEL_COLLAPSED_KEY = 'ctm.panelCollapsed';
+let panelConfig = { enabled: false, slots: [] };
+let panelActiveId = null;
+let panelContent = null;
+let panelEditing = false;
+let panelBusy = false;
+let panelLastKey = '';
+const PANEL_MODE_LABELS = { auto: '자동 수집', lead: '팀장이 채움', ai: 'AI가 정리', manual: '직접 쓰기' };
+
+function panelCollapsed() {
+  try {
+    const v = localStorage.getItem(PANEL_COLLAPSED_KEY);
+    return v === null ? window.innerWidth < 1500 : v === '1'; // 좁은 창에서는 처음엔 접어 둔다
+  } catch { return false; }
+}
+function setPanelCollapsed(v) { try { localStorage.setItem(PANEL_COLLAPSED_KEY, v ? '1' : '0'); } catch { /* 저장 안 돼도 이번 화면에서는 적용 */ } renderPanelChrome(); refreshPanelContent(true); }
+function enabledPanelSlots() { return (panelConfig.slots || []).filter(s => s.enabled); }
+function activePanelSlot() { return enabledPanelSlots().find(s => s.id === panelActiveId) || null; }
+function workTabActive() { return document.getElementById('work-tab').classList.contains('active'); }
+
+function renderPanelChrome() {
+  const slots = enabledPanelSlots();
+  if (!slots.some(s => s.id === panelActiveId)) panelActiveId = slots.length ? slots[0].id : null;
+  const visible = panelConfig.enabled && slots.length > 0 && workTabActive();
+  const collapsed = panelCollapsed();
+  spEl.hidden = !(visible && !collapsed);
+  spExpandBtn.hidden = !(visible && collapsed);
+  document.body.classList.toggle('panel-open', visible && !collapsed);
+  spTabsEl.innerHTML = slots.map(s => `<button class="sp-tab ${s.id === panelActiveId ? 'active' : ''}" data-sp-tab="${escapeHtml(s.id)}">${escapeHtml(s.name)}</button>`).join('');
+  const slot = activePanelSlot();
+  spEditBtn.hidden = !slot || slot.mode === 'auto';
+  spRefreshBtn.title = slot && slot.mode === 'ai' ? 'AI로 지금 갱신' : '새로고침';
+}
+
+async function refreshPanelContent(force) {
+  const slot = activePanelSlot();
+  if (!slot || spEl.hidden || panelEditing) return;
+  const leadId = slot.mode === 'auto' && slot.scope === 'selected' ? selectedLeadId : null;
+  let c;
+  try { c = await window.api.getPanelContent(slot.id, leadId); } catch (err) { spMetaEl.textContent = `불러오지 못했습니다: ${errMsg(err)}`; return; }
+  const key = `${slot.id}|${leadId || ''}|${c.updatedAt || ''}|${c.markdown.length}|${c.markdown.slice(0, 64)}`;
+  panelContent = c;
+  if (!force && key === panelLastKey) return;
+  panelLastKey = key;
+  spBodyEl.innerHTML = c.markdown.trim() ? renderMarkdown(c.markdown) : '<p class="empty-hint">아직 내용이 없습니다.</p>';
+  const when = c.updatedAt ? ` · ${formatAgo(c.updatedAt)} 갱신` : '';
+  spMetaEl.textContent = `${PANEL_MODE_LABELS[slot.mode] || slot.mode} · ${c.note}${when}`;
+}
+
+async function loadPanelConfig() {
+  try { panelConfig = await window.api.getPanelConfig(); } catch (err) { console.error('패널 설정 조회 실패:', err); return; }
+  renderPanelChrome();
+  renderPanelSettings();
+  refreshPanelContent(true);
+}
+
+spTabsEl.addEventListener('click', e => {
+  const t = e.target.closest('[data-sp-tab]');
+  if (!t) return;
+  panelActiveId = t.dataset.spTab; panelEditing = false; spEditorEl.hidden = true; spBodyEl.hidden = false; panelLastKey = '';
+  renderPanelChrome(); refreshPanelContent(true);
+});
+spBodyEl.addEventListener('click', async e => {
+  const a = e.target.closest('a[data-url]');
+  if (!a) return;
+  e.preventDefault();
+  try { await window.api.openExternalUrl(a.dataset.url); } catch (err) { console.error('링크 열기 실패:', err); }
+});
+spCollapseBtn.addEventListener('click', () => setPanelCollapsed(true));
+spExpandBtn.addEventListener('click', () => setPanelCollapsed(false));
+spRefreshBtn.addEventListener('click', async () => {
+  const slot = activePanelSlot();
+  if (!slot || panelBusy) return;
+  if (slot.mode !== 'ai') { refreshPanelContent(true); return; }
+  panelBusy = true; spRefreshBtn.disabled = true; spMetaEl.textContent = 'AI가 정리하는 중입니다(최대 2분)...';
+  try { await window.api.refreshPanelSlot(slot.id); panelLastKey = ''; } catch (err) { spMetaEl.textContent = errMsg(err); }
+  finally { panelBusy = false; spRefreshBtn.disabled = false; await refreshPanelContent(true); }
+});
+spEditBtn.addEventListener('click', () => {
+  const slot = activePanelSlot();
+  if (!slot) return;
+  panelEditing = true; spEditorText.value = panelContent ? panelContent.markdown : '';
+  spEditorEl.hidden = false; spBodyEl.hidden = true; spEditorText.focus();
+});
+document.getElementById('sp-editor-cancel').addEventListener('click', () => { panelEditing = false; spEditorEl.hidden = true; spBodyEl.hidden = false; refreshPanelContent(true); });
+document.getElementById('sp-editor-save').addEventListener('click', async () => {
+  const slot = activePanelSlot();
+  if (!slot) return;
+  try { await window.api.savePanelContent(slot.id, spEditorText.value); } catch (err) { spMetaEl.textContent = errMsg(err); return; }
+  panelEditing = false; spEditorEl.hidden = true; spBodyEl.hidden = false; panelLastKey = ''; refreshPanelContent(true);
+});
+document.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => setTimeout(() => { renderPanelChrome(); refreshPanelContent(true); }, 0)));
+window.addEventListener('resize', () => renderPanelChrome());
+setInterval(() => { if (!spEl.hidden) refreshPanelContent(false); }, 3000);
+
+// ---- 설정 화면(앱 설정 탭 > 오른쪽 패널) ----
+const panelEnabledEl = document.getElementById('panel-enabled-input');
+const panelSlotListEl = document.getElementById('panel-slot-list');
+const psName = document.getElementById('ps-name');
+const psMode = document.getElementById('ps-mode');
+const psPreset = document.getElementById('ps-preset');
+const psScope = document.getElementById('ps-scope');
+const psLeadInstruction = document.getElementById('ps-lead-instruction');
+const psAiInstruction = document.getElementById('ps-ai-instruction');
+const psModel = document.getElementById('ps-model');
+const psAutoUpdate = document.getElementById('ps-auto-update');
+const psCostHint = document.getElementById('ps-cost-hint');
+const psSaveBtn = document.getElementById('ps-save-btn');
+const psCancelBtn = document.getElementById('ps-cancel-btn');
+const psStatus = document.getElementById('ps-status');
+let psEditingId = null;
+const PS_MODEL_NAMES = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus', fable: 'Fable' };
+
+function updatePsFormVisibility() {
+  document.querySelectorAll('#panel-form .ps-group').forEach(g => g.classList.toggle('show', g.dataset.mode === psMode.value));
+  const costly = psModel.value === 'fable' || psModel.value === 'opus';
+  psCostHint.textContent = psAutoUpdate.checked && costly
+    ? `⚠ 자동 갱신을 켜면 팀장이 일을 마칠 때마다 ${PS_MODEL_NAMES[psModel.value]}가 호출됩니다(${psModel.value === 'fable' ? '호출당 약 0.2달러' : '호출당 약 2센트'}). 하루에 여러 번 마치면 비용이 커질 수 있습니다.`
+    : '자동 갱신을 끄면 패널의 ⟳ 버튼을 눌렀을 때만 호출됩니다.';
+}
+psMode.addEventListener('change', updatePsFormVisibility);
+psModel.addEventListener('change', updatePsFormVisibility);
+psAutoUpdate.addEventListener('change', updatePsFormVisibility);
+
+function renderPanelSettings() {
+  panelEnabledEl.checked = !!panelConfig.enabled;
+  panelSlotListEl.innerHTML = (panelConfig.slots || []).map(s => {
+    const extra = s.mode === 'ai' ? ` · ${PS_MODEL_NAMES[s.aiModel] || s.aiModel}${s.autoUpdate ? ' · 자동' : ''}` : s.mode === 'auto' ? ` · ${s.preset === 'github-pr' ? 'GitHub PR' : 'Artifact 보고서'}${s.scope === 'selected' ? ' · 선택한 팀장' : ''}` : '';
+    return `<div class="skill-item ${s.enabled ? '' : 'off'}">
+      <label><input type="checkbox" data-ps-toggle="${escapeHtml(s.id)}" ${s.enabled ? 'checked' : ''} /> ${escapeHtml(s.name)}</label>
+      <span class="skill-desc">${escapeHtml(PANEL_MODE_LABELS[s.mode] || s.mode)}${escapeHtml(extra)}</span>
+      <button data-ps-edit="${escapeHtml(s.id)}">수정</button>
+      <button data-ps-del="${escapeHtml(s.id)}">삭제</button>
+    </div>`;
+  }).join('');
+  updatePsFormVisibility();
+}
+
+function resetPsForm() {
+  psEditingId = null;
+  psName.value = ''; psMode.value = 'auto'; psPreset.value = 'artifact-reports'; psScope.value = 'all';
+  psLeadInstruction.value = ''; psAiInstruction.value = ''; psModel.value = 'sonnet'; psAutoUpdate.checked = false;
+  psSaveBtn.textContent = '슬롯 추가'; psCancelBtn.hidden = true;
+  updatePsFormVisibility();
+}
+
+function psInputFromForm(enabled) {
+  const mode = psMode.value;
+  return {
+    id: psEditingId, name: psName.value, mode, scope: psScope.value, preset: psPreset.value,
+    instruction: mode === 'lead' ? psLeadInstruction.value : mode === 'ai' ? psAiInstruction.value : '',
+    autoUpdate: mode === 'ai' && psAutoUpdate.checked, aiModel: psModel.value, enabled,
+  };
+}
+
+panelEnabledEl.addEventListener('change', async () => {
+  try { panelConfig = await window.api.setPanelEnabled(panelEnabledEl.checked); renderPanelChrome(); refreshPanelContent(true); psStatus.textContent = ''; }
+  catch (err) { psStatus.textContent = errMsg(err); panelEnabledEl.checked = !panelEnabledEl.checked; }
+});
+psSaveBtn.addEventListener('click', async () => {
+  psSaveBtn.disabled = true; psStatus.textContent = '저장하는 중...';
+  try {
+    const existing = psEditingId ? (panelConfig.slots || []).find(s => s.id === psEditingId) : null;
+    panelConfig = await window.api.savePanelSlot(psInputFromForm(existing ? existing.enabled : true));
+    resetPsForm(); renderPanelChrome(); renderPanelSettings(); panelLastKey = ''; refreshPanelContent(true);
+    psStatus.textContent = '저장했습니다.'; setTimeout(() => { psStatus.textContent = ''; }, 3000);
+  } catch (err) { psStatus.textContent = errMsg(err); }
+  finally { psSaveBtn.disabled = false; }
+});
+psCancelBtn.addEventListener('click', () => { resetPsForm(); psStatus.textContent = ''; });
+panelSlotListEl.addEventListener('click', async e => {
+  const edit = e.target.closest('[data-ps-edit]');
+  if (edit) {
+    const s = (panelConfig.slots || []).find(x => x.id === edit.dataset.psEdit);
+    if (!s) return;
+    psEditingId = s.id; psName.value = s.name; psMode.value = s.mode; psPreset.value = s.preset; psScope.value = s.scope;
+    psLeadInstruction.value = s.mode === 'lead' ? s.instruction : ''; psAiInstruction.value = s.mode === 'ai' ? s.instruction : '';
+    psModel.value = s.aiModel; psAutoUpdate.checked = !!s.autoUpdate;
+    psSaveBtn.textContent = '수정 저장'; psCancelBtn.hidden = false; updatePsFormVisibility();
+    psStatus.textContent = `"${s.name}" 수정 중`;
+    return;
+  }
+  const del = e.target.closest('[data-ps-del]');
+  if (del) {
+    if (!del.classList.contains('confirm')) {
+      del.classList.add('confirm'); del.textContent = '정말 삭제';
+      setTimeout(() => { del.classList.remove('confirm'); del.textContent = '삭제'; }, 3000);
+      return;
+    }
+    try { panelConfig = await window.api.deletePanelSlot(del.dataset.psDel); renderPanelChrome(); renderPanelSettings(); psStatus.textContent = '삭제했습니다.'; }
+    catch (err) { psStatus.textContent = errMsg(err); }
+  }
+});
+panelSlotListEl.addEventListener('change', async e => {
+  const t = e.target.closest('[data-ps-toggle]');
+  if (!t) return;
+  const s = (panelConfig.slots || []).find(x => x.id === t.dataset.psToggle);
+  if (!s) return;
+  try {
+    panelConfig = await window.api.savePanelSlot({ id: s.id, name: s.name, mode: s.mode, scope: s.scope, preset: s.preset, instruction: s.instruction, autoUpdate: s.autoUpdate, aiModel: s.aiModel, enabled: t.checked });
+    renderPanelChrome(); renderPanelSettings(); panelLastKey = ''; refreshPanelContent(true);
+  } catch (err) { psStatus.textContent = errMsg(err); t.checked = !t.checked; }
+});
+document.querySelector('.tab-btn[data-tab="app-settings"]').addEventListener('click', loadPanelConfig);
+resetPsForm();
+loadPanelConfig();
+
 // ---------------- 공통 스킬(앱 설정 탭) ----------------
 // 등록한 스킬은 모든 팀장이 쓴다(~/.claude/skills에 설치 + 팀장에게 안내) — 자세한 동작은 src-tauri/src/app_skills.rs 맨 위 설명 참고.
 const skillsListEl = document.getElementById('skills-list');

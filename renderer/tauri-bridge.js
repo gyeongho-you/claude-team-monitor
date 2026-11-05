@@ -144,6 +144,14 @@
     return invoke('restart_lead_command', { leadId, instruction });
   }
 
+  async function getPanelConfig() { return invoke('get_panel_config_command'); }
+  async function setPanelEnabled(enabled) { return invoke('set_panel_enabled_command', { enabled }); }
+  async function savePanelSlot(input) { return invoke('save_panel_slot_command', { input }); }
+  async function deletePanelSlot(id) { return invoke('delete_panel_slot_command', { id }); }
+  async function getPanelContent(slotId, leadId) { return invoke('get_panel_content_command', { slotId, leadId: leadId || null }); }
+  async function savePanelContent(slotId, markdown) { return invoke('save_panel_content_command', { slotId, markdown }); }
+  async function refreshPanelSlot(slotId) { return invoke('refresh_panel_slot_command', { slotId }); }
+  async function openExternalUrl(url) { return invoke('open_external_url_command', { url }); }
   async function getAppSkills() { return invoke('get_app_skills_command'); }
   async function addAppSkill(name, description, content) { return invoke('add_app_skill_command', { name, description, content }); }
   async function updateAppSkill(id, description, content) { return invoke('update_app_skill_command', { id, description, content }); }
@@ -347,6 +355,14 @@
     restartLead,
     emergencyStopLead,
     changeSessionModel,
+    getPanelConfig,
+    setPanelEnabled,
+    savePanelSlot,
+    deletePanelSlot,
+    getPanelContent,
+    savePanelContent,
+    refreshPanelSlot,
+    openExternalUrl,
     getAppSkills,
     addAppSkill,
     updateAppSkill,

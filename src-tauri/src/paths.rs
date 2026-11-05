@@ -84,6 +84,11 @@ pub fn member_templates_path() -> PathBuf {
     app_data_dir().join("memberTemplates.json")
 }
 
+// 오른쪽 사용자 패널 설정(side_panel.rs).
+pub fn side_panel_path() -> PathBuf {
+    app_data_dir().join("sidePanel.json")
+}
+
 // 앱 설정에서 등록한 공통 스킬 목록(app_skills.rs).
 pub fn app_skills_path() -> PathBuf {
     app_data_dir().join("appSkills.json")

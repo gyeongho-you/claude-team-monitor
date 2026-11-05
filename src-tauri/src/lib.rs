@@ -28,6 +28,7 @@ mod paths;
 mod resume;
 mod session_model;
 mod session_registry;
+mod side_panel;
 mod settings;
 mod stall_watchdog;
 mod timing;
@@ -85,6 +86,14 @@ pub fn run() {
       daemon_state::get_pending_choice_command,
       daemon_state::get_chat_unresolvable_detail_command,
       session_model::change_session_model_command,
+      side_panel::get_panel_config_command,
+      side_panel::set_panel_enabled_command,
+      side_panel::save_panel_slot_command,
+      side_panel::delete_panel_slot_command,
+      side_panel::get_panel_content_command,
+      side_panel::save_panel_content_command,
+      side_panel::refresh_panel_slot_command,
+      side_panel::open_external_url_command,
       app_skills::get_app_skills_command,
       app_skills::add_app_skill_command,
       app_skills::update_app_skill_command,
