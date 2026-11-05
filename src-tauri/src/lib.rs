@@ -99,6 +99,8 @@ pub fn run() {
       side_panel::generate_panel_script_command,
       side_panel::get_panel_script_reference_command,
       side_panel::fix_panel_script_command,
+      side_panel::get_panel_script_errors_command,
+      side_panel::clear_panel_script_errors_command,
       app_skills::get_app_skills_command,
       app_skills::add_app_skill_command,
       app_skills::update_app_skill_command,

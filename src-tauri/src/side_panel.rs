@@ -796,6 +796,10 @@ pub async fn delete_panel_slot_command(id: String) -> Result<PanelConfig, String
     .await?;
     if is_safe_id(&removed) {
         let _ = std::fs::remove_file(content_path(&panel_dir(), &removed));
+        // 스크립트 슬롯이 실행하려고 쓴 파일도 같이 지운다(실행 환경별 확장자)
+        for ext in ["js", "py", "ps1", "sh"] {
+            let _ = std::fs::remove_file(panel_dir().join("scripts").join(format!("{removed}.{ext}")));
+        }
     }
     Ok(cfg)
 }
@@ -836,11 +840,15 @@ async fn script_content(slot: PanelSlot, lead_id: Option<String>, force: bool) -
         return Ok(PanelContent { markdown: md, updated_at: at, mode: slot.mode, note, items: Vec::new() });
     }
     let (id, interpreter, script, timeout_ms) = (slot.id.clone(), slot.interpreter.clone(), slot.script.clone(), slot.timeout_ms);
-    let md = tokio::task::spawn_blocking(move || crate::panel_script::run_script(&panel_dir().join("scripts"), &id, &interpreter, &script, timeout_ms, lead.as_ref()))
+    let outcome = tokio::task::spawn_blocking(move || crate::panel_script::run_script_outcome(&panel_dir().join("scripts"), &id, &interpreter, &script, timeout_ms, lead.as_ref(), false))
         .await
         .map_err(|e| e.to_string());
     script_running().lock().unwrap_or_else(|e| e.into_inner()).remove(&slot.id);
-    let md = md?;
+    let outcome = outcome?;
+    if let Some(problem) = &outcome.problem {
+        crate::panel_script::record_error_at(&script_errors_path(), &slot.id, &slot.name, "panel", problem, now_ms());
+    }
+    let md = outcome.markdown;
     let at = now_ms();
     script_cache().lock().unwrap_or_else(|e| e.into_inner()).insert(slot.id.clone(), ScriptCacheEntry { key, at: std::time::Instant::now(), updated_at: at, markdown: md.clone() });
     Ok(PanelContent { markdown: md, updated_at: Some(at), mode: slot.mode, note, items: Vec::new() })
@@ -859,7 +867,26 @@ pub async fn test_panel_script_command(interpreter: String, script: String, time
         return Err(format!("제한 시간은 {}~{}ms 사이로 입력하세요.", crate::panel_script::MIN_TIMEOUT_MS, crate::panel_script::MAX_TIMEOUT_MS));
     }
     let lead = crate::panel_script::lead_by_id(&load_leads(), lead_id.as_deref());
-    tokio::task::spawn_blocking(move || crate::panel_script::run_script_with(&panel_dir().join("scripts"), "_test", &interpreter, &script, timeout_ms, lead.as_ref(), true)).await.map_err(|e| e.to_string())
+    let outcome = tokio::task::spawn_blocking(move || crate::panel_script::run_script_outcome(&panel_dir().join("scripts"), "_test", &interpreter, &script, timeout_ms, lead.as_ref(), true)).await.map_err(|e| e.to_string())?;
+    if let Some(problem) = &outcome.problem {
+        crate::panel_script::record_error_at(&script_errors_path(), "_test", "(시험 실행)", "test", problem, now_ms());
+    }
+    Ok(outcome.markdown)
+}
+
+fn script_errors_path() -> PathBuf {
+    panel_dir().join("script-errors.json")
+}
+
+/// 최근 스크립트 에러(최신순) — 설정 화면의 "최근 에러 보기".
+#[tauri::command]
+pub fn get_panel_script_errors_command() -> Vec<crate::panel_script::ScriptErrorEntry> {
+    crate::panel_script::load_errors_from(&script_errors_path())
+}
+
+#[tauri::command]
+pub fn clear_panel_script_errors_command() {
+    crate::panel_script::clear_errors_at(&script_errors_path());
 }
 
 /// 스크립트 작성 안내(앱이 주는 정보·출력 형식·제한) — 설정 화면에 보여 주고, AI 요청문에도 같은 글이 들어간다.

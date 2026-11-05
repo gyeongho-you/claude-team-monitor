@@ -1162,7 +1162,26 @@ document.getElementById('ps-test-btn').addEventListener('click', async e => {
   btn.disabled = true; psTestOut.hidden = false; psTestOut.textContent = '실행하는 중...';
   try { psTestOut.textContent = await window.api.testPanelScript(psInterp.value, psScript.value, Number(psTimeout.value) || PS_DEFAULT_TIMEOUT_MS, selectedLeadId); }
   catch (err) { psTestOut.textContent = errMsg(err); }
-  finally { btn.disabled = false; }
+  finally { btn.disabled = false; if (document.getElementById('ps-errors').open) loadPsErrors(); }
+});
+// 최근 에러 보기 — 화면에서 사라진 스크립트 오류를 다시 볼 수 있게 백엔드가 파일에 남긴 기록을 보여 준다.
+const PS_ERR_KIND = { spawn: '실행 실패', timeout: '시간 초과', exit: '비정상 종료', stderr: '오류 출력(정상 종료)' };
+async function loadPsErrors() {
+  const body = document.getElementById('ps-errors-body');
+  let list;
+  try { list = await window.api.getPanelScriptErrors(); } catch (err) { body.textContent = `불러오지 못했습니다: ${errMsg(err)}`; return; }
+  document.getElementById('ps-errors-summary').textContent = `🕘 최근 에러 보기${list.length ? ` (${list.length})` : ''}`;
+  if (!list.length) { body.innerHTML = '<p class="empty-hint">기록된 에러가 없습니다.</p>'; return; }
+  const t = ms => new Date(ms).toLocaleString();
+  body.innerHTML = list.map(e => `<div class="ps-err ${e.kind === 'stderr' ? 'warn' : ''}">
+    <div class="ps-err-head"><strong>${escapeHtml(e.slotName)}</strong><span>${escapeHtml(PS_ERR_KIND[e.kind] || e.kind)}</span><span>${e.source === 'test' ? '시험 실행' : '패널'}</span><span>${e.count > 1 ? `${e.count}회 · ${escapeHtml(t(e.at))} ~ ${escapeHtml(t(e.lastAt))}` : escapeHtml(t(e.at))}</span></div>
+    <pre>${escapeHtml(e.detail)}</pre></div>`).join('');
+}
+document.getElementById('ps-errors').addEventListener('toggle', e => { if (e.target.open) loadPsErrors(); });
+document.getElementById('ps-errors-refresh').addEventListener('click', loadPsErrors);
+document.getElementById('ps-errors-clear').addEventListener('click', async () => {
+  try { await window.api.clearPanelScriptErrors(); } catch (err) { psStatus.textContent = errMsg(err); }
+  loadPsErrors();
 });
 document.getElementById('ps-fix-btn').addEventListener('click', async e => {
   const btn = e.currentTarget;

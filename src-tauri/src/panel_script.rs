@@ -136,20 +136,42 @@ fn find_lead<'a>(leads: &'a [LeadRecord], id: &str) -> Option<&'a LeadRecord> {
     leads.iter().find(|l| l.id == id || l.internal_id.as_deref() == Some(id))
 }
 
+/// 실행에서 생긴 문제(최근 에러 보기에 기록된다). kind: "spawn"(실행 못 함) | "timeout"(시간 초과) | "exit"(비정상 종료) | "stderr"(정상 종료했지만 오류 출력이 있었음)
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ScriptProblem {
+    pub kind: &'static str,
+    pub detail: String,
+}
+
+pub(crate) struct Outcome {
+    pub markdown: String,
+    pub problem: Option<ScriptProblem>,
+}
+
+fn fail(markdown: String, kind: &'static str, detail: String) -> Outcome {
+    Outcome { markdown, problem: Some(ScriptProblem { kind, detail }) }
+}
+
 /// 스크립트를 한 번 실행해서 패널에 보일 마크다운을 돌려준다(실패·시간 초과도 읽을 수 있는 마크다운으로 돌려준다).
+#[cfg(test)]
 pub(crate) fn run_script(scripts_dir: &Path, file_stem: &str, interpreter: &str, script: &str, timeout_ms: u64, lead: Option<&LeadRecord>) -> String {
-    run_script_with(scripts_dir, file_stem, interpreter, script, timeout_ms, lead, false)
+    run_script_outcome(scripts_dir, file_stem, interpreter, script, timeout_ms, lead, false).markdown
 }
 
 /// show_stderr: 정상 종료(종료 코드 0)여도 표준 오류 출력을 결과 끝에 붙인다 — 설정 화면의 시험 실행용(패널에서는 오류가 아니면 숨긴다).
+#[cfg(test)]
 pub(crate) fn run_script_with(scripts_dir: &Path, file_stem: &str, interpreter: &str, script: &str, timeout_ms: u64, lead: Option<&LeadRecord>, show_stderr: bool) -> String {
-    let Some((program, ext, pre_args)) = interpreter_spec(interpreter) else { return "**알 수 없는 실행 환경입니다.**".to_string() };
+    run_script_outcome(scripts_dir, file_stem, interpreter, script, timeout_ms, lead, show_stderr).markdown
+}
+
+pub(crate) fn run_script_outcome(scripts_dir: &Path, file_stem: &str, interpreter: &str, script: &str, timeout_ms: u64, lead: Option<&LeadRecord>, show_stderr: bool) -> Outcome {
+    let Some((program, ext, pre_args)) = interpreter_spec(interpreter) else { return fail("**알 수 없는 실행 환경입니다.**".to_string(), "spawn", format!("알 수 없는 실행 환경: {interpreter}")) };
     if let Err(e) = std::fs::create_dir_all(scripts_dir) {
-        return format!("**스크립트 폴더를 만들지 못했습니다:** {e}");
+        return fail(format!("**스크립트 폴더를 만들지 못했습니다:** {e}"), "spawn", format!("스크립트 폴더를 만들지 못했습니다: {e}"));
     }
     let file: PathBuf = scripts_dir.join(format!("{file_stem}.{ext}"));
     if let Err(e) = std::fs::write(&file, script_file_text(interpreter, script)) {
-        return format!("**스크립트 파일을 쓰지 못했습니다:** {e}");
+        return fail(format!("**스크립트 파일을 쓰지 못했습니다:** {e}"), "spawn", format!("스크립트 파일을 쓰지 못했습니다: {e}"));
     }
     let mut cmd = Command::new(program);
     cmd.args(&pre_args).arg(&file);
@@ -167,9 +189,9 @@ pub(crate) fn run_script_with(scripts_dir: &Path, file_stem: &str, interpreter: 
     }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return format!("**{program}을(를) 실행하지 못했습니다:** {e}\n\n이 PC에 {program}이(가) 설치돼 있고 PATH에 있어야 합니다."),
+        Err(e) => return fail(format!("**{program}을(를) 실행하지 못했습니다:** {e}\n\n이 PC에 {program}이(가) 설치돼 있고 PATH에 있어야 합니다."), "spawn", format!("{program}을(를) 실행하지 못했습니다: {e}")),
     };
-    let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else { return "**출력을 열지 못했습니다.**".to_string() };
+    let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else { return fail("**출력을 열지 못했습니다.**".to_string(), "spawn", "출력을 열지 못했습니다".to_string()) };
     let out_reader = std::thread::spawn(move || {
         let mut b = Vec::new();
         let _ = stdout.read_to_end(&mut b);
@@ -185,7 +207,11 @@ pub(crate) fn run_script_with(scripts_dir: &Path, file_stem: &str, interpreter: 
         _ => {
             let _ = child.kill();
             let _ = child.wait();
-            return format!("**제한 시간({timeout_ms}ms)을 넘어 중단했습니다.**\n\n이 슬롯의 설정에서 제한 시간(ms)을 늘릴 수 있습니다.");
+            return fail(
+                format!("**제한 시간({timeout_ms}ms)을 넘어 중단했습니다.**\n\n이 슬롯의 설정에서 제한 시간(ms)을 늘릴 수 있습니다."),
+                "timeout",
+                format!("제한 시간({timeout_ms}ms)을 넘어 중단했습니다"),
+            );
         }
     };
     let out = String::from_utf8_lossy(&out_reader.join().unwrap_or_default()).to_string();
@@ -193,23 +219,73 @@ pub(crate) fn run_script_with(scripts_dir: &Path, file_stem: &str, interpreter: 
     if !status.success() {
         let (e, _) = truncate_chars(err.trim(), 1500);
         let shown = if e.is_empty() { "(오류 출력 없음)".to_string() } else { e };
-        return format!("**스크립트가 실패했습니다**(종료 코드 {})\n\n```\n{}\n```{}", status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".to_string()), shown, if out.trim().is_empty() { String::new() } else { format!("\n\n{}", out.trim()) });
+        let code = status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".to_string());
+        let md = format!("**스크립트가 실패했습니다**(종료 코드 {code})\n\n```\n{shown}\n```{}", if out.trim().is_empty() { String::new() } else { format!("\n\n{}", out.trim()) });
+        return fail(md, "exit", format!("종료 코드 {code}\n{shown}"));
     }
     let (text, cut) = truncate_chars(out.trim(), MAX_OUTPUT_CHARS);
-    let stderr_note = if show_stderr && !err.trim().is_empty() {
-        let (e, _) = truncate_chars(err.trim(), 1500);
-        format!("\n\n---\n[표준 오류 출력 — 시험 실행에서만 보입니다]\n{e}")
-    } else {
-        String::new()
-    };
-    if text.is_empty() {
-        return format!("(스크립트가 아무것도 출력하지 않았습니다 — 마크다운을 표준 출력으로 내보내야 패널에 보입니다){stderr_note}");
-    }
-    if cut {
+    let (err_text, _) = truncate_chars(err.trim(), 1500);
+    let stderr_note = if show_stderr && !err_text.is_empty() { format!("\n\n---\n[표준 오류 출력 — 시험 실행에서만 보입니다]\n{err_text}") } else { String::new() };
+    let md = if text.is_empty() {
+        format!("(스크립트가 아무것도 출력하지 않았습니다 — 마크다운을 표준 출력으로 내보내야 패널에 보입니다){stderr_note}")
+    } else if cut {
         format!("{text}\n\n…(출력이 길어서 {MAX_OUTPUT_CHARS}자까지만 보여 줍니다){stderr_note}")
     } else {
         format!("{text}{stderr_note}")
+    };
+    // 정상 종료했어도 오류 출력이 있었으면 "최근 에러"에 남긴다(패널에서는 숨기므로 나중에 다시 볼 수 있어야 한다).
+    Outcome { markdown: md, problem: if err_text.is_empty() { None } else { Some(ScriptProblem { kind: "stderr", detail: err_text }) } }
+}
+
+// ---------------------------------------------------------------------------------------------
+// 최근 에러 기록 — 스크립트 문제가 화면에서 사라진 뒤에도 다시 볼 수 있게 파일에 남긴다(최신순, 같은 문제가 반복되면 횟수만 올린다).
+// ---------------------------------------------------------------------------------------------
+
+pub(crate) const MAX_ERROR_ENTRIES: usize = 30;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptErrorEntry {
+    /// 처음 생긴 시각(ms)
+    pub at: i64,
+    /// 마지막으로 또 생긴 시각(ms)
+    pub last_at: i64,
+    pub count: u32,
+    pub slot_id: String,
+    pub slot_name: String,
+    /// "panel"(패널이 돌린 것) | "test"(설정 화면 시험 실행)
+    pub source: String,
+    pub kind: String,
+    pub detail: String,
+}
+
+fn errors_lock() -> &'static std::sync::Mutex<()> {
+    static L: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    L.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+pub(crate) fn load_errors_from(path: &Path) -> Vec<ScriptErrorEntry> {
+    std::fs::read_to_string(path).ok().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default()
+}
+
+/// 문제 하나를 기록한다. 맨 앞(가장 최근) 항목과 슬롯·종류·내용·출처가 같으면 새 줄을 만들지 않고 횟수와 마지막 시각만 올린다.
+pub(crate) fn record_error_at(path: &Path, slot_id: &str, slot_name: &str, source: &str, problem: &ScriptProblem, now: i64) {
+    let _g = errors_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let mut list = load_errors_from(path);
+    let (detail, _) = truncate_chars(&problem.detail, 4000);
+    if let Some(top) = list.first_mut().filter(|t| t.slot_id == slot_id && t.kind == problem.kind && t.detail == detail && t.source == source) {
+        top.count = top.count.saturating_add(1);
+        top.last_at = now;
+    } else {
+        list.insert(0, ScriptErrorEntry { at: now, last_at: now, count: 1, slot_id: slot_id.to_string(), slot_name: slot_name.to_string(), source: source.to_string(), kind: problem.kind.to_string(), detail });
+        list.truncate(MAX_ERROR_ENTRIES);
     }
+    let _ = crate::json_file::write_json_file_atomic(path, &list);
+}
+
+pub(crate) fn clear_errors_at(path: &Path) {
+    let _g = errors_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let _ = std::fs::remove_file(path);
 }
 
 /// 선택한 팀장 id(앱이 쓰는 id 또는 내부 id)로 팀장을 찾는다.
@@ -315,6 +391,36 @@ mod tests {
     fn fix_prompt_carries_script_error_note_and_reference() {
         let p = build_fix_prompt("const a = 1; a = 2;", "TypeError: Assignment to constant variable.", "표로 보여줘", "node");
         assert!(p.contains("const a = 1; a = 2;") && p.contains("Assignment to constant variable") && p.contains("표로 보여줘") && p.contains(&reference_markdown()));
+    }
+
+    #[test]
+    fn problems_are_classified_and_recorded_with_dedupe_and_cap() {
+        let dir = scratch();
+        let fail_o = run_script_outcome(&dir, "e1", "node", "console.error('boom'); process.exit(2)", 8000, None, false);
+        assert_eq!(fail_o.problem.as_ref().map(|p| p.kind), Some("exit"));
+        let slow = run_script_outcome(&dir, "e2", "node", "setTimeout(()=>{},5000)", 600, None, false);
+        assert_eq!(slow.problem.as_ref().map(|p| p.kind), Some("timeout"));
+        let warn = run_script_outcome(&dir, "e3", "node", "console.log('x'); console.error('w')", 8000, None, false);
+        assert_eq!((warn.problem.as_ref().map(|p| p.kind), warn.markdown.as_str()), (Some("stderr"), "x"));
+        let clean = run_script_outcome(&dir, "e4", "node", "console.log('x')", 8000, None, false);
+        assert!(clean.problem.is_none());
+
+        let log = dir.join("errors.json");
+        let p = ScriptProblem { kind: "exit", detail: "종료 코드 1\nboom".into() };
+        record_error_at(&log, "s1", "브랜치", "panel", &p, 1000);
+        record_error_at(&log, "s1", "브랜치", "panel", &p, 2000); // 같은 문제 반복 → 횟수만 증가
+        let list = load_errors_from(&log);
+        assert_eq!((list.len(), list[0].count, list[0].at, list[0].last_at), (1, 2, 1000, 2000));
+        record_error_at(&log, "s1", "브랜치", "test", &p, 3000); // 출처가 다르면 새 항목, 최신순
+        let list = load_errors_from(&log);
+        assert_eq!((list.len(), list[0].source.as_str()), (2, "test"));
+        for i in 0..40 {
+            record_error_at(&log, "s2", "x", "panel", &ScriptProblem { kind: "exit", detail: format!("e{i}") }, 5000 + i);
+        }
+        assert_eq!(load_errors_from(&log).len(), MAX_ERROR_ENTRIES);
+        clear_errors_at(&log);
+        assert!(load_errors_from(&log).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

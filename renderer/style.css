@@ -881,6 +881,12 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 .ps-ref-body th, .ps-ref-body td { border: 1px solid var(--border); padding: 3px 6px; text-align: left; vertical-align: top; }
 .ps-ref-body th { background: var(--surface-2); }
 .ps-ref-body td:first-child, .ps-ref-body td:first-child code { white-space: nowrap; word-break: normal; }
+.ps-errors-body { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow: auto; font-size: 12px; }
+.ps-err { border: 1px solid var(--border); border-left: 3px solid #f85149; border-radius: 4px; padding: 6px 8px; background: var(--surface-2); }
+.ps-err.warn { border-left-color: #d29922; }
+.ps-err-head { display: flex; flex-wrap: wrap; gap: 8px; color: var(--text-soft); font-size: 11px; margin-bottom: 4px; }
+.ps-err-head strong { color: var(--text-bright); }
+.ps-err pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 11px; max-height: 160px; overflow: auto; }
 .ps-timeout { font-size: 12px; color: var(--text-soft); display: inline-flex; align-items: center; gap: 4px; }
 .ps-timeout input { width: 92px; background: var(--bg); border: 1px solid var(--border-2); color: var(--text); padding: 3px 6px; border-radius: 4px; text-align: right; }
 .ps-code { background: var(--bg); color: var(--text); border: 1px solid var(--border-2); border-radius: 4px; padding: 6px; min-height: 200px; font-family: Consolas, "Courier New", monospace; font-size: 12px; white-space: pre; overflow: auto; }

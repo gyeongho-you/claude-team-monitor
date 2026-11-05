@@ -390,6 +390,11 @@
             </div>
             <p class="form-hint">"AI로 만들기"와 "AI로 고치기"는 모델을 한 번 호출하므로 <strong>추가 토큰이 듭니다</strong>(스크립트를 만들거나 고칠 때만, 이후 실행은 무료). 결과는 위 칸에 채워지기만 하고 저장되지 않으니 코드를 읽어 보고 저장하세요. "고치기"는 시험 실행 결과(오류)를 보고 고치며, 위 입력칸에 적은 말은 추가 요청으로 같이 전달됩니다.</p>
             <pre id="ps-test-out" class="ps-test-out" hidden></pre>
+            <details id="ps-errors" class="ps-ref">
+              <summary id="ps-errors-summary">🕘 최근 에러 보기</summary>
+              <div class="ps-ref-actions"><button type="button" id="ps-errors-refresh">새로고침</button><button type="button" id="ps-errors-clear">모두 지우기</button><span class="form-hint">패널이나 시험 실행에서 스크립트가 실패·시간 초과·오류 출력을 낸 기록입니다(최근 30개, 같은 문제는 횟수로 묶습니다). 화면에서 사라져도 여기서 다시 볼 수 있습니다.</span></div>
+              <div id="ps-errors-body" class="ps-errors-body">불러오는 중...</div>
+            </details>
           </div>
           <div class="ps-group" data-mode="lead">
             <textarea id="ps-lead-instruction" placeholder="팀장에게 줄 지침 — 예: 보고서를 만들면 날짜·제목·링크를 한 줄로 이 패널 파일에 추가해라"></textarea>
