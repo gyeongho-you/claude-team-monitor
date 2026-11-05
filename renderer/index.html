@@ -353,6 +353,11 @@
               <option value="opus">Opus — 정확, 호출당 약 2센트</option>
               <option value="fable">Fable — 가장 정확, 호출당 약 0.2달러</option>
             </select>
+            <select id="ps-include">
+              <option value="none">재료: 팀장의 최근 대화만</option>
+              <option value="artifact-reports">재료: 최근 대화 + 모은 Artifact 보고서 전체 목록</option>
+              <option value="github-pr">재료: 최근 대화 + 모은 GitHub PR 전체 목록</option>
+            </select>
             <label class="settings-check"><input type="checkbox" id="ps-auto-update" /> 팀장이 일을 마칠 때마다 자동으로 갱신</label>
             <p class="form-hint" id="ps-cost-hint"></p>
           </div>

@@ -878,6 +878,7 @@ const psScope = document.getElementById('ps-scope');
 const psLeadInstruction = document.getElementById('ps-lead-instruction');
 const psAiInstruction = document.getElementById('ps-ai-instruction');
 const psModel = document.getElementById('ps-model');
+const psInclude = document.getElementById('ps-include');
 const psAutoUpdate = document.getElementById('ps-auto-update');
 const psCostHint = document.getElementById('ps-cost-hint');
 const psSaveBtn = document.getElementById('ps-save-btn');
@@ -900,7 +901,7 @@ psAutoUpdate.addEventListener('change', updatePsFormVisibility);
 function renderPanelSettings() {
   panelEnabledEl.checked = !!panelConfig.enabled;
   panelSlotListEl.innerHTML = (panelConfig.slots || []).map(s => {
-    const extra = s.mode === 'ai' ? ` · ${PS_MODEL_NAMES[s.aiModel] || s.aiModel}${s.autoUpdate ? ' · 자동' : ''}` : s.mode === 'auto' ? ` · ${s.preset === 'github-pr' ? 'GitHub PR' : 'Artifact 보고서'}${s.scope === 'selected' ? ' · 선택한 팀장' : ''}` : '';
+    const extra = s.mode === 'ai' ? ` · ${PS_MODEL_NAMES[s.aiModel] || s.aiModel}${s.aiInclude === 'artifact-reports' ? ' · 보고서 목록 포함' : s.aiInclude === 'github-pr' ? ' · PR 목록 포함' : ''}${s.autoUpdate ? ' · 자동' : ''}` : s.mode === 'auto' ? ` · ${s.preset === 'github-pr' ? 'GitHub PR' : 'Artifact 보고서'}${s.scope === 'selected' ? ' · 선택한 팀장' : ''}` : '';
     return `<div class="skill-item ${s.enabled ? '' : 'off'}">
       <label><input type="checkbox" data-ps-toggle="${escapeHtml(s.id)}" ${s.enabled ? 'checked' : ''} /> ${escapeHtml(s.name)}</label>
       <span class="skill-desc">${escapeHtml(PANEL_MODE_LABELS[s.mode] || s.mode)}${escapeHtml(extra)}</span>
@@ -914,7 +915,7 @@ function renderPanelSettings() {
 function resetPsForm() {
   psEditingId = null;
   psName.value = ''; psMode.value = 'auto'; psPreset.value = 'artifact-reports'; psScope.value = 'all';
-  psLeadInstruction.value = ''; psAiInstruction.value = ''; psModel.value = 'sonnet'; psAutoUpdate.checked = false;
+  psLeadInstruction.value = ''; psAiInstruction.value = ''; psModel.value = 'sonnet'; psInclude.value = 'none'; psAutoUpdate.checked = false;
   psSaveBtn.textContent = '슬롯 추가'; psCancelBtn.hidden = true;
   updatePsFormVisibility();
 }
@@ -924,7 +925,7 @@ function psInputFromForm(enabled) {
   return {
     id: psEditingId, name: psName.value, mode, scope: psScope.value, preset: psPreset.value,
     instruction: mode === 'lead' ? psLeadInstruction.value : mode === 'ai' ? psAiInstruction.value : '',
-    autoUpdate: mode === 'ai' && psAutoUpdate.checked, aiModel: psModel.value, enabled,
+    autoUpdate: mode === 'ai' && psAutoUpdate.checked, aiModel: psModel.value, aiInclude: mode === 'ai' ? psInclude.value : 'none', enabled,
   };
 }
 
@@ -950,7 +951,7 @@ panelSlotListEl.addEventListener('click', async e => {
     if (!s) return;
     psEditingId = s.id; psName.value = s.name; psMode.value = s.mode; psPreset.value = s.preset; psScope.value = s.scope;
     psLeadInstruction.value = s.mode === 'lead' ? s.instruction : ''; psAiInstruction.value = s.mode === 'ai' ? s.instruction : '';
-    psModel.value = s.aiModel; psAutoUpdate.checked = !!s.autoUpdate;
+    psModel.value = s.aiModel; psInclude.value = s.aiInclude || 'none'; psAutoUpdate.checked = !!s.autoUpdate;
     psSaveBtn.textContent = '수정 저장'; psCancelBtn.hidden = false; updatePsFormVisibility();
     psStatus.textContent = `"${s.name}" 수정 중`;
     return;
@@ -972,7 +973,7 @@ panelSlotListEl.addEventListener('change', async e => {
   const s = (panelConfig.slots || []).find(x => x.id === t.dataset.psToggle);
   if (!s) return;
   try {
-    panelConfig = await window.api.savePanelSlot({ id: s.id, name: s.name, mode: s.mode, scope: s.scope, preset: s.preset, instruction: s.instruction, autoUpdate: s.autoUpdate, aiModel: s.aiModel, enabled: t.checked });
+    panelConfig = await window.api.savePanelSlot({ id: s.id, name: s.name, mode: s.mode, scope: s.scope, preset: s.preset, instruction: s.instruction, autoUpdate: s.autoUpdate, aiModel: s.aiModel, aiInclude: s.aiInclude || 'none', enabled: t.checked });
     renderPanelChrome(); renderPanelSettings(); panelLastKey = ''; refreshPanelContent(true);
   } catch (err) { psStatus.textContent = errMsg(err); t.checked = !t.checked; }
 });

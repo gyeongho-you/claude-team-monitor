@@ -51,6 +51,9 @@ fn default_preset() -> String {
 fn default_ai_model() -> String {
     "sonnet".to_string()
 }
+fn default_ai_include() -> String {
+    "none".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -73,6 +76,10 @@ pub struct PanelSlot {
     pub auto_update: bool,
     #[serde(default = "default_ai_model")]
     pub ai_model: String,
+    /// ai 전용: 모델에게 최근 대화 말고도 자동 수집한 목록 전체를 재료로 같이 준다 — "none" | "artifact-reports" | "github-pr".
+    /// (사용자 의도: "보고서 리스트를 전부 정리해서" — 대화 몇 턴만 보고는 전체를 정리할 수 없다.)
+    #[serde(default = "default_ai_include")]
+    pub ai_include: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default)]
@@ -104,6 +111,8 @@ pub struct PanelSlotInput {
     pub auto_update: bool,
     #[serde(default = "default_ai_model")]
     pub ai_model: String,
+    #[serde(default = "default_ai_include")]
+    pub ai_include: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -130,6 +139,9 @@ pub(crate) fn slot_from_input(input: &PanelSlotInput, id: String, created_at: i6
     if !AI_MODELS.contains(&input.ai_model.as_str()) {
         return Err("모델이 올바르지 않습니다.".to_string());
     }
+    if input.ai_include != "none" && !PRESETS.contains(&input.ai_include.as_str()) {
+        return Err("재료에 포함할 목록 종류가 올바르지 않습니다.".to_string());
+    }
     let instruction = input.instruction.trim().to_string();
     if (input.mode == "lead" || input.mode == "ai") && instruction.is_empty() {
         return Err(if input.mode == "lead" { "팀장에게 줄 지침을 입력하세요." } else { "AI에게 줄 요청을 입력하세요." }.to_string());
@@ -146,6 +158,7 @@ pub(crate) fn slot_from_input(input: &PanelSlotInput, id: String, created_at: i6
         instruction,
         auto_update: input.mode == "ai" && input.auto_update,
         ai_model: input.ai_model.clone(),
+        ai_include: if input.mode == "ai" { input.ai_include.clone() } else { "none".to_string() },
         enabled: input.enabled,
         created_at,
     })
@@ -442,8 +455,18 @@ pub(crate) fn sanitize_ai_output(raw: &str) -> Option<String> {
 }
 
 pub(crate) fn build_ai_prompt(instruction: &str, current: &str, material: &str) -> String {
+    build_ai_prompt_with(instruction, current, material, "")
+}
+
+/// collected가 비어 있지 않으면 "앱이 대화 기록에서 모은 전체 목록"을 재료로 함께 준다(이 목록이 전체이므로 모델은 이것을 기준으로 정리하면 된다).
+pub(crate) fn build_ai_prompt_with(instruction: &str, current: &str, material: &str, collected: &str) -> String {
+    let collected_block = if collected.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\n앱이 대화 기록에서 자동으로 모은 전체 목록(이것이 지금까지의 전부다 — 빠짐없이 반영해라):\n\"\"\"\n{collected}\n\"\"\"")
+    };
     format!(
-        "너는 데스크톱 앱 오른쪽 패널의 내용을 관리한다. 사용자가 적어 둔 요청:\n\"\"\"\n{instruction}\n\"\"\"\n\n현재 패널 내용(마크다운):\n\"\"\"\n{}\n\"\"\"\n\n새로 끝난 작업(팀장과 사용자의 최근 대화):\n\"\"\"\n{material}\n\"\"\"\n\n위 요청에 맞게 패널 전체 내용을 갱신해서 마크다운으로만 출력해라(설명·인사·코드펜스 없이 내용만). 요청과 관련 없는 대화면 현재 내용을 그대로 출력해라. 기존 항목은 요청이 없는 한 지우지 마라. {MAX_CONTENT_CHARS}자를 넘기지 마라.",
+        "너는 데스크톱 앱 오른쪽 패널의 내용을 관리한다. 사용자가 적어 둔 요청:\n\"\"\"\n{instruction}\n\"\"\"\n\n현재 패널 내용(마크다운):\n\"\"\"\n{}\n\"\"\"{collected_block}\n\n새로 끝난 작업(팀장과 사용자의 최근 대화):\n\"\"\"\n{material}\n\"\"\"\n\n위 요청에 맞게 패널 전체 내용을 갱신해서 마크다운으로만 출력해라(설명·인사·코드펜스 없이 내용만). 요청과 관련 없는 대화면 현재 내용을 그대로 출력해라. 기존 항목은 요청이 없는 한 지우지 마라. {MAX_CONTENT_CHARS}자를 넘기지 마라.",
         if current.trim().is_empty() { "(비어 있음)" } else { current }
     )
 }
@@ -611,7 +634,8 @@ pub fn on_rows_tick(rows: &[SessionRow]) {
 fn update_ai_slot(slot: &PanelSlot, material: &str) -> Result<String, String> {
     let dir = panel_dir();
     let (current, _) = read_content(&dir, &slot.id);
-    let raw = run_claude_oneshot(&slot.ai_model, &build_ai_prompt(&slot.instruction, &current, material))?;
+    let collected = if slot.ai_include == "none" { String::new() } else { render_items_markdown(&slot.ai_include, &collect_items(&slot.ai_include, &load_leads(), None)) };
+    let raw = run_claude_oneshot(&slot.ai_model, &build_ai_prompt_with(&slot.instruction, &current, material, &collected))?;
     let Some(text) = sanitize_ai_output(&raw) else { return Ok(current) };
     write_content(&dir, &slot.id, &text)?;
     Ok(text)
@@ -771,7 +795,7 @@ mod tests {
     use super::*;
 
     fn input(mode: &str) -> PanelSlotInput {
-        PanelSlotInput { id: None, name: "보고서".into(), mode: mode.into(), scope: "all".into(), preset: "artifact-reports".into(), instruction: "".into(), auto_update: false, ai_model: "sonnet".into(), enabled: true }
+        PanelSlotInput { id: None, name: "보고서".into(), mode: mode.into(), scope: "all".into(), preset: "artifact-reports".into(), instruction: "".into(), auto_update: false, ai_model: "sonnet".into(), ai_include: "none".into(), enabled: true }
     }
 
     fn lead(id: &str, internal: Option<&str>) -> LeadRecord {
@@ -873,6 +897,10 @@ mod tests {
         assert!(!slot_from_input(&PanelSlotInput { auto_update: true, ..input("manual") }, "s".into(), 1).unwrap().auto_update, "자동 갱신은 ai만");
         assert!(slot_from_input(&PanelSlotInput { ai_model: "gpt".into(), ..input("manual") }, "s".into(), 1).is_err());
         assert!(slot_from_input(&PanelSlotInput { preset: "x".into(), ..input("auto") }, "s".into(), 1).is_err());
+        assert!(slot_from_input(&PanelSlotInput { instruction: "정리".into(), ai_include: "bogus".into(), ..input("ai") }, "s".into(), 1).is_err());
+        let with_list = slot_from_input(&PanelSlotInput { instruction: "정리".into(), ai_include: "artifact-reports".into(), ..input("ai") }, "s".into(), 1).unwrap();
+        assert_eq!(with_list.ai_include, "artifact-reports");
+        assert_eq!(slot_from_input(&PanelSlotInput { ai_include: "artifact-reports".into(), ..input("manual") }, "s".into(), 1).unwrap().ai_include, "none", "재료 포함은 ai 슬롯에서만 의미 있다");
         assert!(slot_from_input(&PanelSlotInput { instruction: "가".repeat(2001), ..input("lead") }, "s".into(), 1).is_err());
     }
 
@@ -891,7 +919,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         // 옛 저장 파일(필드 일부 없음)도 읽힌다
         let cfg: PanelConfig = serde_json::from_str(r#"{"slots":[{"id":"s","name":"n"}]}"#).unwrap();
-        assert!(!cfg.enabled && cfg.slots[0].mode == "manual" && cfg.slots[0].enabled && cfg.slots[0].ai_model == "sonnet");
+        assert!(!cfg.enabled && cfg.slots[0].mode == "manual" && cfg.slots[0].enabled && cfg.slots[0].ai_model == "sonnet" && cfg.slots[0].ai_include == "none");
     }
 
     #[test]
@@ -926,7 +954,9 @@ mod tests {
         assert_eq!(sanitize_ai_output("   \n  "), None);
         assert_eq!(sanitize_ai_output(&"가".repeat(MAX_CONTENT_CHARS + 50)).unwrap().chars().count(), MAX_CONTENT_CHARS);
         let p = build_ai_prompt("표로 정리", "", "[팀장 웹] 사용자: 안녕");
-        assert!(p.contains("표로 정리") && p.contains("(비어 있음)") && p.contains("안녕"));
+        assert!(p.contains("표로 정리") && p.contains("(비어 있음)") && p.contains("안녕") && !p.contains("자동으로 모은 전체 목록"));
+        let p2 = build_ai_prompt_with("표로 정리", "", "대화", "- [a](https://claude.ai/artifact/A) — 웹 팀장");
+        assert!(p2.contains("자동으로 모은 전체 목록") && p2.contains("artifact/A"));
     }
 
     #[test]
