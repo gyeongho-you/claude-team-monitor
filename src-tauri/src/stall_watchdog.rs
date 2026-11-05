@@ -764,7 +764,10 @@ mod tests {
     // 실제 claude -p --model haiku 왕복이 되는지 확인하는 통합 테스트 — 비용이 드니 최소한으로만
     // (이거 하나) 돌린다. LLM 출력의 정확한 판단 내용까지 검증하진 않고(비결정적일 수 있음),
     // 구조(파싱 가능한 JSON 응답)만 확인한다.
+    // 기본 `cargo test`에서는 돌리지 않는다(#[ignore]): 실제 모델을 부르므로 돌릴 때마다 비용이 들고, 다른 시험과 병렬로 돌아 부하가 큰 때(30초 안에 답이
+    // 안 올 때) 간헐적으로 실패했다(전체 시험을 여러 번 돌려 일부에서 실패). claude CLI와의 계약을 확인하고 싶을 때 수동으로: `cargo test -- --ignored run_stall_classifier_real_haiku`
     #[test]
+    #[ignore = "실제 claude(Haiku)를 호출한다 — 비용이 들고 부하에서 간헐 실패한다. 수동으로만: cargo test -- --ignored run_stall_classifier_real_haiku"]
     fn run_stall_classifier_real_haiku_roundtrip() {
         let tail = "사용자: 팀원 A의 작업이 끝났다고 보고가 왔어\n팀장: 확인했습니다. 다음 작업으로 넘어가겠습니다.\n\n사용자: 이제 B 작업도 마저 지시해줘\n팀장: 네, B 작업을 지시했습니다.";
         let desc = "팀원 test-member(역할: implementer)가 15분째 idle 상태로 멈춰있습니다.";

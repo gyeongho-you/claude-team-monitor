@@ -79,75 +79,108 @@ fn lead_roots_and_path(path: &str, lead_id: Option<&str>) -> Result<PathBuf, Str
     resolve_inside(path, &allowed_roots(&lead))
 }
 
-fn reveal(canon: &Path) -> Result<(), String> {
-    let shown = display_path(canon);
-    let is_dir = canon.is_dir();
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let mut cmd = Command::new("explorer.exe");
-        if is_dir {
-            cmd.arg(&shown);
-        } else {
-            cmd.raw_arg(format!("/select,\"{}\"", shown.display()));
-        }
-        cmd.spawn().map(|_| ()).map_err(|e| format!("탐색기를 열지 못했습니다: {e}"))
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let mut cmd = Command::new("open");
-        if !is_dir {
-            cmd.arg("-R");
-        }
-        cmd.arg(&shown).spawn().map(|_| ()).map_err(|e| format!("Finder를 열지 못했습니다: {e}"))
-    }
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    {
-        let target = if is_dir { shown.clone() } else { shown.parent().map(Path::to_path_buf).unwrap_or(shown.clone()) };
-        Command::new("xdg-open").arg(target).spawn().map(|_| ()).map_err(|e| format!("파일 관리자를 열지 못했습니다: {e}"))
+// ---- OS별 실행 명령: "무엇을 실행할지"를 정하는 부분(plan_*)은 순수 함수로 두어 어느 OS에서 빌드하든 컴파일되고, Windows·macOS·Linux 모두 시험으로 확인한다 ----
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Os {
+    Windows,
+    Mac,
+    Linux,
+}
+
+pub(crate) fn current_os() -> Os {
+    if cfg!(windows) {
+        Os::Windows
+    } else if cfg!(target_os = "macos") {
+        Os::Mac
+    } else {
+        Os::Linux
     }
 }
 
-/// VS Code 실행 파일 위치(설치 위치를 흔한 곳에서 찾는다).
-fn vscode_executable() -> Option<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    #[cfg(windows)]
-    {
-        for (var, rel) in [("LOCALAPPDATA", r"Programs\Microsoft VS Code\Code.exe"), ("ProgramFiles", r"Microsoft VS Code\Code.exe"), ("ProgramFiles(x86)", r"Microsoft VS Code\Code.exe")] {
-            if let Ok(base) = std::env::var(var) {
-                candidates.push(PathBuf::from(base).join(rel));
+/// 실행할 프로그램과 인자. raw_arg는 Windows에서만 쓰는 "따옴표를 그대로 넘기는" 인자(탐색기의 /select,"경로" 형식 때문에 필요하다).
+#[derive(Debug, PartialEq)]
+pub(crate) struct Launch {
+    pub program: String,
+    pub args: Vec<String>,
+    pub raw_arg: Option<String>,
+}
+
+/// 파일/폴더 위치 보기 명령. shown은 실행할 수 있는 보통 경로, parent는 그 파일의 폴더.
+pub(crate) fn plan_reveal(os: Os, shown: &str, is_dir: bool, parent: &str) -> Launch {
+    match os {
+        Os::Windows if is_dir => Launch { program: "explorer.exe".into(), args: vec![shown.into()], raw_arg: None },
+        Os::Windows => Launch { program: "explorer.exe".into(), args: vec![], raw_arg: Some(format!("/select,\"{shown}\"")) },
+        Os::Mac if is_dir => Launch { program: "open".into(), args: vec![shown.into()], raw_arg: None },
+        Os::Mac => Launch { program: "open".into(), args: vec!["-R".into(), shown.into()], raw_arg: None },
+        Os::Linux => Launch { program: "xdg-open".into(), args: vec![if is_dir { shown } else { parent }.into()], raw_arg: None },
+    }
+}
+
+/// VS Code 실행 파일이 있을 만한 자리들(env는 환경 변수를 읽는 함수 — 시험에서 바꿔 끼운다).
+pub(crate) fn vscode_candidates(os: Os, env: &dyn Fn(&str) -> Option<String>) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = Vec::new();
+    match os {
+        Os::Windows => {
+            for (var, rel) in [("LOCALAPPDATA", r"Programs\Microsoft VS Code\Code.exe"), ("ProgramFiles", r"Microsoft VS Code\Code.exe"), ("ProgramFiles(x86)", r"Microsoft VS Code\Code.exe")] {
+                if let Some(base) = env(var) {
+                    v.push(PathBuf::from(format!("{base}\\{rel}")));
+                }
             }
         }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        candidates.push(PathBuf::from("/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"));
-    }
-    #[cfg(all(not(windows), not(target_os = "macos")))]
-    {
-        if let Ok(path) = std::env::var("PATH") {
-            candidates.extend(path.split(':').map(|d| Path::new(d).join("code")));
+        Os::Mac => {
+            v.push(PathBuf::from("/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"));
+            if let Some(home) = env("HOME") {
+                v.push(PathBuf::from(format!("{home}/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code")));
+            }
+        }
+        Os::Linux => {
+            if let Some(path) = env("PATH") {
+                v.extend(path.split(':').filter(|d| !d.is_empty()).map(|d| PathBuf::from(format!("{d}/code"))));
+            }
+            v.push(PathBuf::from("/usr/bin/code"));
+            v.push(PathBuf::from("/snap/bin/code"));
         }
     }
-    candidates.into_iter().find(|p| p.is_file())
+    v
+}
+
+/// VS Code로 여는 명령. 파일이면 `-g 경로:줄`, 폴더면 경로만. 경로는 호출 전에 절대 경로로 정규화돼 있어 `-`로 시작할 수 없다(인자 끼워 넣기 방지).
+pub(crate) fn plan_editor(exe: &Path, shown: &str, is_file: bool, line: Option<u32>) -> Launch {
+    let args = if is_file { vec!["-g".to_string(), format!("{shown}:{}", line.unwrap_or(1).max(1))] } else { vec![shown.to_string()] };
+    Launch { program: exe.to_string_lossy().to_string(), args, raw_arg: None }
+}
+
+fn run_launch(plan: &Launch, quiet: bool) -> Result<(), String> {
+    let mut cmd = Command::new(&plan.program);
+    cmd.args(&plan.args);
+    if quiet {
+        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        if let Some(raw) = &plan.raw_arg {
+            cmd.raw_arg(raw);
+        }
+        cmd.creation_flags(if quiet { 0x0800_0000 } else { 0 });
+    }
+    cmd.spawn().map(|_| ()).map_err(|e| format!("{}을(를) 실행하지 못했습니다: {e}", plan.program))
+}
+
+fn reveal(canon: &Path) -> Result<(), String> {
+    let shown = display_path(canon);
+    let parent = shown.parent().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| shown.to_string_lossy().to_string());
+    run_launch(&plan_reveal(current_os(), &shown.to_string_lossy(), canon.is_dir(), &parent), false)
+}
+
+fn vscode_executable() -> Option<PathBuf> {
+    vscode_candidates(current_os(), &|k| std::env::var(k).ok()).into_iter().find(|p| p.is_file())
 }
 
 fn open_in_editor(canon: &Path, line: Option<u32>) -> Result<(), String> {
     let exe = vscode_executable().ok_or_else(|| "VS Code를 찾지 못했습니다. 설치돼 있지 않다면 '탐색기에서 보기'를 쓰세요.".to_string())?;
-    let shown = display_path(canon);
-    let mut cmd = Command::new(exe);
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    if canon.is_file() {
-        cmd.arg("-g").arg(format!("{}:{}", shown.display(), line.unwrap_or(1).max(1)));
-    } else {
-        cmd.arg(&shown);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000);
-    }
-    cmd.spawn().map(|_| ()).map_err(|e| format!("VS Code를 실행하지 못했습니다: {e}"))
+    run_launch(&plan_editor(&exe, &display_path(canon).to_string_lossy(), canon.is_file(), line), true)
 }
 
 #[tauri::command]
@@ -168,6 +201,46 @@ mod tests {
         let d = std::env::temp_dir().join(format!("ctm_actions_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn reveal_commands_are_right_for_every_os() {
+        let w = plan_reveal(Os::Windows, r"C:\p\a b\f.md", false, r"C:\p\a b");
+        assert_eq!((w.program.as_str(), w.args.is_empty(), w.raw_arg.as_deref()), ("explorer.exe", true, Some(r#"/select,"C:\p\a b\f.md""#)), "파일: 탐색기에서 선택");
+        assert_eq!(plan_reveal(Os::Windows, r"C:\p", true, r"C:\"), Launch { program: "explorer.exe".into(), args: vec![r"C:\p".into()], raw_arg: None });
+        assert_eq!(plan_reveal(Os::Mac, "/p/f.md", false, "/p"), Launch { program: "open".into(), args: vec!["-R".into(), "/p/f.md".into()], raw_arg: None });
+        assert_eq!(plan_reveal(Os::Mac, "/p", true, "/"), Launch { program: "open".into(), args: vec!["/p".into()], raw_arg: None });
+        assert_eq!(plan_reveal(Os::Linux, "/p/f.md", false, "/p"), Launch { program: "xdg-open".into(), args: vec!["/p".into()], raw_arg: None }, "리눅스는 파일 선택이 없어 그 폴더를 연다");
+        assert_eq!(plan_reveal(Os::Linux, "/p", true, "/"), Launch { program: "xdg-open".into(), args: vec!["/p".into()], raw_arg: None });
+    }
+
+    #[test]
+    fn editor_commands_never_go_through_a_shell_and_put_the_path_in_one_argument() {
+        let exe = Path::new("/x/code");
+        let f = plan_editor(exe, "/p/a b;rm -rf.md", true, Some(12));
+        assert_eq!((f.program.as_str(), f.args.clone()), ("/x/code", vec!["-g".to_string(), "/p/a b;rm -rf.md:12".to_string()]), "경로는 인자 하나로만 간다");
+        assert_eq!(plan_editor(exe, "/p/f.md", true, None).args[1], "/p/f.md:1");
+        assert_eq!(plan_editor(exe, "/p/f.md", true, Some(0)).args[1], "/p/f.md:1", "0줄은 1줄로");
+        assert_eq!(plan_editor(exe, "/p/dir", false, Some(5)).args, vec!["/p/dir".to_string()], "폴더는 줄 번호 없이");
+        assert!(f.raw_arg.is_none(), "셸 해석을 거치는 raw 인자를 쓰지 않는다");
+    }
+
+    #[test]
+    fn vscode_is_looked_up_in_the_usual_places_per_os() {
+        let env = |k: &str| match k {
+            "LOCALAPPDATA" => Some(r"C:\Users\u\AppData\Local".to_string()),
+            "ProgramFiles" => Some(r"C:\Program Files".to_string()),
+            "HOME" => Some("/home/u".to_string()),
+            "PATH" => Some("/usr/local/bin::/home/u/bin".to_string()),
+            _ => None,
+        };
+        let w: Vec<String> = vscode_candidates(Os::Windows, &env).iter().map(|p| p.to_string_lossy().to_string()).collect();
+        assert_eq!(w, vec![r"C:\Users\u\AppData\Local\Programs\Microsoft VS Code\Code.exe", r"C:\Program Files\Microsoft VS Code\Code.exe"]);
+        let m: Vec<String> = vscode_candidates(Os::Mac, &env).iter().map(|p| p.to_string_lossy().to_string()).collect();
+        assert!(m[0].ends_with("Visual Studio Code.app/Contents/Resources/app/bin/code") && m[1].starts_with("/home/u/Applications"));
+        let l: Vec<String> = vscode_candidates(Os::Linux, &env).iter().map(|p| p.to_string_lossy().to_string()).collect();
+        assert_eq!(l[..2], ["/usr/local/bin/code".to_string(), "/home/u/bin/code".to_string()], "PATH의 빈 항목은 건너뛴다");
+        assert!(l.contains(&"/usr/bin/code".to_string()) && l.contains(&"/snap/bin/code".to_string()));
     }
 
     #[test]

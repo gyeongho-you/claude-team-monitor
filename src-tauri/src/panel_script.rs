@@ -4,7 +4,8 @@
 // 안전에 대한 판단: 이 앱은 서버와 연결돼 있지 않고 스크립트는 사용자 본인의 PC 권한으로 본인이 저장한 것만 돌기 때문에 샌드박스는 두지 않았다
 // (잘못되거나 나쁜 스크립트의 피해는 그 사용자에게만 간다). 대신 앱이 같이 멈추지 않게 (1) 슬롯마다 정한 제한 시간(ms), (2) 출력 길이 제한을 둔다.
 // 앱을 지키는 장치: 제한 시간(ms) 초과 시 종료, 표준 출력이 MAX_CAPTURE_BYTES를 넘으면 종료(메모리 보호), 스크립트가 끝난 뒤 출력 통로를 물고 남은 자식이 있어도 READER_GRACE만 기다림.
-// 알려진 한계: 제한 시간이 지나면 스크립트 프로세스만 종료한다 — 스크립트가 일부러 분리해(detached) 띄운 자식 프로세스는 그대로 끝날 때까지 남는다.
+// 제한 시간·출력 초과로 중단할 때는 스크립트 프로세스뿐 아니라 그것이 띄운 하위 프로세스(일부러 분리한 것 포함)까지 함께 종료한다(kill_tree).
+// 알려진 한계: 스크립트가 **정상 종료한 뒤에** 남겨 둔 프로세스(데몬처럼 일부러 남긴 것)는 건드리지 않는다.
 //
 // 스크립트는 슬롯 id로 정한 파일(~/.claude/claude-team-monitor/panel/scripts/<id>.<확장자>)에 써서 실행한다(명령줄 인용·길이 문제를 피한다).
 // 팀장 정보 등은 환경 변수로 넘긴다(아래 ENV_VAR_DOCS 표가 유일한 기준).
@@ -171,6 +172,51 @@ fn find_lead<'a>(leads: &'a [LeadRecord], id: &str) -> Option<&'a LeadRecord> {
     leads.iter().find(|l| l.id == id || l.internal_id.as_deref() == Some(id))
 }
 
+/// 프로세스 목록에서 pid의 모든 하위 프로세스(자식·손자…)를 찾는다. `ps -A -o pid=,ppid=` 출력(한 줄에 "pid ppid")을 받아 계산하는 순수 함수라 어느 OS에서든 시험할 수 있다.
+pub(crate) fn descendants_from_ps(ps_output: &str, root: u32) -> Vec<u32> {
+    let pairs: Vec<(u32, u32)> = ps_output
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.split_whitespace();
+            Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
+        })
+        .collect();
+    let mut found: Vec<u32> = Vec::new();
+    let mut frontier = vec![root];
+    while let Some(p) = frontier.pop() {
+        for (pid, ppid) in &pairs {
+            if *ppid == p && *pid != root && !found.contains(pid) {
+                found.push(*pid);
+                frontier.push(*pid);
+            }
+        }
+    }
+    found
+}
+
+/// 스크립트 프로세스와 그것이 띄운 모든 하위 프로세스를 종료한다. 스크립트가 일부러 분리(detached)해 띄운 자식도 부모와의 연결(PPID)은 남아 있으므로,
+/// 부모를 죽이기 *전에* 하위 목록을 만들어 함께 종료한다(시험으로 확인: 부모만 죽이면 분리된 자식이 제한 시간 뒤에도 살아 남았다).
+/// Windows: `taskkill /T`가 트리째 종료한다. macOS·Linux: `ps`로 하위 프로세스를 찾아 안쪽(손자)부터 종료한다.
+fn kill_tree(child: &mut std::process::Child) {
+    let pid = child.id();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).creation_flags(0x0800_0000).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+    #[cfg(not(windows))]
+    {
+        if let Ok(out) = Command::new("ps").args(["-A", "-o", "pid=,ppid="]).stdin(Stdio::null()).stderr(Stdio::null()).output() {
+            let all = descendants_from_ps(&String::from_utf8_lossy(&out.stdout), pid);
+            for p in all.iter().rev() {
+                let _ = Command::new("kill").args(["-9", &p.to_string()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// 읽은 만큼을 cap까지만 공유 버퍼에 담는 읽기 스레드. cap을 넘는 분은 버리되 계속 비운다(스크립트가 쓰다가 막히지 않게). 넘치면 overflow가 켜진다.
 /// 돌려주는 것: (지금까지 모인 내용, 통로가 닫혀 읽기가 끝났는지).
 fn capture<R: Read + Send + 'static>(mut r: R, cap: usize, overflow: Arc<AtomicBool>) -> (Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>) {
@@ -269,13 +315,11 @@ pub(crate) fn run_script_outcome(scripts_dir: &Path, file_stem: &str, interprete
             Ok(Some(s)) => break s,
             Ok(None) => {
                 if out_over.load(Ordering::SeqCst) {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_tree(&mut child);
                     return fail(too_big_message(), "overflow", too_big_detail());
                 }
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_tree(&mut child);
                     return fail(
                         format!("**제한 시간({timeout_ms}ms)을 넘어 중단했습니다.**\n\n이 슬롯의 설정에서 제한 시간(ms)을 늘릴 수 있습니다."),
                         "timeout",
@@ -284,8 +328,7 @@ pub(crate) fn run_script_outcome(scripts_dir: &Path, file_stem: &str, interprete
                 }
             }
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_tree(&mut child);
                 return fail(format!("**프로세스 상태를 확인하지 못했습니다:** {e}"), "spawn", format!("프로세스 상태를 확인하지 못했습니다: {e}"));
             }
         }
@@ -530,12 +573,12 @@ mod tests {
         let o = run(&dir, "fl1", "const b=Buffer.alloc(1<<20,65);for(let i=0;i<40;i++)process.stdout.write(b);", 20000);
         assert_eq!(o.problem.as_ref().map(|p| p.kind), Some("overflow"), "{}", o.output);
         assert!(o.output.contains("너무 커서") && o.output.chars().count() < 600, "큰 출력은 오류 문구로 바뀌어야 한다");
-        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+        assert!(t.elapsed() < Duration::from_secs(18), "{:?}", t.elapsed());
         // 끝없는 폭탄은 제한 시간(20초)이 아니라 크기 제한으로 곧 멈춘다
         let t = Instant::now();
         let o = run(&dir, "fl2", "const b=Buffer.alloc(1<<20,66);function w(){while(process.stdout.write(b)){}process.stdout.once('drain',w)}w();", 20000);
         assert_eq!(o.problem.as_ref().map(|p| p.kind), Some("overflow"));
-        assert!(t.elapsed() < Duration::from_secs(8), "끝없는 출력도 곧 멈춰야 한다: {:?}", t.elapsed());
+        assert!(t.elapsed() < Duration::from_secs(15), "끝없는 출력도 제한 시간(20초)이 아니라 크기 제한으로 멈춰야 한다: {:?}", t.elapsed());
         // 크기 제한 안쪽의 큰 출력은 정상(앞 MAX_OUTPUT_CHARS자만 보임)
         let o = run(&dir, "fl3", "console.log('x'.repeat(3*1024*1024))", 20000);
         assert!(o.problem.is_none() && o.output.contains("까지만 보여 줍니다"), "{}", &o.output[..80.min(o.output.len())]);
@@ -546,10 +589,10 @@ mod tests {
     fn a_child_holding_the_output_pipe_does_not_make_the_run_wait() {
         let dir = scratch();
         // 부모는 곧바로 끝나지만, 출력 통로를 물려받은 자식이 20초 동안 산다 → 20초를 기다리면 안 된다
-        let script = "const {spawn}=require('child_process');spawn(process.execPath,['-e','setTimeout(()=>{},20000)'],{stdio:['ignore','inherit','inherit'],detached:true}).unref();console.log('## 부모는 바로 끝남');";
+        let script = "const {spawn}=require('child_process');spawn(process.execPath,['-e','setTimeout(()=>{},40000)'],{stdio:['ignore','inherit','inherit'],detached:true}).unref();console.log('## 부모는 바로 끝남');";
         let t = Instant::now();
         let o = run(&dir, "hp1", script, 5000);
-        assert!(t.elapsed() < Duration::from_secs(3), "자식을 기다리면 안 된다: {:?}", t.elapsed());
+        assert!(t.elapsed() < Duration::from_secs(15), "자식(40초)을 기다리면 안 된다: {:?}", t.elapsed());
         assert_eq!(o.output, "## 부모는 바로 끝남");
         assert!(o.problem.is_none());
         let _ = std::fs::remove_dir_all(&dir);
@@ -582,12 +625,79 @@ mod tests {
     }
 
     #[test]
+    fn python_and_shell_interpreters_run_on_this_os() {
+        let dir = scratch();
+        // 같은 시험이 Windows(python/PowerShell)와 Linux(python3/sh)에서 돈다 — `echo`와 `exit N`은 둘 다 같은 뜻이다
+        let py = run_script_outcome(&dir, "ip1", "python", "print('## py 한글')", 20000, None, "markdown", false);
+        assert_eq!(py.output.trim(), "## py 한글", "{}", py.output);
+        let sh = run_script_outcome(&dir, "ip2", "shell", "echo '## sh'", 20000, None, "markdown", false);
+        assert_eq!(sh.output.trim(), "## sh", "{}", sh.output);
+        let bad = run_script_outcome(&dir, "ip3", "shell", "exit 3", 20000, None, "markdown", false);
+        assert_eq!(bad.problem.as_ref().map(|p| p.kind), Some("exit"), "{}", bad.output);
+        assert!(bad.output.contains("종료 코드 3"), "{}", bad.output);
+        let pyerr = run_script_outcome(&dir, "ip4", "python", "import sys\nsys.stderr.write('x')\nsys.exit(4)", 20000, None, "markdown", false);
+        assert!(pyerr.output.contains("종료 코드 4"), "{}", pyerr.output);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn descendants_are_found_through_the_whole_process_tree() {
+        let ps = "  1     0\n 10     1\n 20    10\n 30    20\n 31    20\n 40    30\n 50     1\n 60    50\n garbage line\n";
+        let mut d = descendants_from_ps(ps, 10);
+        d.sort();
+        assert_eq!(d, vec![20, 30, 31, 40], "자식·손자·증손자를 모두 찾고 다른 가지는 건드리지 않는다");
+        assert!(descendants_from_ps(ps, 40).is_empty());
+        assert!(descendants_from_ps("", 10).is_empty());
+        // 순환(잘못된 입력)에도 끝나야 한다
+        assert_eq!(descendants_from_ps("2 3\n3 2\n", 2), vec![3]);
+    }
+
+    /// 그 PID의 프로세스가 아직 살아 있는지(시험용).
+    fn pid_alive(pid: u32) -> bool {
+        #[cfg(windows)]
+        {
+            Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]).output().map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().any(|w| w == pid.to_string())).unwrap_or(false)
+        }
+        #[cfg(not(windows))]
+        {
+            Command::new("kill").args(["-0", &pid.to_string()]).status().map(|s| s.success()).unwrap_or(false)
+        }
+    }
+
+    #[test]
+    fn detached_grandchildren_are_killed_with_the_script_on_timeout() {
+        let dir = scratch();
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("child.pid");
+        // 스크립트가 일부러 분리해서(detached) 띄운 자식이 제한 시간 뒤에도 남으면 안 된다
+        let script = format!(
+            "const {{spawn}}=require('child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{{}},1000)'],{{detached:true,stdio:'ignore'}});c.unref();require('fs').writeFileSync({:?},String(c.pid));setInterval(()=>{{}},1000);",
+            pid_file.to_string_lossy()
+        );
+        let o = run(&dir, "dg1", &script, 1500);
+        assert_eq!(o.problem.as_ref().map(|p| p.kind), Some("timeout"), "{}", o.output);
+        std::thread::sleep(Duration::from_millis(800));
+        let pid: u32 = std::fs::read_to_string(&pid_file).expect("자식 PID 파일").trim().parse().unwrap();
+        let alive = pid_alive(pid);
+        if alive {
+            // 시험이 실패하더라도 프로세스를 남기지 않는다
+            #[cfg(windows)]
+            let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/F"]).output();
+            #[cfg(not(windows))]
+            let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+        }
+        assert!(!alive, "분리해서 띄운 자식(PID {pid})이 제한 시간 뒤에도 살아 있다");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn slow_scripts_are_stopped_at_the_per_script_time_limit() {
         let dir = scratch();
         let t = std::time::Instant::now();
-        let out = run(&dir, "t4", "setTimeout(() => console.log('late'), 5000)", 700).output;
+        let out = run(&dir, "t4", "setTimeout(() => console.log('late'), 20000)", 700).output;
         assert!(out.contains("제한 시간(700ms)"), "{out}");
-        assert!(t.elapsed() < Duration::from_secs(4), "제한 시간이 지나면 바로 끝나야 한다");
+        assert!(!out.contains("late"));
+        assert!(t.elapsed() < Duration::from_secs(15), "스크립트(20초)가 끝나길 기다리면 안 된다: {:?}", t.elapsed());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

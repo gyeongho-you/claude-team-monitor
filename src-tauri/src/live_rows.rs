@@ -1088,18 +1088,29 @@ mod tests {
         assert_eq!(grace_rows[0].agent.id, cached_row.agent.id);
     }
 
+    // compute_unapproved_dirs와 failed_launch_dirs()는 프로세스 전체가 같이 쓰는 전역 상태다. 시험들이 병렬로 돌면서 서로의 전역 항목을 보고
+    // 결과가 달라지던 간헐 실패(시험 격리 결함 — 실제 앱 동작의 결함은 아니다)를 막으려고, 이 전역을 건드리거나 전체 결과를 단정하는 시험은 이 잠금으로 한 번에 하나씩 돈다.
+    fn global_state_lock() -> std::sync::MutexGuard<'static, ()> {
+        static L: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        L.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     // compute_unapproved_dirs — claude 최초 실행 승인이 안 된(실제로 ~/.claude.json에 등록됐을 리
     // 없는 가짜 경로) targetDir/approvedMembers를 걸러내는지, 같은 경로가 여러 번 나와도 중복
     // 없이 한 번만 잡히는지.
     #[test]
     fn compute_unapproved_dirs_flags_never_trusted_dirs_without_duplicates() {
+        let _g = global_state_lock();
         let mut lead = fake_lead("test-fake-lead-unapproved-dirs-xyz");
         lead.target_dir = "C:\\definitely-not-trusted-dir-xyz".to_string();
         lead.approved_members = vec!["C:\\definitely-not-trusted-dir-xyz".to_string(), "C:\\another-untrusted-dir-xyz".to_string()];
         let leads = vec![lead];
 
         let result = compute_unapproved_dirs(&leads);
-        assert_eq!(result.len(), 2, "targetDir과 겹치는 approvedMembers 항목은 중복 없이 한 번만 잡혀야 한다: {result:?}");
+        // 전역에 다른 곳이 기억해 둔 폴더가 섞여 있어도 이 시험이 보는 두 폴더만 센다: 각각 정확히 한 번(중복 없음)이어야 한다
+        for d in ["C:\\definitely-not-trusted-dir-xyz", "C:\\another-untrusted-dir-xyz"] {
+            assert_eq!(result.iter().filter(|r| r.dir == d).count(), 1, "{d}는 중복 없이 한 번만 잡혀야 한다: {result:?}");
+        }
         assert!(result.iter().any(|r| r.dir == "C:\\definitely-not-trusted-dir-xyz"));
         assert!(result.iter().any(|r| r.dir == "C:\\another-untrusted-dir-xyz"));
         assert!(result.iter().all(|r| !r.reason.is_empty()));
@@ -1109,6 +1120,7 @@ mod tests {
     // 들어가야 한다(open-terminal-for-approval도 이 목록에 있는 디렉토리만 허용).
     #[test]
     fn compute_unapproved_dirs_includes_dir_of_failed_lead_launch_without_any_lead_record() {
+        let _g = global_state_lock();
         let dir = "C:\\failed-launch-untrusted-dir-xyz";
         record_failed_launch_dir(dir);
         let result = compute_unapproved_dirs(&[]);
@@ -1118,7 +1130,11 @@ mod tests {
 
     #[test]
     fn compute_unapproved_dirs_empty_for_no_leads() {
-        assert!(compute_unapproved_dirs(&[]).is_empty());
+        let _g = global_state_lock();
+        // 팀장이 없으면 결과는 "실패한 시작으로 전역에 기억된 폴더"에서만 나올 수 있다 — 그 밖의 폴더가 나오면 안 된다
+        let remembered: Vec<String> = failed_launch_dirs().lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let result = compute_unapproved_dirs(&[]);
+        assert!(result.iter().all(|r| remembered.contains(&r.dir)), "{result:?} / 기억된 폴더 {remembered:?}");
     }
 
     // refresh_board_command — 죽지 않고 main.ts와 같은 네 필드(rows/requests/unapprovedDirs/
