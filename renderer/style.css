@@ -860,6 +860,12 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 .version-text.has-update { color: var(--warning); font-weight: 600; }
 .version-text.has-update::before { content: "● "; }
 #app-settings-tab { max-width: 620px; margin: 0 auto; padding: 4px 0 24px; }
+.ps-warn { border-left: 3px solid #d29922; background: var(--surface-2); padding: 6px 10px; border-radius: 4px; color: var(--text); }
+.settings-nav { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg); z-index: 5; }
+.settings-nav button { background: transparent; border: 1px solid var(--border-2); color: var(--text-soft); border-radius: 999px; padding: 4px 14px; font-size: 12px; }
+.settings-nav button:hover { color: var(--accent-2); background: transparent; }
+.settings-nav button.active { border-color: var(--accent-2); color: var(--accent-2); font-weight: 600; }
+.settings-card[hidden] { display: none; }
 .settings-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px 14px; margin-bottom: 12px; }
 .settings-card h2 { margin-bottom: 6px; }
 .settings-field { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--text-soft); margin-top: 10px; }
@@ -913,6 +919,11 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 .sp-editor-actions { display: flex; gap: 6px; }
 .sp-editor-actions button { background: transparent; color: var(--text-soft); border: 1px solid var(--border-2); border-radius: 6px; padding: 3px 12px; font-size: 12px; }
 .sp-expand { position: fixed; right: 0; top: 120px; z-index: 25; background: var(--surface); color: var(--text-soft); border: 1px solid var(--border-2); border-right: none; border-radius: 8px 0 0 8px; padding: 8px 6px; font-size: 11px; writing-mode: vertical-rl; }
+.sp-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 6px 12px 0; }
+.sp-filter[hidden] { display: none; }
+.sp-filter select { background: var(--bg); color: var(--text); border: 1px solid var(--border-2); border-radius: 6px; padding: 2px 4px; font-size: 11px; max-width: 150px; }
+.sp-filter select:disabled { opacity: 0.5; }
+.sp-filter-cur { font-size: 11px; color: var(--text-soft); display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .sp-resize { position: absolute; left: -5px; top: 0; bottom: 0; width: 10px; cursor: col-resize; z-index: 2; touch-action: none; }
 .sp-resize::after { content: ''; position: absolute; left: 4px; top: 40%; height: 20%; width: 2px; border-radius: 2px; background: var(--border-2); opacity: 0; transition: opacity 0.15s; }
 .sp-resize:hover::after, body.sp-resizing .sp-resize::after { opacity: 1; background: var(--accent-2); }

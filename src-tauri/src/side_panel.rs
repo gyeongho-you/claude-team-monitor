@@ -389,8 +389,10 @@ fn scan_file(preset: &str, path: &Path) -> HashMap<String, RawItem> {
     state.items.clone()
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct CollectedItem {
+    pub lead_id: String,
     pub url: String,
     pub title: String,
     pub version: u32,
@@ -407,7 +409,7 @@ fn collect_items(preset: &str, leads: &[LeadRecord], selected: Option<&str>) -> 
     for l in leads.iter().filter(|l| selected.map_or(true, |s| l.id == s)) {
         let file = crate::transcript::session_file_path(&l.target_dir, &l.session_id);
         for (url, raw) in scan_file(preset, &file) {
-            out.push(CollectedItem { url, title: raw.title, version: raw.version, ts: raw.ts, lead_label: lead_label(l) });
+            out.push(CollectedItem { lead_id: l.id.clone(), url, title: raw.title, version: raw.version, ts: raw.ts, lead_label: lead_label(l) });
         }
     }
     out.sort_by(|a, b| b.ts.cmp(&a.ts));
@@ -652,6 +654,8 @@ pub struct PanelContent {
     pub updated_at: Option<i64>,
     pub mode: String,
     pub note: String,
+    /// 자동 수집 슬롯일 때만 채운다 — 화면의 리더·기간 필터가 이걸 거른다(모델에 넘기는 재료는 거르지 않는다).
+    pub items: Vec<CollectedItem>,
 }
 
 #[tauri::command]
@@ -714,8 +718,13 @@ pub async fn get_panel_content_command(slot_id: String, lead_id: Option<String>)
     if slot.mode == "auto" {
         let selected = if slot.scope == "selected" { lead_id } else { None };
         let preset = slot.preset.clone();
-        let md = tokio::task::spawn_blocking(move || render_items_markdown(&preset, &collect_items(&preset, &load_leads(), selected.as_deref()))).await.map_err(|e| e.to_string())?;
-        return Ok(PanelContent { markdown: md, updated_at: None, mode: slot.mode, note: "대화 기록에서 자동으로 모았습니다".to_string() });
+        let (md, items) = tokio::task::spawn_blocking(move || {
+            let items = collect_items(&preset, &load_leads(), selected.as_deref());
+            (render_items_markdown(&preset, &items), items)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        return Ok(PanelContent { markdown: md, updated_at: None, mode: slot.mode, note: "대화 기록에서 자동으로 모았습니다".to_string(), items });
     }
     let (text, mtime) = read_content(&panel_dir(), &slot.id);
     let note = match slot.mode.as_str() {
@@ -723,7 +732,7 @@ pub async fn get_panel_content_command(slot_id: String, lead_id: Option<String>)
         "ai" => "AI가 정리한 내용입니다(틀릴 수 있습니다)",
         _ => "직접 쓴 내용입니다",
     };
-    Ok(PanelContent { markdown: text, updated_at: mtime, mode: slot.mode, note: note.to_string() })
+    Ok(PanelContent { markdown: text, updated_at: mtime, mode: slot.mode, note: note.to_string(), items: Vec::new() })
 }
 
 /// 직접 쓰는 슬롯(manual)과 ai/lead 슬롯의 내용을 사용자가 고쳐 저장한다.
@@ -754,7 +763,7 @@ pub async fn refresh_panel_slot_command(slot_id: String) -> Result<PanelContent,
     AI_BUSY.store(false, Ordering::SeqCst);
     let text = result.map_err(|e| e.to_string())??;
     let (_, mtime) = read_content(&panel_dir(), &slot.id);
-    Ok(PanelContent { markdown: text, updated_at: mtime, mode: slot.mode, note: "AI가 정리한 내용입니다(틀릴 수 있습니다)".to_string() })
+    Ok(PanelContent { markdown: text, updated_at: mtime, mode: slot.mode, note: "AI가 정리한 내용입니다(틀릴 수 있습니다)".to_string(), items: Vec::new() })
 }
 
 pub(crate) fn is_safe_external_url(url: &str) -> bool {
@@ -874,8 +883,8 @@ mod tests {
     #[test]
     fn items_render_as_newest_first_markdown_links() {
         let items = vec![
-            CollectedItem { url: "https://claude.ai/artifact/B".into(), title: "새 [보고서]".into(), version: 2, ts: "2026-11-02T01:00:00Z".into(), lead_label: "웹 팀장".into() },
-            CollectedItem { url: "https://claude.ai/artifact/A".into(), title: "옛 보고서".into(), version: 1, ts: "2026-11-01T01:00:00Z".into(), lead_label: "웹 팀장".into() },
+            CollectedItem { lead_id: "L1".into(), url: "https://claude.ai/artifact/B".into(), title: "새 [보고서]".into(), version: 2, ts: "2026-11-02T01:00:00Z".into(), lead_label: "웹 팀장".into() },
+            CollectedItem { lead_id: "L1".into(), url: "https://claude.ai/artifact/A".into(), title: "옛 보고서".into(), version: 1, ts: "2026-11-01T01:00:00Z".into(), lead_label: "웹 팀장".into() },
         ];
         let md = render_items_markdown("artifact-reports", &items);
         assert!(md.starts_with("총 2개 · 최신순"));

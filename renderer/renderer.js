@@ -761,6 +761,25 @@ function renderLeadCard(row) {
     </div>
   `;
 }
+// ---------------- 앱 설정 탭의 분류 보기 ----------------
+// 설정 카드가 많아져 한 줄로 쭉 이어지면 알아보기 어렵다 — 위쪽 분류 버튼으로 한 번에 한 분류만 보여 주고, 마지막으로 본 분류를 기억한다.
+const SETTINGS_SECTION_KEY = 'ctm.settingsSection';
+function showSettingsSection(name) {
+  const cards = [...document.querySelectorAll('#app-settings-tab .settings-card[data-section]')];
+  if (!cards.some(c => c.dataset.section === name)) name = cards.length ? cards[0].dataset.section : '';
+  cards.forEach(c => { c.hidden = c.dataset.section !== name; });
+  document.querySelectorAll('#settings-nav [data-settings-section]').forEach(b => b.classList.toggle('active', b.dataset.settingsSection === name));
+  try { localStorage.setItem(SETTINGS_SECTION_KEY, name); } catch { /* 저장 안 돼도 이번 화면에서는 적용 */ }
+}
+document.getElementById('settings-nav').addEventListener('click', e => {
+  const b = e.target.closest('[data-settings-section]');
+  if (b) showSettingsSection(b.dataset.settingsSection);
+});
+{
+  let last = '';
+  try { last = localStorage.getItem(SETTINGS_SECTION_KEY) || ''; } catch { /* 기본 분류로 */ }
+  showSettingsSection(last);
+}
 // ---------------- 오른쪽 사용자 패널 ----------------
 // 설정(앱 설정 탭의 "오른쪽 패널")에서 슬롯을 만들면 작업 탭 오른쪽에 정적 마크다운으로 띄운다 — 동작 설명은 src-tauri/src/side_panel.rs 맨 위 참고.
 const spEl = document.getElementById('side-panel');
@@ -813,14 +832,77 @@ async function refreshPanelContent(force) {
   const leadId = slot.mode === 'auto' && slot.scope === 'selected' ? selectedLeadId : null;
   let c;
   try { c = await window.api.getPanelContent(slot.id, leadId); } catch (err) { spMetaEl.textContent = `불러오지 못했습니다: ${errMsg(err)}`; return; }
-  const key = `${slot.id}|${leadId || ''}|${c.updatedAt || ''}|${c.markdown.length}|${c.markdown.slice(0, 64)}`;
+  const auto = slot.mode === 'auto' && Array.isArray(c.items);
+  const key = `${slot.id}|${leadId || ''}|${c.updatedAt || ''}|${c.markdown.length}|${c.markdown.slice(0, 64)}|${auto ? `${panelFilter.lead}|${panelFilter.range}|${panelFilter.current ? selectedLeadId : ''}` : ''}`;
   panelContent = c;
   if (!force && key === panelLastKey) return;
   panelLastKey = key;
-  spBodyEl.innerHTML = c.markdown.trim() ? renderMarkdown(c.markdown) : '<p class="empty-hint">아직 내용이 없습니다.</p>';
+  renderPanelBody(slot, c);
+}
+
+// ---- 자동 수집 슬롯의 화면 필터(리더별·기간별·현재 리더만). 보이는 것만 거르고, AI에 넘기는 재료는 거르지 않는다. ----
+const panelFilter = { lead: '', range: 'all', current: false };
+const spFilterEl = document.getElementById('sp-filter');
+const spFilterLeadEl = document.getElementById('sp-filter-lead');
+const spFilterRangeEl = document.getElementById('sp-filter-range');
+const spFilterCurrentEl = document.getElementById('sp-filter-current');
+
+function panelRangeStartMs(range) {
+  const now = new Date();
+  if (range === 'today') return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  if (range === '7d') return Date.now() - 7 * 86400000;
+  if (range === '30d') return Date.now() - 30 * 86400000;
+  return 0;
+}
+function filterPanelItems(items, filter, currentLeadId) {
+  const from = panelRangeStartMs(filter.range);
+  const leadId = filter.current ? currentLeadId : filter.lead;
+  return items.filter(it => {
+    if (leadId && it.leadId !== leadId) return false;
+    if (from) { const t = Date.parse(it.ts); if (!(t >= from)) return false; }
+    return true;
+  });
+}
+function panelItemsMarkdown(items, total) {
+  if (!items.length) return total ? '조건에 맞는 항목이 없습니다.' : '';
+  const esc = s => String(s).replace(/\[/g, '(').replace(/\]/g, ')');
+  const p2 = n => String(n).padStart(2, '0');
+  const stamp = ts => { const d = new Date(ts); return isNaN(d) ? '' : ` · ${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`; };
+  const head = items.length === total ? `총 ${total}개 · 최신순` : `${total}개 중 ${items.length}개 · 최신순`;
+  return `${head}\n\n` + items.map(it => `- [${esc(it.title)}](${it.url}) — ${esc(it.leadLabel)}${stamp(it.ts)}${it.version > 1 ? ` · v${it.version}` : ''}`).join('\n');
+}
+function renderPanelFilterBar(items) {
+  const seen = new Map();
+  for (const it of items) if (!seen.has(it.leadId)) seen.set(it.leadId, it.leadLabel);
+  if (panelFilter.lead && !seen.has(panelFilter.lead)) panelFilter.lead = '';
+  spFilterLeadEl.innerHTML = '<option value="">전체 리더</option>' + [...seen].map(([id, label]) => `<option value="${escapeHtml(id)}">${escapeHtml(label)}</option>`).join('');
+  spFilterLeadEl.value = panelFilter.lead;
+  spFilterLeadEl.disabled = panelFilter.current;
+  spFilterRangeEl.value = panelFilter.range;
+  spFilterCurrentEl.checked = panelFilter.current;
+}
+function renderPanelBody(slot, c) {
+  const auto = slot.mode === 'auto' && Array.isArray(c.items);
+  spFilterEl.hidden = !auto;
+  let md = c.markdown;
+  if (auto) {
+    renderPanelFilterBar(c.items);
+    md = panelItemsMarkdown(filterPanelItems(c.items, panelFilter, selectedLeadId), c.items.length) || c.markdown;
+  }
+  spBodyEl.innerHTML = md.trim() ? renderMarkdown(md) : '<p class="empty-hint">아직 내용이 없습니다.</p>';
   const when = c.updatedAt ? ` · ${formatAgo(c.updatedAt)} 갱신` : '';
   spMetaEl.textContent = `${PANEL_MODE_LABELS[slot.mode] || slot.mode} · ${c.note}${when}`;
 }
+function onPanelFilterChange() {
+  panelFilter.lead = spFilterLeadEl.value;
+  panelFilter.range = spFilterRangeEl.value;
+  panelFilter.current = spFilterCurrentEl.checked;
+  const slot = activePanelSlot();
+  if (slot && panelContent) { panelLastKey = ''; renderPanelBody(slot, panelContent); }
+}
+spFilterLeadEl.addEventListener('change', onPanelFilterChange);
+spFilterRangeEl.addEventListener('change', onPanelFilterChange);
+spFilterCurrentEl.addEventListener('change', onPanelFilterChange);
 
 async function loadPanelConfig() {
   try { panelConfig = await window.api.getPanelConfig(); } catch (err) { console.error('패널 설정 조회 실패:', err); return; }
@@ -903,6 +985,16 @@ document.getElementById('sp-editor-save').addEventListener('click', async () => 
 document.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => setTimeout(() => { renderPanelChrome(); refreshPanelContent(true); }, 0)));
 window.addEventListener('resize', () => renderPanelChrome());
 setInterval(() => { if (!spEl.hidden) refreshPanelContent(false); }, 3000);
+// 팀장을 바꾸면 3초 주기를 기다리지 않고 바로 반영한다. selectedLeadId는 여러 곳에서 바뀌므로 바뀐 순간을 한 곳에서 지켜본다.
+let panelSeenLeadId = selectedLeadId;
+setInterval(() => {
+  if (selectedLeadId === panelSeenLeadId) return;
+  panelSeenLeadId = selectedLeadId;
+  const slot = activePanelSlot();
+  if (spEl.hidden || !slot || slot.mode !== 'auto') return;
+  if (slot.scope === 'selected') { panelLastKey = ''; refreshPanelContent(true); } // 서버가 팀장별로 모아 주는 슬롯은 다시 불러온다
+  else if (panelFilter.current && panelContent) { panelLastKey = ''; renderPanelBody(slot, panelContent); } // 이미 가진 목록을 다시 거르기만 하면 된다
+}, 100);
 
 // ---- 설정 화면(앱 설정 탭 > 오른쪽 패널) ----
 const panelEnabledEl = document.getElementById('panel-enabled-input');
@@ -925,13 +1017,17 @@ const PS_MODEL_NAMES = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus', fable: 
 
 function updatePsFormVisibility() {
   document.querySelectorAll('#panel-form .ps-group').forEach(g => g.classList.toggle('show', g.dataset.mode === psMode.value));
-  const costly = psModel.value === 'fable' || psModel.value === 'opus';
-  psCostHint.textContent = psAutoUpdate.checked && costly
-    ? `⚠ 자동 갱신을 켜면 팀장이 일을 마칠 때마다 ${PS_MODEL_NAMES[psModel.value]}가 호출됩니다(${psModel.value === 'fable' ? '호출당 약 0.2달러' : '호출당 약 2센트'}). 하루에 여러 번 마치면 비용이 커질 수 있습니다.`
-    : '자동 갱신을 끄면 패널의 ⟳ 버튼을 눌렀을 때만 호출됩니다.';
+  // AI 슬롯은 모델을 따로 호출하므로 어떤 모델이든 추가 토큰이 든다 — 모델·자동 갱신과 상관없이 항상 보이게 한다.
+  const price = { haiku: '호출당 거의 무료 수준', sonnet: '호출당 Haiku보다 많이 듭니다', opus: '호출당 약 2센트', fable: '호출당 약 0.2달러' }[psModel.value];
+  const when = psAutoUpdate.checked
+    ? '팀장이 일을 마칠 때마다 자동으로 호출됩니다(하루에 여러 번 마치면 그만큼 쌓입니다).'
+    : '자동 갱신을 꺼 두었으니 패널의 ⟳ 버튼을 누를 때만 호출됩니다.';
+  const big = psInclude.value !== 'none' ? ' "재료"에 목록 전체를 넣으면 호출마다 보내는 양도 늘어납니다.' : '';
+  psCostHint.textContent = `⚠ 추가 토큰 사용: 갱신할 때마다 ${PS_MODEL_NAMES[psModel.value]}${psModel.value === 'sonnet' || psModel.value === 'fable' ? '을' : '를'} 따로 호출합니다(${price}). ${when}${big}`;
 }
 psMode.addEventListener('change', updatePsFormVisibility);
 psModel.addEventListener('change', updatePsFormVisibility);
+psInclude.addEventListener('change', updatePsFormVisibility);
 psAutoUpdate.addEventListener('change', updatePsFormVisibility);
 
 function renderPanelSettings() {

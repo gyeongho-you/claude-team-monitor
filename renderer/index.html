@@ -289,7 +289,14 @@
 
     <!-- 앱 설정 탭: 정체 감시 기준, 앱 버전/업데이트 확인, 숨긴 알림 되돌리기 -->
     <section id="app-settings-tab" class="tab-page">
-      <div class="settings-card">
+      <nav id="settings-nav" class="settings-nav">
+        <button data-settings-section="stall">정체 감시</button>
+        <button data-settings-section="skills">스킬</button>
+        <button data-settings-section="panel">오른쪽 패널</button>
+        <button data-settings-section="about">앱 정보 · 업데이트</button>
+        <button data-settings-section="dismissed">숨긴 알림</button>
+      </nav>
+      <div class="settings-card" data-section="stall">
         <h2>정체 감시</h2>
         <p class="form-hint">팀장이 일을 멈춘 채 방치된 것처럼 보일 때 자동으로 확인·재촉하는 기준입니다. 값을 바꾸면 바로 저장됩니다.</p>
         <label class="settings-field">몇 분 이상 idle이면 방치로 볼지
@@ -301,7 +308,7 @@
         <div id="app-settings-status"></div>
       </div>
 
-      <div class="settings-card" id="skills-card">
+      <div class="settings-card" id="skills-card" data-section="skills">
         <h2>스킬 (이 앱의 모든 팀장 공통)</h2>
         <p class="form-hint">등록한 스킬은 이 앱이 띄운 팀장에게만 안내되고(떠 있는 팀장은 바로, 히스토리 팀장은 다시 이어질 때, 새 팀장은 첫 지시문에 포함) 팀장이 그 파일을 읽고 따릅니다. 이 앱과 무관한 claude 세션에는 보이지 않습니다. 항목의 <strong>전역</strong>을 켜면 <code>~/.claude/skills</code>에도 설치되어 모든 claude 세션에서 쓸 수 있고, 끄면 거기서만 지워집니다.</p>
         <div id="skills-list"></div>
@@ -318,7 +325,7 @@
         </div>
       </div>
 
-      <div class="settings-card" id="panel-card">
+      <div class="settings-card" id="panel-card" data-section="panel">
         <h2>오른쪽 패널</h2>
         <p class="form-hint">작업 탭 오른쪽에 내가 정한 내용을 띄웁니다(정적인 글만 표시). 슬롯마다 채우는 방법을 고릅니다 — 자동 수집은 앱이 대화 기록에서 모으고, 팀장이 채움은 내가 적은 지침을 모든 팀장이 따르고, AI가 정리는 팀장이 일을 마칠 때마다 선택한 모델이 내가 적은 요청대로 갱신합니다.</p>
         <label class="settings-check"><input type="checkbox" id="panel-enabled-input" /> 오른쪽 패널 표시</label>
@@ -328,7 +335,7 @@
           <select id="ps-mode">
             <option value="auto">자동 수집 — 앱이 대화 기록에서 모음</option>
             <option value="lead">팀장이 채움 — 내 지침을 팀장이 따름</option>
-            <option value="ai">AI가 정리 — 모델이 내 요청대로 갱신</option>
+            <option value="ai">AI가 정리 — 모델이 내 요청대로 갱신 (추가 토큰 사용)</option>
             <option value="manual">직접 쓰기</option>
           </select>
           <div class="ps-group" data-mode="auto">
@@ -359,7 +366,7 @@
               <option value="github-pr">재료: 최근 대화 + 모은 GitHub PR 전체 목록</option>
             </select>
             <label class="settings-check"><input type="checkbox" id="ps-auto-update" /> 팀장이 일을 마칠 때마다 자동으로 갱신</label>
-            <p class="form-hint" id="ps-cost-hint"></p>
+            <p class="form-hint ps-warn" id="ps-cost-hint"></p>
           </div>
           <div class="settings-actions">
             <button id="ps-save-btn">슬롯 추가</button>
@@ -369,7 +376,7 @@
         </div>
       </div>
 
-      <div class="settings-card">
+      <div class="settings-card" data-section="about">
         <h2>앱 정보 · 업데이트</h2>
         <div class="info-grid">
           <span>현재 버전</span><strong id="about-version">-</strong>
@@ -383,7 +390,7 @@
         <label class="settings-check"><input type="checkbox" id="auto-update-check-input" checked /> 앱을 켤 때와 6시간마다 새 버전을 자동으로 확인</label>
       </div>
 
-      <div class="settings-card">
+      <div class="settings-card" data-section="dismissed">
         <h2>숨긴 알림</h2>
         <p class="form-hint">"최초 실행 승인이 안 된 디렉토리" 경고나 새 버전 알림을 ✕/"알림 끄기"로 숨겼다면 여기서 다시 보이게 할 수 있습니다.</p>
         <div class="settings-actions"><button id="reset-dismissed-btn">숨긴 알림 모두 다시 표시</button></div>
@@ -478,6 +485,16 @@
       <button id="sp-collapse-btn" class="sp-icon" title="패널 접기">▸</button>
     </div>
     <div id="sp-meta" class="sp-meta"></div>
+    <div id="sp-filter" class="sp-filter" hidden>
+      <select id="sp-filter-lead" title="리더별로 보기"></select>
+      <select id="sp-filter-range" title="기간별로 보기">
+        <option value="all">전체 기간</option>
+        <option value="today">오늘</option>
+        <option value="7d">최근 7일</option>
+        <option value="30d">최근 30일</option>
+      </select>
+      <label class="sp-filter-cur" title="지금 대화창에 띄운 리더의 항목만 봅니다"><input type="checkbox" id="sp-filter-current"> 현재 리더만</label>
+    </div>
     <div id="sp-body" class="sp-body md"></div>
     <div id="sp-editor" class="sp-editor" hidden>
       <textarea id="sp-editor-text"></textarea>
