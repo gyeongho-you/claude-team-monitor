@@ -1258,7 +1258,10 @@ psSaveBtn.addEventListener('click', async () => {
   psSaveBtn.disabled = true; psStatus.textContent = '저장하는 중...';
   try {
     const existing = psEditingId ? (panelConfig.slots || []).find(s => s.id === psEditingId) : null;
-    panelConfig = await window.api.savePanelSlot(psInputFromForm(existing ? existing.enabled : true));
+    const input = psInputFromForm(existing ? existing.enabled : true);
+    // 음수·소수 같은 값은 백엔드가 영어 기술 메시지로 거부하므로 여기서 먼저 알기 쉽게 알려 준다
+    if (input.mode === 'script' && !(Number.isInteger(input.timeoutMs) && input.timeoutMs >= 500 && input.timeoutMs <= 600000)) throw new Error('제한 시간은 500~600000ms 사이의 정수로 입력하세요.');
+    panelConfig = await window.api.savePanelSlot(input);
     resetPsForm(); renderPanelChrome(); renderPanelSettings(); panelLastKey = ''; refreshPanelContent(true);
     psStatus.textContent = '저장했습니다.'; setTimeout(() => { psStatus.textContent = ''; }, 3000);
   } catch (err) { psStatus.textContent = errMsg(err); }
