@@ -862,6 +862,12 @@ pub async fn test_panel_script_command(interpreter: String, script: String, time
     tokio::task::spawn_blocking(move || crate::panel_script::run_script(&panel_dir().join("scripts"), "_test", &interpreter, &script, timeout_ms, lead.as_ref())).await.map_err(|e| e.to_string())
 }
 
+/// 스크립트 작성 안내(앱이 주는 정보·출력 형식·제한) — 설정 화면에 보여 주고, AI 요청문에도 같은 글이 들어간다.
+#[tauri::command]
+pub fn get_panel_script_reference_command() -> String {
+    crate::panel_script::reference_markdown()
+}
+
 /// "AI로 스크립트 만들기": 요청을 모델에게 주고 스크립트 초안을 받아 온다(저장은 사용자가 코드를 보고 직접 한다). 모델 호출이라 추가 토큰이 든다.
 #[tauri::command]
 pub async fn generate_panel_script_command(request: String, interpreter: String, model: String) -> Result<String, String> {

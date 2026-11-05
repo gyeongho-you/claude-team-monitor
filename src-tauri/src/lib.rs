@@ -97,6 +97,7 @@ pub fn run() {
       side_panel::open_external_url_command,
       side_panel::test_panel_script_command,
       side_panel::generate_panel_script_command,
+      side_panel::get_panel_script_reference_command,
       app_skills::get_app_skills_command,
       app_skills::add_app_skill_command,
       app_skills::update_app_skill_command,

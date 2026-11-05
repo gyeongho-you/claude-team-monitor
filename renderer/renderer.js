@@ -1136,6 +1136,22 @@ console.log('\\n### 워크트리 ' + wts.length + '개\\n');
 console.log('| 경로 | 커밋 | 브랜치 |\\n|---|---|---|');
 for (const l of wts) { const m = l.match(/^(.+?)\\s+([0-9a-f]+)\\s+(.*)$/); console.log(m ? '| ' + m[1] + ' | ' + m[2] + ' | ' + m[3] + ' |' : '| ' + l + ' | | |'); }
 `;
+// 스크립트 작성 안내 — 앱이 주는 정보 목록은 백엔드가 하나로 관리하고(AI 요청문에도 같은 글이 들어간다), 여기서는 가져와 보여 주기만 한다.
+let psReferenceMd = '';
+async function loadPsReference() {
+  if (psReferenceMd) return;
+  const body = document.getElementById('ps-ref-body');
+  try { psReferenceMd = await window.api.getPanelScriptReference(); body.innerHTML = renderMarkdown(psReferenceMd); }
+  catch (err) { body.textContent = `안내를 불러오지 못했습니다: ${errMsg(err)}`; }
+}
+document.getElementById('ps-ref').addEventListener('toggle', e => { if (e.target.open) loadPsReference(); });
+document.getElementById('ps-ref-copy').addEventListener('click', async e => {
+  const btn = e.currentTarget;
+  await loadPsReference();
+  try { await navigator.clipboard.writeText(psReferenceMd); btn.textContent = '복사했습니다'; }
+  catch { btn.textContent = '복사 실패 — 아래 글을 직접 선택해 복사하세요'; document.getElementById('ps-ref').open = true; }
+  setTimeout(() => { btn.textContent = '안내문 복사'; }, 2500);
+});
 document.getElementById('ps-example-btn').addEventListener('click', () => {
   if (psScript.value.trim() && !confirm('입력해 둔 스크립트를 예제로 바꿉니다. 계속할까요?')) return;
   psInterp.value = 'node'; psScript.value = PS_EXAMPLE_NODE; psTestOut.hidden = true;

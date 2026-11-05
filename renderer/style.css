@@ -866,6 +866,21 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 .ps-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .ps-row button { background: transparent; color: var(--text-soft); border: 1px solid var(--border-2); border-radius: 6px; padding: 3px 10px; font-size: 12px; }
 .ps-row button:hover { color: var(--accent-2); border-color: var(--accent-2); background: transparent; }
+.ps-ref { border: 1px solid var(--border-2); border-radius: 6px; padding: 6px 10px; }
+.ps-ref summary { cursor: pointer; font-size: 12px; color: var(--text-soft); }
+.ps-ref[open] summary { color: var(--accent-2); }
+.ps-ref-actions { display: flex; align-items: center; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+.ps-ref-actions button { background: transparent; color: var(--text-soft); border: 1px solid var(--border-2); border-radius: 6px; padding: 3px 10px; font-size: 12px; }
+.ps-ref-actions button:hover { color: var(--accent-2); border-color: var(--accent-2); background: transparent; }
+.ps-ref-body { font-size: 12px; line-height: 1.55; color: var(--text); max-height: 360px; overflow: auto; word-break: break-word; }
+.ps-ref-body h2, .ps-ref-body h3 { font-size: 13px; margin: 10px 0 4px; color: var(--text-bright); text-transform: none; }
+.ps-ref-body p, .ps-ref-body ul { margin: 6px 0; }
+.ps-ref-body ul { padding-left: 18px; }
+.ps-ref-body code { background: var(--surface-2); padding: 0 4px; border-radius: 3px; font-size: 11px; }
+.ps-ref-body table { border-collapse: collapse; width: 100%; margin: 6px 0; font-size: 11px; }
+.ps-ref-body th, .ps-ref-body td { border: 1px solid var(--border); padding: 3px 6px; text-align: left; vertical-align: top; }
+.ps-ref-body th { background: var(--surface-2); }
+.ps-ref-body td:first-child, .ps-ref-body td:first-child code { white-space: nowrap; word-break: normal; }
 .ps-timeout { font-size: 12px; color: var(--text-soft); display: inline-flex; align-items: center; gap: 4px; }
 .ps-timeout input { width: 92px; background: var(--bg); border: 1px solid var(--border-2); color: var(--text); padding: 3px 6px; border-radius: 4px; text-align: right; }
 .ps-code { background: var(--bg); color: var(--text); border: 1px solid var(--border-2); border-radius: 4px; padding: 6px; min-height: 200px; font-family: Consolas, "Courier New", monospace; font-size: 12px; white-space: pre; overflow: auto; }
