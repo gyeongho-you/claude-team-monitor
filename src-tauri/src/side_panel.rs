@@ -64,6 +64,9 @@ fn default_timeout_ms() -> u64 {
 fn default_output_format() -> String {
     "markdown".to_string()
 }
+fn default_false() -> bool {
+    false
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -104,6 +107,9 @@ pub struct PanelSlot {
     /// script 전용: 출력 형식 "markdown"(글·표·링크·data: 이미지) | "html"(SVG·CSS 그래픽, 화면에서 스크립트 실행이 막힌 프레임에 그린다)
     #[serde(default = "default_output_format")]
     pub output_format: String,
+    /// script + html 전용: 출력 HTML 안의 JavaScript 실행을 허용(앱과 분리된 프레임에서, 네트워크 차단 — panel_frames.rs). 기본은 꺼짐.
+    #[serde(default = "default_false")]
+    pub allow_js: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -143,6 +149,8 @@ pub struct PanelSlotInput {
     pub timeout_ms: u64,
     #[serde(default = "default_output_format")]
     pub output_format: String,
+    #[serde(default = "default_false")]
+    pub allow_js: bool,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -211,6 +219,7 @@ pub(crate) fn slot_from_input(input: &PanelSlotInput, id: String, created_at: i6
         script: if is_script { input.script.clone() } else { String::new() },
         timeout_ms: if is_script { input.timeout_ms } else { default_timeout_ms() },
         output_format: if is_script { input.output_format.clone() } else { default_output_format() },
+        allow_js: is_script && input.output_format == "html" && input.allow_js,
     })
 }
 
@@ -841,7 +850,7 @@ async fn script_content(slot: PanelSlot, lead_id: Option<String>, force: bool) -
     let leads = load_leads();
     let lead = crate::panel_script::lead_by_id(&leads, lead_id.as_deref());
     // 스크립트·실행 환경·제한 시간·출력 형식·선택한 팀장이 바뀌면 다른 결과다.
-    let key = format!("{}|{}|{}|{}|{}|{}", slot.interpreter, slot.timeout_ms, slot.output_format, lead.as_ref().map(|l| l.id.as_str()).unwrap_or(""), slot.script.len(), slot.script);
+    let key = format!("{}|{}|{}|{}|{}|{}|{}", slot.interpreter, slot.timeout_ms, slot.output_format, slot.allow_js, lead.as_ref().map(|l| l.id.as_str()).unwrap_or(""), slot.script.len(), slot.script);
     let note = "스크립트를 이 PC에서 실행한 결과입니다".to_string();
     let cached = |c: &HashMap<String, ScriptCacheEntry>| c.get(&slot.id).filter(|e| e.key == key).map(|e| (e.output.clone(), e.format.clone(), e.updated_at, e.at.elapsed()));
     let content = |output: String, format: String, at: Option<i64>, slot: &PanelSlot, note: String| PanelContent { markdown: output, updated_at: at, mode: slot.mode.clone(), note, items: Vec::new(), format };
@@ -855,8 +864,8 @@ async fn script_content(slot: PanelSlot, lead_id: Option<String>, force: bool) -
         let (out, fmt, at) = cached(&script_cache().lock().unwrap_or_else(|e| e.into_inner())).map(|(o, f, a, _)| (o, f, Some(a))).unwrap_or(("스크립트를 실행하는 중입니다...".to_string(), "markdown".to_string(), None));
         return Ok(content(out, fmt, at, &slot, note));
     }
-    let (id, interpreter, script, timeout_ms, format) = (slot.id.clone(), slot.interpreter.clone(), slot.script.clone(), slot.timeout_ms, slot.output_format.clone());
-    let outcome = tokio::task::spawn_blocking(move || crate::panel_script::run_script_outcome(&panel_dir().join("scripts"), &id, &interpreter, &script, timeout_ms, lead.as_ref(), &format))
+    let (id, interpreter, script, timeout_ms, format, allow_js) = (slot.id.clone(), slot.interpreter.clone(), slot.script.clone(), slot.timeout_ms, slot.output_format.clone(), slot.allow_js);
+    let outcome = tokio::task::spawn_blocking(move || crate::panel_script::run_script_outcome(&panel_dir().join("scripts"), &id, &interpreter, &script, timeout_ms, lead.as_ref(), &format, allow_js))
         .await
         .map_err(|e| e.to_string());
     script_running().lock().unwrap_or_else(|e| e.into_inner()).remove(&slot.id);
@@ -880,7 +889,7 @@ pub struct ScriptTestResult {
 
 /// 설정 화면의 "시험 실행": 저장하지 않은 스크립트를 지금 돌려 결과를 보여 준다.
 #[tauri::command]
-pub async fn test_panel_script_command(interpreter: String, script: String, timeout_ms: u64, lead_id: Option<String>, output_format: Option<String>) -> Result<ScriptTestResult, String> {
+pub async fn test_panel_script_command(interpreter: String, script: String, timeout_ms: u64, lead_id: Option<String>, output_format: Option<String>, allow_js: Option<bool>) -> Result<ScriptTestResult, String> {
     if !crate::panel_script::INTERPRETERS.contains(&interpreter.as_str()) {
         return Err("스크립트 실행 환경이 올바르지 않습니다.".to_string());
     }
@@ -895,7 +904,8 @@ pub async fn test_panel_script_command(interpreter: String, script: String, time
         return Err("출력 형식이 올바르지 않습니다.".to_string());
     }
     let lead = crate::panel_script::lead_by_id(&load_leads(), lead_id.as_deref());
-    let outcome = tokio::task::spawn_blocking(move || crate::panel_script::run_script_outcome(&panel_dir().join("scripts"), "_test", &interpreter, &script, timeout_ms, lead.as_ref(), &format)).await.map_err(|e| e.to_string())?;
+    let allow_js = allow_js.unwrap_or(false) && format == "html";
+    let outcome = tokio::task::spawn_blocking(move || crate::panel_script::run_script_outcome(&panel_dir().join("scripts"), "_test", &interpreter, &script, timeout_ms, lead.as_ref(), &format, allow_js)).await.map_err(|e| e.to_string())?;
     if let Some(problem) = &outcome.problem {
         crate::panel_script::record_error_at(&script_errors_path(), "_test", "(시험 실행)", "test", problem, now_ms());
     }
@@ -920,7 +930,8 @@ pub fn clear_panel_script_errors_command() {
 /// 스크립트 작성 안내(앱이 주는 정보·출력 형식·제한) — 설정 화면에 보여 주고, AI 요청문에도 같은 글이 들어간다.
 /// "AI로 고치기": 시험 실행에서 나온 결과(오류 포함)를 보고 모델이 스크립트를 고쳐 온다. 마찬가지로 저장은 사용자가 코드를 보고 직접 한다.
 #[tauri::command]
-pub async fn fix_panel_script_command(script: String, problem: String, note: String, interpreter: String, model: String, output_format: Option<String>) -> Result<String, String> {
+pub async fn fix_panel_script_command(script: String, problem: String, note: String, interpreter: String, model: String, output_format: Option<String>, allow_js: Option<bool>) -> Result<String, String> {
+    let allow_js = allow_js.unwrap_or(false);
     let output_format = output_format.unwrap_or_else(default_output_format);
     if !crate::panel_script::OUTPUT_FORMATS.contains(&output_format.as_str()) {
         return Err("출력 형식이 올바르지 않습니다.".to_string());
@@ -939,7 +950,7 @@ pub async fn fix_panel_script_command(script: String, problem: String, note: Str
     if AI_BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
         return Err("다른 AI 작업이 진행 중입니다. 잠시 후 다시 누르세요.".to_string());
     }
-    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_fix_prompt(&script, &problem, &note, &interpreter, &output_format))).await;
+    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_fix_prompt(&script, &problem, &note, &interpreter, &output_format, allow_js))).await;
     AI_BUSY.store(false, Ordering::SeqCst);
     let code = crate::panel_script::extract_code_block(&result.map_err(|e| e.to_string())??);
     if code.trim().is_empty() {
@@ -955,7 +966,8 @@ pub fn get_panel_script_reference_command() -> String {
 
 /// "AI로 스크립트 만들기": 요청을 모델에게 주고 스크립트 초안을 받아 온다(저장은 사용자가 코드를 보고 직접 한다). 모델 호출이라 추가 토큰이 든다.
 #[tauri::command]
-pub async fn generate_panel_script_command(request: String, interpreter: String, model: String, output_format: Option<String>) -> Result<String, String> {
+pub async fn generate_panel_script_command(request: String, interpreter: String, model: String, output_format: Option<String>, allow_js: Option<bool>) -> Result<String, String> {
+    let allow_js = allow_js.unwrap_or(false);
     let output_format = output_format.unwrap_or_else(default_output_format);
     if !crate::panel_script::OUTPUT_FORMATS.contains(&output_format.as_str()) {
         return Err("출력 형식이 올바르지 않습니다.".to_string());
@@ -970,7 +982,7 @@ pub async fn generate_panel_script_command(request: String, interpreter: String,
     if AI_BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
         return Err("다른 AI 작업이 진행 중입니다. 잠시 후 다시 누르세요.".to_string());
     }
-    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_generate_prompt(&request, &interpreter, &output_format))).await;
+    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_generate_prompt(&request, &interpreter, &output_format, allow_js))).await;
     AI_BUSY.store(false, Ordering::SeqCst);
     let text = result.map_err(|e| e.to_string())??;
     let code = crate::panel_script::extract_code_block(&text);
@@ -1079,7 +1091,7 @@ mod tests {
     use super::*;
 
     fn input(mode: &str) -> PanelSlotInput {
-        PanelSlotInput { id: None, name: "보고서".into(), mode: mode.into(), scope: "all".into(), preset: "artifact-reports".into(), instruction: "".into(), auto_update: false, ai_model: "sonnet".into(), ai_include: "none".into(), enabled: true, interpreter: "node".into(), script: "".into(), timeout_ms: 10_000, output_format: "markdown".into() }
+        PanelSlotInput { id: None, name: "보고서".into(), mode: mode.into(), scope: "all".into(), preset: "artifact-reports".into(), instruction: "".into(), auto_update: false, ai_model: "sonnet".into(), ai_include: "none".into(), enabled: true, interpreter: "node".into(), script: "".into(), timeout_ms: 10_000, output_format: "markdown".into(), allow_js: false }
     }
 
     #[test]
@@ -1098,6 +1110,13 @@ mod tests {
         assert!(slot_from_input(&i, "s1".into(), 0).unwrap_err().contains("출력 형식"));
         i.output_format = "html".into();
         assert_eq!(slot_from_input(&i, "s1".into(), 0).unwrap().output_format, "html");
+        // JavaScript 허용은 html 출력일 때만 켜진다
+        i.allow_js = true;
+        assert!(slot_from_input(&i, "s1".into(), 0).unwrap().allow_js);
+        i.output_format = "markdown".into();
+        assert!(!slot_from_input(&i, "s1".into(), 0).unwrap().allow_js, "마크다운 출력이면 JavaScript 허용은 무시된다");
+        i.allow_js = false;
+        i.output_format = "html".into();
         i.interpreter = "ruby".into();
         assert!(slot_from_input(&i, "s1".into(), 0).unwrap_err().contains("실행 환경"));
         // 스크립트가 아닌 슬롯은 스크립트 칸 값이 와도 저장하지 않는다

@@ -28,6 +28,8 @@ mod paths;
 mod resume;
 mod session_model;
 mod session_registry;
+mod panel_actions;
+mod panel_frames;
 mod panel_script;
 mod side_panel;
 mod settings;
@@ -44,6 +46,8 @@ pub fn run() {
     // pick-directory(main.ts:2467, dialog.showOpenDialog)의 Tauri 대응 — 네이티브 폴더 선택
     // 다이얼로그는 tauri 코어가 아니라 공식 플러그인(tauri-plugin-dialog)으로 제공된다.
     .plugin(tauri_plugin_dialog::init())
+    // JavaScript를 허용한 패널 그래픽을 앱 화면과 다른 출처의 문서로 서빙한다(panel_frames.rs 설명 참고)
+    .register_uri_scheme_protocol(panel_frames::SCHEME, |_ctx, request| panel_frames::handle(request.uri().path()))
     .invoke_handler(tauri::generate_handler![
       agents_json::get_agents_json,
       session_registry::get_all_background_sessions,
@@ -100,6 +104,9 @@ pub fn run() {
       side_panel::get_panel_script_reference_command,
       side_panel::fix_panel_script_command,
       side_panel::get_panel_script_errors_command,
+      panel_frames::register_panel_frame_command,
+      panel_actions::reveal_panel_path_command,
+      panel_actions::open_panel_path_in_editor_command,
       side_panel::clear_panel_script_errors_command,
       app_skills::get_app_skills_command,
       app_skills::add_app_skill_command,

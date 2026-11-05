@@ -149,9 +149,12 @@
   async function savePanelSlot(input) { return invoke('save_panel_slot_command', { input }); }
   async function deletePanelSlot(id) { return invoke('delete_panel_slot_command', { id }); }
   async function getPanelContent(slotId, leadId, force) { return invoke('get_panel_content_command', { slotId, leadId: leadId || null, force: !!force }); }
-  async function testPanelScript(interpreter, script, timeoutMs, leadId, outputFormat) { return invoke('test_panel_script_command', { interpreter, script, timeoutMs, leadId: leadId || null, outputFormat: outputFormat || 'markdown' }); }
-  async function generatePanelScript(request, interpreter, model, outputFormat) { return invoke('generate_panel_script_command', { request, interpreter, model, outputFormat: outputFormat || 'markdown' }); }
-  async function fixPanelScript(script, problem, note, interpreter, model, outputFormat) { return invoke('fix_panel_script_command', { script, problem, note, interpreter, model, outputFormat: outputFormat || 'markdown' }); }
+  async function testPanelScript(interpreter, script, timeoutMs, leadId, outputFormat, allowJs) { return invoke('test_panel_script_command', { interpreter, script, timeoutMs, leadId: leadId || null, outputFormat: outputFormat || 'markdown', allowJs: !!allowJs }); }
+  async function generatePanelScript(request, interpreter, model, outputFormat, allowJs) { return invoke('generate_panel_script_command', { request, interpreter, model, outputFormat: outputFormat || 'markdown', allowJs: !!allowJs }); }
+  async function fixPanelScript(script, problem, note, interpreter, model, outputFormat, allowJs) { return invoke('fix_panel_script_command', { script, problem, note, interpreter, model, outputFormat: outputFormat || 'markdown', allowJs: !!allowJs }); }
+  async function registerPanelFrame(html) { return invoke('register_panel_frame_command', { html }); }
+  async function revealPanelPath(path, leadId) { return invoke('reveal_panel_path_command', { path, leadId: leadId || null }); }
+  async function openPanelPathInEditor(path, line, leadId) { return invoke('open_panel_path_in_editor_command', { path, line: line == null ? null : line, leadId: leadId || null }); }
   async function getPanelScriptErrors() { return invoke('get_panel_script_errors_command'); }
   async function clearPanelScriptErrors() { return invoke('clear_panel_script_errors_command'); }
   async function getPanelScriptReference() { return invoke('get_panel_script_reference_command'); }
@@ -372,6 +375,9 @@
     getPanelScriptErrors,
     clearPanelScriptErrors,
     fixPanelScript,
+    registerPanelFrame,
+    revealPanelPath,
+    openPanelPathInEditor,
     savePanelContent,
     refreshPanelSlot,
     openExternalUrl,

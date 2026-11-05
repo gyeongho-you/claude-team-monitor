@@ -934,6 +934,63 @@ function renderHtmlFrame(container, fragment) {
   container.innerHTML = '';
   container.appendChild(frame);
 }
+// ---- JavaScript를 허용한 그래픽: 앱 화면과 다른 출처의 문서(ctmframe)로 띄운다 — 이유와 격리 방식은 src-tauri/src/panel_frames.rs 맨 위 설명 참고 ----
+// 프레임 안에는 먼저 이 앱이 넣는 연결 코드가 돈다: window.ctm(open/reveal/editor 요청), 링크 클릭 처리, 높이 알림. 요청은 postMessage로 앱 화면에 오고,
+// 앱 화면은 그 메시지를 보낸 프레임이 지금 떠 있는 JS 프레임 중 하나인지 확인한 뒤 처리한다(파일 경로 제한은 백엔드가 다시 검사한다).
+const JS_FRAME_BRIDGE = String.raw`(function(){
+  var post=function(m){try{parent.postMessage(Object.assign({ctm:1},m),'*');}catch(e){}};
+  window.ctm={
+    open:function(u){post({t:'open-url',url:String(u)});},
+    reveal:function(p){post({t:'reveal',path:String(p)});},
+    editor:function(p,l){post({t:'editor',path:String(p),line:l==null?null:Number(l)});}
+  };
+  document.addEventListener('click',function(e){var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(!a)return;e.preventDefault();var u=a.getAttribute('href')||'';if(/^https?:\/\//i.test(u))post({t:'open-url',url:u});},true);
+  var last=0;
+  function size(){var h=Math.max(document.documentElement.scrollHeight,document.body?document.body.scrollHeight:0);if(h!==last){last=h;post({t:'size',h:h});}}
+  if(window.ResizeObserver)new ResizeObserver(size).observe(document.documentElement);
+  window.addEventListener('load',size);setTimeout(size,100);setTimeout(size,500);
+})();`;
+let jsFrameSeq = 0;
+let panelMetaText = '';
+let panelToastTimer = null;
+function showPanelToast(msg) {
+  spMetaEl.textContent = `⚠ ${msg}`;
+  clearTimeout(panelToastTimer);
+  panelToastTimer = setTimeout(() => { spMetaEl.textContent = panelMetaText; }, 6000);
+}
+async function renderJsFrame(container, fragment, leadId) {
+  const seq = ++jsFrameSeq;
+  container.dataset.jsSeq = String(seq);
+  const base = "html,body{margin:0}body{padding:6px 2px;background:transparent;color:var(--text);font:12px/1.5 system-ui,-apple-system,'Segoe UI','Malgun Gothic',sans-serif;word-break:break-word}a{color:var(--accent)}img,svg{max-width:100%}table{border-collapse:collapse}button{font:inherit}";
+  const doc = `<!doctype html><html><head><meta charset="utf-8"><style>${panelThemeCss()}${base}</style></head><body><script>${JS_FRAME_BRIDGE}<\/script>${fragment}</body></html>`;
+  let url;
+  try { url = await window.api.registerPanelFrame(doc); }
+  catch (err) { container.textContent = `그래픽을 띄우지 못했습니다: ${errMsg(err)}`; return; }
+  if (container.dataset.jsSeq !== String(seq)) return; // 그 사이에 더 새 내용이 그려졌다
+  const frame = document.createElement('iframe');
+  frame.className = 'sp-html-frame';
+  frame.dataset.js = '1';
+  frame.dataset.leadId = leadId || '';
+  frame.setAttribute('sandbox', 'allow-scripts'); // allow-same-origin을 주지 않는다 — 앱 화면과 다른 출처라 앱 화면·앱 기능에 닿지 못한다
+  frame.style.height = '120px';
+  frame.src = url;
+  container.innerHTML = '';
+  container.appendChild(frame);
+}
+window.addEventListener('message', async e => {
+  const d = e.data;
+  if (!d || d.ctm !== 1) return;
+  const frame = [...document.querySelectorAll('iframe.sp-html-frame[data-js]')].find(f => f.contentWindow === e.source);
+  if (!frame) return;
+  const leadId = frame.dataset.leadId || null;
+  const report = msg => { if (typeof psTestPreview !== 'undefined' && psTestPreview.contains(frame)) psStatus.textContent = msg; else showPanelToast(msg); };
+  try {
+    if (d.t === 'size') { const h = Number(d.h); if (h > 0) frame.style.height = `${Math.min(4000, Math.max(40, Math.ceil(h) + 4))}px`; }
+    else if (d.t === 'open-url') { if (/^https?:\/\//i.test(String(d.url))) await window.api.openExternalUrl(String(d.url)); }
+    else if (d.t === 'reveal') await window.api.revealPanelPath(String(d.path || ''), leadId);
+    else if (d.t === 'editor') await window.api.openPanelPathInEditor(String(d.path || ''), Number.isFinite(d.line) ? d.line : null, leadId);
+  } catch (err) { report(errMsg(err)); }
+});
 function renderPanelBody(slot, c) {
   const auto = slot.mode === 'auto' && Array.isArray(c.items);
   spFilterEl.hidden = !auto;
@@ -942,10 +999,11 @@ function renderPanelBody(slot, c) {
     renderPanelFilterBar(c.items);
     md = panelItemsMarkdown(filterPanelItems(c.items, panelFilter, selectedLeadId), c.items.length) || c.markdown;
   }
-  if (c.format === 'html' && md.trim()) renderHtmlFrame(spBodyEl, md);
+  if (c.format === 'html' && md.trim()) { if (slot.allowJs) renderJsFrame(spBodyEl, md, selectedLeadId); else renderHtmlFrame(spBodyEl, md); }
   else spBodyEl.innerHTML = md.trim() ? renderMarkdown(md) : '<p class="empty-hint">아직 내용이 없습니다.</p>';
   const when = c.updatedAt ? ` · ${formatAgo(c.updatedAt)} 갱신` : '';
   spMetaEl.textContent = `${PANEL_MODE_LABELS[slot.mode] || slot.mode} · ${c.note}${when}`;
+  panelMetaText = spMetaEl.textContent;
 }
 function onPanelFilterChange() {
   panelFilter.lead = spFilterLeadEl.value;
@@ -1072,6 +1130,16 @@ const psScript = document.getElementById('ps-script');
 const psTestOut = document.getElementById('ps-test-out');
 const psTestPreview = document.getElementById('ps-test-preview');
 const psFormat = document.getElementById('ps-format');
+const psAllowJs = document.getElementById('ps-allow-js');
+const psJsWarn = document.getElementById('ps-js-warn');
+// JavaScript 허용은 출력이 HTML일 때만 의미가 있다 — 아니면 끄고 막는다. 켜져 있으면 경고문을 보여 준다.
+function updatePsJsUi() {
+  const html = psFormat.value === 'html';
+  psAllowJs.disabled = !html;
+  if (!html) psAllowJs.checked = false;
+  psJsWarn.hidden = !psAllowJs.checked;
+}
+function psJsOn() { return psFormat.value === 'html' && psAllowJs.checked; }
 let psLastProblem = '';
 function clearPsTest() { psTestOut.hidden = true; psTestOut.textContent = ''; psTestPreview.hidden = true; psTestPreview.innerHTML = ''; psLastProblem = ''; }
 let psEditingId = null;
@@ -1092,11 +1160,13 @@ psMode.addEventListener('change', updatePsFormVisibility);
 psModel.addEventListener('change', updatePsFormVisibility);
 psInclude.addEventListener('change', updatePsFormVisibility);
 psAutoUpdate.addEventListener('change', updatePsFormVisibility);
+psFormat.addEventListener('change', updatePsJsUi);
+psAllowJs.addEventListener('change', updatePsJsUi);
 
 function renderPanelSettings() {
   panelEnabledEl.checked = !!panelConfig.enabled;
   panelSlotListEl.innerHTML = (panelConfig.slots || []).map(s => {
-    const extra = s.mode === 'ai' ? ` · ${PS_MODEL_NAMES[s.aiModel] || s.aiModel}${s.aiInclude === 'artifact-reports' ? ' · 보고서 목록 포함' : s.aiInclude === 'github-pr' ? ' · PR 목록 포함' : ''}${s.autoUpdate ? ' · 자동' : ''}` : s.mode === 'script' ? ` · ${{ node: 'Node.js', python: 'Python', shell: '셸' }[s.interpreter] || s.interpreter} · 제한 ${s.timeoutMs}ms · ${s.outputFormat === 'html' ? 'HTML 그래픽' : '마크다운'}` : s.mode === 'auto' ? ` · ${s.preset === 'github-pr' ? 'GitHub PR' : 'Artifact 보고서'}${s.scope === 'selected' ? ' · 선택한 팀장' : ''}` : '';
+    const extra = s.mode === 'ai' ? ` · ${PS_MODEL_NAMES[s.aiModel] || s.aiModel}${s.aiInclude === 'artifact-reports' ? ' · 보고서 목록 포함' : s.aiInclude === 'github-pr' ? ' · PR 목록 포함' : ''}${s.autoUpdate ? ' · 자동' : ''}` : s.mode === 'script' ? ` · ${{ node: 'Node.js', python: 'Python', shell: '셸' }[s.interpreter] || s.interpreter} · 제한 ${s.timeoutMs}ms · ${s.outputFormat === 'html' ? 'HTML 그래픽' : '마크다운'}${s.allowJs ? ' · JS 허용' : ''}` : s.mode === 'auto' ? ` · ${s.preset === 'github-pr' ? 'GitHub PR' : 'Artifact 보고서'}${s.scope === 'selected' ? ' · 선택한 팀장' : ''}` : '';
     return `<div class="skill-item ${s.enabled ? '' : 'off'}">
       <label><input type="checkbox" data-ps-toggle="${escapeHtml(s.id)}" ${s.enabled ? 'checked' : ''} /> ${escapeHtml(s.name)}</label>
       <span class="skill-desc">${escapeHtml(PANEL_MODE_LABELS[s.mode] || s.mode)}${escapeHtml(extra)}</span>
@@ -1111,7 +1181,7 @@ function resetPsForm() {
   psEditingId = null;
   psName.value = ''; psMode.value = 'auto'; psPreset.value = 'artifact-reports'; psScope.value = 'all';
   psLeadInstruction.value = ''; psAiInstruction.value = ''; psModel.value = 'sonnet'; psInclude.value = 'none'; psAutoUpdate.checked = false;
-  psInterp.value = 'node'; psTimeout.value = PS_DEFAULT_TIMEOUT_MS; psScript.value = ''; psFormat.value = 'markdown'; clearPsTest();
+  psInterp.value = 'node'; psTimeout.value = PS_DEFAULT_TIMEOUT_MS; psScript.value = ''; psFormat.value = 'markdown'; psAllowJs.checked = false; updatePsJsUi(); clearPsTest();
   psSaveBtn.textContent = '슬롯 추가'; psCancelBtn.hidden = true;
   updatePsFormVisibility();
 }
@@ -1124,6 +1194,7 @@ function psInputFromForm(enabled) {
     autoUpdate: mode === 'ai' && psAutoUpdate.checked, aiModel: psModel.value, aiInclude: mode === 'ai' ? psInclude.value : 'none', enabled,
     interpreter: psInterp.value, script: mode === 'script' ? psScript.value : '', timeoutMs: Number(psTimeout.value) || PS_DEFAULT_TIMEOUT_MS,
     outputFormat: mode === 'script' ? psFormat.value : 'markdown',
+    allowJs: mode === 'script' && psJsOn(),
   };
 }
 
@@ -1150,7 +1221,7 @@ panelSlotListEl.addEventListener('click', async e => {
     psEditingId = s.id; psName.value = s.name; psMode.value = s.mode; psPreset.value = s.preset; psScope.value = s.scope;
     psLeadInstruction.value = s.mode === 'lead' ? s.instruction : ''; psAiInstruction.value = s.mode === 'ai' ? s.instruction : '';
     psModel.value = s.aiModel; psInclude.value = s.aiInclude || 'none'; psAutoUpdate.checked = !!s.autoUpdate;
-    psInterp.value = s.interpreter || 'node'; psTimeout.value = s.timeoutMs || PS_DEFAULT_TIMEOUT_MS; psScript.value = s.mode === 'script' ? s.script : ''; psFormat.value = s.outputFormat || 'markdown'; clearPsTest();
+    psInterp.value = s.interpreter || 'node'; psTimeout.value = s.timeoutMs || PS_DEFAULT_TIMEOUT_MS; psScript.value = s.mode === 'script' ? s.script : ''; psFormat.value = s.outputFormat || 'markdown'; psAllowJs.checked = !!s.allowJs; updatePsJsUi(); clearPsTest();
     psSaveBtn.textContent = '수정 저장'; psCancelBtn.hidden = false; updatePsFormVisibility();
     psStatus.textContent = `"${s.name}" 수정 중`;
     return;
@@ -1172,7 +1243,7 @@ panelSlotListEl.addEventListener('change', async e => {
   const s = (panelConfig.slots || []).find(x => x.id === t.dataset.psToggle);
   if (!s) return;
   try {
-    panelConfig = await window.api.savePanelSlot({ id: s.id, name: s.name, mode: s.mode, scope: s.scope, preset: s.preset, instruction: s.instruction, autoUpdate: s.autoUpdate, aiModel: s.aiModel, aiInclude: s.aiInclude || 'none', interpreter: s.interpreter || 'node', script: s.script || '', timeoutMs: s.timeoutMs || PS_DEFAULT_TIMEOUT_MS, outputFormat: s.outputFormat || 'markdown', enabled: t.checked });
+    panelConfig = await window.api.savePanelSlot({ id: s.id, name: s.name, mode: s.mode, scope: s.scope, preset: s.preset, instruction: s.instruction, autoUpdate: s.autoUpdate, aiModel: s.aiModel, aiInclude: s.aiInclude || 'none', interpreter: s.interpreter || 'node', script: s.script || '', timeoutMs: s.timeoutMs || PS_DEFAULT_TIMEOUT_MS, outputFormat: s.outputFormat || 'markdown', allowJs: !!s.allowJs, enabled: t.checked });
     renderPanelChrome(); renderPanelSettings(); panelLastKey = ''; refreshPanelContent(true);
   } catch (err) { psStatus.textContent = errMsg(err); t.checked = !t.checked; }
 });
@@ -1216,7 +1287,7 @@ const { execFileSync } = require('child_process');
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const dir = process.env.CTM_LEAD_DIR;
 if (!dir) { console.log('<p style="color:var(--text-soft)">작업 탭에서 팀장을 선택하세요.</p>'); process.exit(0); }
-const git = (...a) => { try { return execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
+const git = (...a) => { try { return execFileSync('git', ['-c', 'core.quotePath=false', ...a], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
 if (git('rev-parse', '--is-inside-work-tree') !== 'true') { console.log('<p>git 저장소가 아닙니다: <code>' + esc(dir) + '</code></p>'); process.exit(0); }
 const branch = git('branch', '--show-current') || '(분리된 HEAD)';
 const status = (git('status', '--short') || '').split('\n').filter(Boolean);
@@ -1250,7 +1321,7 @@ const LIMIT = 40; // 그릴 커밋 수(많을수록 느려집니다)
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const dir = process.env.CTM_LEAD_DIR;
 if (!dir) { console.log('<p style="color:var(--text-soft)">작업 탭에서 팀장을 선택하세요.</p>'); process.exit(0); }
-const git = (...a) => { try { return execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 32 * 1024 * 1024 }); } catch { return null; } };
+const git = (...a) => { try { return execFileSync('git', ['-c', 'core.quotePath=false', ...a], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 32 * 1024 * 1024 }); } catch { return null; } };
 if ((git('rev-parse', '--is-inside-work-tree') || '').trim() !== 'true') { console.log('<p>git 저장소가 아닙니다: <code>' + esc(dir) + '</code></p>'); process.exit(0); }
 
 // 1) 커밋 목록(최신순, 모든 브랜치)
@@ -1341,6 +1412,202 @@ if (outside.length) {
   console.log(outside.map(w => '<div style="font-size:11px;padding:2px 0">📁 ' + esc(w.name) + ' <code style="color:var(--accent)">' + esc(w.branch || w.head.slice(0, 7)) + '</code></div>').join(''));
 }
 `;
+const PS_EXAMPLE_GRAPH_JS = String.raw`// git 그래프(상호작용): 커밋을 클릭하면 변경 파일이 나오고, 파일마다 탐색기·VS Code로 열 수 있습니다. 워크트리 표는 열 머리를 눌러 정렬합니다.
+// 이 슬롯은 "출력: HTML"과 "JavaScript 허용"을 켜야 합니다(읽기만 하는 git 명령, 상태를 바꾸지 않습니다).
+const { execFileSync } = require('child_process');
+const LIMIT = 40; // 그릴 커밋 수(많을수록 느려집니다)
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const dir = process.env.CTM_LEAD_DIR;
+if (!dir) { console.log('<p style="color:var(--text-soft)">작업 탭에서 팀장을 선택하세요.</p>'); process.exit(0); }
+const git = (...a) => { try { return execFileSync('git', ['-c', 'core.quotePath=false', ...a], { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 32 * 1024 * 1024 }); } catch { return null; } };
+if ((git('rev-parse', '--is-inside-work-tree') || '').trim() !== 'true') { console.log('<p>git 저장소가 아닙니다: <code>' + esc(dir) + '</code></p>'); process.exit(0); }
+
+// 1) 커밋 목록(최신순, 모든 브랜치)
+const S = '\x1f';
+const commits = (git('log', '--all', '--date-order', '-n', String(LIMIT), '--format=%H' + S + '%P' + S + '%D' + S + '%s' + S + '%cr' + S + '%an') || '')
+  .split('\n').filter(Boolean).map(l => {
+    const [sha, parents, refs, subject, when, author] = l.split(S);
+    return { sha, parents: parents ? parents.split(' ') : [], refs: refs ? refs.split(', ').filter(Boolean) : [], subject, when, author };
+  });
+if (!commits.length) { console.log('<p>커밋이 없습니다.</p>'); process.exit(0); }
+
+// 2) 커밋별 변경 파일(상태 문자 M/A/D/R + 경로)
+const files = {};
+{
+  let cur = null;
+  for (const l of (git('log', '--all', '--date-order', '-n', String(LIMIT), '--name-status', '--format=@@%H') || '').split('\n')) {
+    if (l.startsWith('@@')) cur = files[l.slice(2)] = [];
+    else if (cur && l.trim() && cur.length < 60) { const parts = l.split('\t'); cur.push({ s: parts[0][0], p: parts[parts.length - 1] }); }
+  }
+}
+const top = (git('rev-parse', '--show-toplevel') || dir).trim();
+
+// 3) 워크트리 목록
+const wts = []; let cur = null;
+for (const l of (git('worktree', 'list', '--porcelain') || '').split('\n')) {
+  if (l.startsWith('worktree ')) { cur = { path: l.slice(9), head: '', branch: '' }; wts.push(cur); }
+  else if (cur && l.startsWith('HEAD ')) cur.head = l.slice(5);
+  else if (cur && l.startsWith('branch ')) cur.branch = l.slice(7).replace('refs/heads/', '');
+  else if (cur && l === 'detached') cur.branch = '(분리된 HEAD)';
+}
+const norm = p => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+wts.forEach((w, i) => {
+  w.name = i === 0 ? '메인' : w.path.split(/[\\/]/).filter(Boolean).pop();
+  w.mine = norm(w.path) === norm(dir);
+  w.ts = Number((git('log', '-1', '--format=%ct', w.head) || '0').trim()) || 0;
+});
+
+// 4) 레인 배치
+const idx = new Map(commits.map((c, i) => [c.sha, i]));
+const lanes = [];
+const edges = [];
+commits.forEach((c, i) => {
+  let col = lanes.indexOf(c.sha);
+  if (col === -1) { col = lanes.indexOf(null); if (col === -1) { col = lanes.length; lanes.push(null); } }
+  c.row = i; c.col = col;
+  lanes.forEach((s, k) => { if (s === c.sha && k !== col) lanes[k] = null; });
+  lanes[col] = null;
+  c.parents.forEach((p, n) => {
+    let lane = lanes.indexOf(p);
+    if (lane === -1) {
+      lane = n === 0 ? col : lanes.indexOf(null);
+      if (lane === -1) { lane = lanes.length; lanes.push(null); }
+      lanes[lane] = p;
+    }
+    edges.push({ from: c, to: p, lane });
+  });
+});
+const maxLane = Math.max(...commits.map(c => c.col), ...edges.map(e => e.lane));
+
+// 5) 그리기
+const ROW = 24, COL = 14, PAD = 10;
+const COLORS = ['#58a6ff', '#3fb950', '#d29922', '#f778ba', '#a371f7', '#39c5cf', '#ff7b72', '#8b949e'];
+const GW = PAD * 2 + (maxLane + 1) * COL, H = commits.length * ROW;
+const X = l => PAD + l * COL, Y = r => ROW / 2 + r * ROW;
+const edgePath = e => {
+  const xa = X(e.from.col), ya = Y(e.from.row), xl = X(e.lane);
+  const pi = idx.get(e.to), hasP = pi !== undefined;
+  const yb = hasP ? Y(pi) : H, xb = hasP ? X(commits[pi].col) : xl;
+  let d = 'M' + xa + ' ' + ya, y = ya;
+  if (xl !== xa) { d += ' C' + xa + ' ' + (ya + ROW * 0.6) + ' ' + xl + ' ' + (ya + ROW * 0.4) + ' ' + xl + ' ' + (ya + ROW); y = ya + ROW; }
+  if (hasP && xl !== xb) {
+    const yc = Math.max(y, yb - ROW);
+    d += ' L' + xl + ' ' + yc + ' C' + xl + ' ' + (yc + ROW * 0.4) + ' ' + xb + ' ' + (yc + ROW * 0.6) + ' ' + xb + ' ' + yb;
+  } else d += ' L' + xb + ' ' + yb;
+  return d;
+};
+const lines = edges.map(e => '<path d="' + edgePath(e) + '" stroke="' + COLORS[e.lane % COLORS.length] + '" stroke-width="2" fill="none" stroke-linecap="round"' + (idx.has(e.to) ? '' : ' stroke-dasharray="2 3"') + '/>').join('');
+const dots = commits.map(c => '<circle cx="' + X(c.col) + '" cy="' + Y(c.row) + '" r="4.5" fill="' + COLORS[c.col % COLORS.length] + '" stroke="var(--bg)" stroke-width="1.5"/>' + (c.parents.length > 1 ? '<circle cx="' + X(c.col) + '" cy="' + Y(c.row) + '" r="1.8" fill="var(--bg)"/>' : '')).join('');
+
+const badge = (txt, style) => '<span style="flex:none;border-radius:4px;padding:0 5px;font-size:10px;line-height:16px;' + style + '">' + esc(txt) + '</span>';
+const rows = commits.map((c, i) => {
+  const refs = c.refs.map(r => {
+    if (r.startsWith('tag: ')) return badge('🏷 ' + r.slice(5), 'background:#d2992233;color:#d29922');
+    if (r.startsWith('HEAD -> ')) return badge('● ' + r.slice(8), 'background:var(--accent);color:var(--bg);font-weight:600');
+    if (r === 'HEAD') return badge('HEAD', 'background:var(--border-2);color:var(--text)');
+    if (r.includes('/')) return badge(r, 'border:1px solid var(--border-2);color:var(--text-soft)');
+    return badge(r, 'background:#3fb95033;color:#3fb950');
+  });
+  const shown = refs.slice(0, 3).join('') + (refs.length > 3 ? badge('+' + (refs.length - 3), 'color:var(--text-soft)') : '');
+  const here = wts.filter(w => w.head === c.sha).map(w => badge('📁 ' + w.name + (w.mine ? ' ◀ 여기' : ''), 'border:1px dashed var(--accent);color:var(--accent)' + (w.mine ? ';font-weight:600' : ''))).join('');
+  return '<div class="row" data-i="' + i + '" style="display:flex;align-items:center;gap:5px;height:' + ROW + 'px;font-size:11px;white-space:nowrap;cursor:pointer">' + here + shown +
+    '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">' + esc(c.subject) + '</span>' +
+    '<span style="flex:none;color:var(--text-soft);font-size:10px">' + esc(c.when) + '</span></div>';
+}).join('');
+
+// 6) 화면 안 상호작용 코드(함수를 글자로 바꿔 넣는다 — 프레임 안에서만 실행된다)
+function frameMain() {
+  var data = JSON.parse(document.getElementById('data').textContent);
+  var pane = document.getElementById('pane');
+  var sel = null;
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  function join(a, b) { return a.replace(/[\\/]+$/, '') + '/' + b; }
+  function iconBtn(label, title, fn) { var b = el('button', 'ib', label); b.title = title; b.addEventListener('click', function (e) { e.stopPropagation(); fn(); }); return b; }
+  function show(i) {
+    var c = data.commits[i];
+    pane.textContent = '';
+    var h = el('div', 'ph');
+    h.appendChild(el('code', '', c.short));
+    h.appendChild(el('b', '', ' ' + c.subject));
+    pane.appendChild(h);
+    pane.appendChild(el('div', 'pm', c.author + ' · ' + c.when + ' · 변경 파일 ' + c.files.length + '개'));
+    c.files.forEach(function (f) {
+      var full = join(data.top, f.p);
+      var r = el('div', 'fr');
+      r.appendChild(el('span', 'st st' + f.s, f.s));
+      r.appendChild(el('span', 'fp', f.p));
+      r.appendChild(iconBtn('📂', '탐색기에서 보기', function () { ctm.reveal(full); }));
+      r.appendChild(iconBtn('✎', 'VS Code로 열기', function () { ctm.editor(full); }));
+      pane.appendChild(r);
+    });
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('.row'), function (r) {
+    r.addEventListener('click', function () {
+      if (sel) sel.classList.remove('sel');
+      sel = r; r.classList.add('sel');
+      show(Number(r.getAttribute('data-i')));
+    });
+  });
+  // 워크트리 표(열 머리를 누르면 정렬)
+  var cols = [['name', '이름'], ['branch', '브랜치'], ['head', '커밋'], ['ts', '마지막 커밋']];
+  var sortKey = 'ts', dir = -1;
+  var wrap = document.getElementById('wt');
+  function ago(ts) { if (!ts) return '-'; var s = Math.max(0, Date.now() / 1000 - ts); return s < 3600 ? Math.floor(s / 60) + '분 전' : s < 86400 ? Math.floor(s / 3600) + '시간 전' : Math.floor(s / 86400) + '일 전'; }
+  function draw() {
+    var list = data.wts.slice().sort(function (a, b) { var x = a[sortKey], y = b[sortKey]; return (x < y ? -1 : x > y ? 1 : 0) * dir; });
+    wrap.textContent = '';
+    var t = el('table', 'wtt'); var hr = el('tr');
+    cols.forEach(function (c) {
+      var th = el('th', 'sortable', c[1] + (sortKey === c[0] ? (dir > 0 ? ' ▲' : ' ▼') : ''));
+      th.addEventListener('click', function () { if (sortKey === c[0]) dir = -dir; else { sortKey = c[0]; dir = c[0] === 'ts' ? -1 : 1; } draw(); });
+      hr.appendChild(th);
+    });
+    hr.appendChild(el('th', '', ''));
+    t.appendChild(hr);
+    list.forEach(function (w) {
+      var tr = el('tr');
+      tr.appendChild(el('td', '', w.name + (w.mine ? ' ◀' : '')));
+      tr.appendChild(el('td', '', w.branch || '-'));
+      tr.appendChild(el('td', 'mono', w.head));
+      tr.appendChild(el('td', '', ago(w.ts)));
+      var td = el('td'); td.appendChild(iconBtn('📂', '탐색기에서 이 워크트리 폴더 보기', function () { ctm.reveal(w.path); })); tr.appendChild(td);
+      t.appendChild(tr);
+    });
+    wrap.appendChild(t);
+  }
+  draw();
+}
+
+const DATA = {
+  top,
+  commits: commits.map(c => ({ sha: c.sha, short: c.sha.slice(0, 7), subject: c.subject, author: c.author, when: c.when, files: files[c.sha] || [] })),
+  wts: wts.map(w => ({ name: w.name, path: w.path, branch: w.branch, head: w.head.slice(0, 7), ts: w.ts, mine: w.mine })),
+};
+const json = JSON.stringify(DATA).replace(/</g, '\\u003c');
+const css = '.row:hover{background:var(--surface-2)}.row.sel{background:var(--surface-2);box-shadow:inset 2px 0 0 var(--accent)}'
+  + '#pane{border:1px solid var(--border);border-radius:6px;padding:6px 8px;margin:6px 0;height:150px;overflow:auto;font-size:11px;background:var(--surface-2)}'
+  + '#pane .ph code{color:var(--accent)}#pane .pm{color:var(--text-soft);margin:2px 0 6px}#pane .empty{color:var(--text-soft)}'
+  + '.fr{display:flex;gap:6px;align-items:center;padding:1px 0}.fp{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
+  + '.st{flex:none;width:14px;text-align:center;font-weight:700}.stM{color:#d29922}.stA{color:#3fb950}.stD{color:#f85149}.stR{color:#a371f7}'
+  + '.ib{flex:none;background:transparent;border:1px solid var(--border-2);color:var(--text);border-radius:4px;cursor:pointer;font-size:11px;padding:0 4px;line-height:16px}.ib:hover{border-color:var(--accent)}'
+  + '.wtt{width:100%;font-size:11px}.wtt th,.wtt td{border-bottom:1px solid var(--border);padding:3px 4px;text-align:left}.wtt th.sortable{cursor:pointer;color:var(--text-soft)}.wtt th.sortable:hover{color:var(--accent)}.mono{font-family:Consolas,monospace}';
+
+console.log('<style>' + css + '</style>');
+console.log('<div style="font-size:11px;color:var(--text-soft);margin-bottom:4px">' + esc(process.env.CTM_LEAD_LABEL || '팀장') + ' · 최근 커밋 ' + commits.length + '개 · 워크트리 ' + wts.length + '개 · 커밋을 클릭하면 변경 파일이 나옵니다</div>');
+console.log('<div id="pane"><span class="empty">아래 그래프에서 커밋을 클릭하세요.</span></div>');
+console.log('<div style="position:relative;padding-left:' + GW + 'px">');
+console.log('<svg width="' + GW + '" height="' + H + '" viewBox="0 0 ' + GW + ' ' + H + '" style="position:absolute;left:0;top:0;pointer-events:none">' + lines + dots + '</svg>');
+console.log(rows + '</div>');
+console.log('<div style="margin:10px 0 4px;font-weight:600">워크트리 ' + wts.length + '개 <span style="font-weight:400;color:var(--text-soft);font-size:10px">(열 머리를 누르면 정렬)</span></div>');
+console.log('<div id="wt"></div>');
+console.log('<script type="application/json" id="data">' + json + '</script>');
+console.log('<script>(' + frameMain.toString() + ')()</script>');
+`;
+document.getElementById('ps-example-graph-js-btn').addEventListener('click', () => {
+  if (psScript.value.trim() && !confirm('입력해 둔 스크립트를 예제로 바꿉니다. 계속할까요?')) return;
+  psInterp.value = 'node'; psFormat.value = 'html'; psAllowJs.checked = true; updatePsJsUi(); psTimeout.value = 15000; psScript.value = PS_EXAMPLE_GRAPH_JS; clearPsTest();
+  if (!psName.value.trim()) psName.value = '깃 그래프(상호작용)';
+});
 document.getElementById('ps-example-graph-btn').addEventListener('click', () => {
   if (psScript.value.trim() && !confirm('입력해 둔 스크립트를 예제로 바꿉니다. 계속할까요?')) return;
   psInterp.value = 'node'; psFormat.value = 'html'; psTimeout.value = 15000; psScript.value = PS_EXAMPLE_GRAPH; clearPsTest();
@@ -1355,7 +1622,7 @@ document.getElementById('ps-example-html-btn').addEventListener('click', () => {
 function showPsTestResult(res) {
   const stderrBlock = res.stderr ? `[표준 오류 출력 — 시험 실행에서만 보입니다]\n${res.stderr}` : '';
   psTestPreview.hidden = false;
-  if (res.format === 'html') renderHtmlFrame(psTestPreview, res.output);
+  if (res.format === 'html') { if (psJsOn()) renderJsFrame(psTestPreview, res.output, selectedLeadId); else renderHtmlFrame(psTestPreview, res.output); }
   else psTestPreview.innerHTML = renderMarkdown(res.output);
   psTestOut.hidden = !stderrBlock; psTestOut.textContent = stderrBlock;
   psLastProblem = `${res.format === 'html' ? '(HTML 출력 앞부분)\n' : ''}${res.output.slice(0, 3000)}${stderrBlock ? `\n\n${stderrBlock}` : ''}`;
@@ -1369,7 +1636,7 @@ psTestPreview.addEventListener('click', async e => {
 document.getElementById('ps-test-btn').addEventListener('click', async e => {
   const btn = e.currentTarget;
   btn.disabled = true; clearPsTest(); psTestOut.hidden = false; psTestOut.textContent = '실행하는 중...';
-  try { showPsTestResult(await window.api.testPanelScript(psInterp.value, psScript.value, Number(psTimeout.value) || PS_DEFAULT_TIMEOUT_MS, selectedLeadId, psFormat.value)); }
+  try { showPsTestResult(await window.api.testPanelScript(psInterp.value, psScript.value, Number(psTimeout.value) || PS_DEFAULT_TIMEOUT_MS, selectedLeadId, psFormat.value, psJsOn())); }
   catch (err) { psTestOut.hidden = false; psTestOut.textContent = errMsg(err); psLastProblem = errMsg(err); }
   finally { btn.disabled = false; if (document.getElementById('ps-errors').open) loadPsErrors(); }
 });
@@ -1398,7 +1665,7 @@ document.getElementById('ps-fix-btn').addEventListener('click', async e => {
   if (!psLastProblem.trim()) { psStatus.textContent = '먼저 "▶ 시험 실행"으로 문제가 나오는 결과를 만든 뒤 눌러 주세요.'; return; }
   btn.disabled = true; psStatus.textContent = 'AI가 시험 실행 결과를 보고 스크립트를 고치는 중입니다(최대 2분)...';
   try {
-    psScript.value = await window.api.fixPanelScript(psScript.value, psLastProblem, document.getElementById('ps-gen-request').value, psInterp.value, document.getElementById('ps-gen-model').value, psFormat.value);
+    psScript.value = await window.api.fixPanelScript(psScript.value, psLastProblem, document.getElementById('ps-gen-request').value, psInterp.value, document.getElementById('ps-gen-model').value, psFormat.value, psJsOn());
     psStatus.textContent = '고쳤습니다. 코드를 읽어 보고 다시 "▶ 시험 실행"으로 확인하세요(아직 저장되지 않았습니다).';
   } catch (err) { psStatus.textContent = errMsg(err); }
   finally { btn.disabled = false; }
@@ -1410,7 +1677,7 @@ document.getElementById('ps-gen-btn').addEventListener('click', async e => {
   if (psScript.value.trim() && !confirm('입력해 둔 스크립트가 AI가 만든 것으로 바뀝니다. 계속할까요?')) return;
   btn.disabled = true; psStatus.textContent = 'AI가 스크립트를 만드는 중입니다(최대 2분)...';
   try {
-    psScript.value = await window.api.generatePanelScript(request, psInterp.value, document.getElementById('ps-gen-model').value, psFormat.value);
+    psScript.value = await window.api.generatePanelScript(request, psInterp.value, document.getElementById('ps-gen-model').value, psFormat.value, psJsOn());
     psStatus.textContent = '만들었습니다. 코드를 읽어 보고, 시험 실행으로 확인한 뒤 저장하세요(아직 저장되지 않았습니다).';
     if (!psName.value.trim()) psName.value = request.slice(0, 30);
   } catch (err) { psStatus.textContent = errMsg(err); }

@@ -37,8 +37,9 @@ pub(crate) struct EnvVarDoc {
     pub when_empty: &'static str,
 }
 
-pub(crate) const ENV_VAR_DOCS: [EnvVarDoc; 10] = [
+pub(crate) const ENV_VAR_DOCS: [EnvVarDoc; 11] = [
     EnvVarDoc { name: "CTM_OUTPUT_FORMAT", what: "이 슬롯이 기대하는 출력 형식: `markdown` 또는 `html`. 아래 '출력 형식'을 보고 그 형식으로 낸다", when_empty: "항상 채워진다" },
+    EnvVarDoc { name: "CTM_ALLOW_JS", what: "이 슬롯이 `html` 출력에서 JavaScript 실행을 허용했는지: `true` 또는 `false`. `true`일 때만 출력 HTML 안의 `<script>`가 돈다(아래 '출력 형식'의 JavaScript 허용 부분)", when_empty: "항상 채워진다" },
     EnvVarDoc { name: "CTM_LEAD_ID", what: "선택한 팀장의 앱 내부 id (예: `ed09bf70`)", when_empty: "팀장을 고르지 않았을 때" },
     EnvVarDoc { name: "CTM_LEAD_LABEL", what: "사용자가 팀장에게 붙인 이름 (예: `g1cl-front-leader`)", when_empty: "팀장을 고르지 않았거나 이름을 안 붙였을 때" },
     EnvVarDoc { name: "CTM_LEAD_TITLE", what: "claude가 세션에 자동으로 붙인 주제 (예: `team lead launch setup`)", when_empty: "팀장을 고르지 않았거나 아직 주제가 없을 때" },
@@ -51,7 +52,7 @@ pub(crate) const ENV_VAR_DOCS: [EnvVarDoc; 10] = [
 ];
 
 /// 스크립트에 넘길 환경 변수 전부(팀장이 없으면 팀장 관련 값은 빈 문자열). 이름은 ENV_VAR_DOCS와 같아야 한다.
-pub(crate) fn script_env(lead: Option<&LeadRecord>, output_format: &str) -> Vec<(&'static str, String)> {
+pub(crate) fn script_env(lead: Option<&LeadRecord>, output_format: &str, allow_js: bool) -> Vec<(&'static str, String)> {
     let (id, label, title, dir, session_id, session_file) = match lead {
         Some(l) => (
             l.id.clone(),
@@ -65,6 +66,7 @@ pub(crate) fn script_env(lead: Option<&LeadRecord>, output_format: &str) -> Vec<
     };
     vec![
         ("CTM_OUTPUT_FORMAT", output_format.to_string()),
+        ("CTM_ALLOW_JS", if allow_js && output_format == "html" { "true" } else { "false" }.to_string()),
         ("CTM_LEAD_ID", id),
         ("CTM_LEAD_LABEL", label),
         ("CTM_LEAD_TITLE", title),
@@ -101,10 +103,17 @@ pub(crate) fn reference_markdown() -> String {
         - 되는 것: 모든 HTML 요소와 `<style>`·인라인 `style`(flex·grid·그라디언트·border-radius 등 CSS), **인라인 `<svg>`**(막대·선·원 그래프, 다이어그램), 표, `data:` 이미지, 링크 `<a href=\"https://...\">`(누르면 기본 브라우저로 열린다).\n\
         - 안 되는 것: **JavaScript 전부**(`<script>`, `onclick` 같은 이벤트 속성, `javascript:` 주소 — 실행되지 않는다), 외부 파일 불러오기(http 이미지·CSS·글꼴·`<iframe>`·폼 전송), 마우스에 반응하는 동작(CSS `:hover` 정도만 가능). 그래서 차트 라이브러리는 못 쓰고 SVG·CSS로 직접 그린다.\n\
         - 앱 테마(다크/라이트)에 맞는 색 변수를 쓴다: `var(--text)`, `var(--text-soft)`, `var(--text-bright)`, `var(--bg)`, `var(--surface)`, `var(--surface-2)`, `var(--border)`, `var(--border-2)`, `var(--accent)`. 고정 색(`#fff`, `black`)은 다크/라이트 한쪽에서 안 보일 수 있으니 피하고, 의미 색(성공 `#3fb950`, 경고 `#d29922`, 오류 `#f85149`)만 직접 쓴다.\n\
+        - **JavaScript는 기본적으로 실행되지 않는다.** 단 `CTM_ALLOW_JS=true`인 슬롯은 아래 '`html` + JavaScript 허용'을 따른다. `false`일 때는 `<script>`를 쓰지 마라.\n\
         - 패널 너비는 약 300~600px로 좁다. 고정 `px` 너비 대신 `width:100%`·`max-width:100%`·flex-wrap을 쓰고, SVG는 `viewBox`를 주고 `width=\"100%\"`로 둔다. 높이는 내용에 맞춰 자동으로 늘어난다. 기본 글자 크기는 12px.\n\n\
+        ### `html` + JavaScript 허용 (`CTM_ALLOW_JS=true`일 때만)\n\n\
+        - 출력 HTML 안에 **인라인 `<script>`**를 써서 정렬(표 머리 클릭), 접기·펼치기, 탭 전환, 필터, 마우스를 올렸을 때 값 보여 주기 같은 **화면 안 상호작용**을 만들 수 있다. 데이터는 스크립트가 HTML에 미리 넣어 두고(예: `<script type=\"application/json\">`나 JS 배열), 화면 안의 JavaScript가 그걸 다룬다.\n\
+        - 막혀 있는 것: 네트워크 접속(`fetch`·`XMLHttpRequest`·WebSocket), 외부 스크립트·이미지·CSS 불러오기(`<script src>` 포함), 폼 전송, 팝업, `localStorage`·쿠키, 앱 화면의 변수·함수 접근, 프레임 자신의 주소를 바꾸는 것. 보안 규칙(CSP)이 막으므로 시도하지 마라. 필요한 데이터는 전부 스크립트(Node 등)가 모아서 HTML에 넣는다.\n\
+        - 앱에 요청할 수 있는 동작(전역 객체 `window.ctm`): `ctm.open(url)`(http/https 주소를 기본 브라우저로), `ctm.reveal(경로)`(탐색기·Finder에서 그 파일/폴더 위치 보여 주기), `ctm.editor(경로, 줄번호)`(VS Code로 열기, 줄번호는 선택). 경로는 **절대 경로**여야 하고 선택한 팀장의 작업 폴더·허용한 팀원 폴더·그 저장소의 git 워크트리 폴더 **안**의 존재하는 것만 된다. 반환값은 없고 실패하면 앱이 패널 위쪽에 오류를 잠깐 보여 준다. `<a href=\"https://...\">` 링크는 자동으로 `ctm.open`처럼 동작한다.\n\
+        - **상태를 바꾸는 동작(파일 수정·삭제, git 커밋·체크아웃 등)을 요청하는 방법은 없다.** `ctm`에는 위 세 가지뿐이다.\n\
+        - 높이는 내용에 맞춰 자동으로 늘어난다. `<button>`·`<input>`·`<select>`는 쓸 수 있지만 `<form>` 전송은 안 된다(`onclick` 등 JavaScript로 처리).\n\
         ## 앱이 주지 않는 것\n\n\
         - 팀장의 실시간 상태(작업 중/대기), 팀원 목록, 토큰·비용 사용량, 다른 패널 슬롯의 내용은 환경 변수로 주지 않는다. 필요하면 `CTM_SESSION_FILE`(대화 기록)이나 `CTM_LEADS_FILE`을 직접 읽어서 계산하거나, 이 PC의 명령(`git`, `gh` 등)을 실행해서 알아낸다.\n\
-        - 앱이나 팀장 세션을 조작하는 기능(메시지 보내기, 종료 등)은 없다. 스크립트는 **보여 주기 전용**이다.\n\n\
+        - 앱이나 팀장 세션을 조작하는 기능(메시지 보내기, 종료 등)과 PC의 상태를 바꾸는 요청은 없다. 스크립트는 **보여 주기 전용**이고, 요청할 수 있는 건 링크 열기·파일 위치 보기·VS Code로 열기뿐이다.\n\n\
         ## 쓸 때 권장\n\n\
         - 읽기만 하는 명령을 쓴다(상태를 바꾸는 `git commit`·`checkout`, 파일 삭제·수정은 하지 않는다).\n\
         - 팀장을 고르지 않아 `CTM_LEAD_DIR`이 비어 있는 경우를 먼저 처리해 안내 문구를 출력하고 끝낸다.\n\
@@ -172,7 +181,7 @@ fn fail(markdown: String, kind: &'static str, detail: String) -> Outcome {
     Outcome { output: markdown, format: "markdown", stderr: String::new(), problem: Some(ScriptProblem { kind, detail }) }
 }
 
-pub(crate) fn run_script_outcome(scripts_dir: &Path, file_stem: &str, interpreter: &str, script: &str, timeout_ms: u64, lead: Option<&LeadRecord>, output_format: &str) -> Outcome {
+pub(crate) fn run_script_outcome(scripts_dir: &Path, file_stem: &str, interpreter: &str, script: &str, timeout_ms: u64, lead: Option<&LeadRecord>, output_format: &str, allow_js: bool) -> Outcome {
     let format: &'static str = if output_format == "html" { "html" } else { "markdown" };
     let Some((program, ext, pre_args)) = interpreter_spec(interpreter) else { return fail("**알 수 없는 실행 환경입니다.**".to_string(), "spawn", format!("알 수 없는 실행 환경: {interpreter}")) };
     if let Err(e) = std::fs::create_dir_all(scripts_dir) {
@@ -188,7 +197,7 @@ pub(crate) fn run_script_outcome(scripts_dir: &Path, file_stem: &str, interprete
     cmd.env("PYTHONIOENCODING", "utf-8").env("PYTHONUTF8", "1");
     let work_dir = lead.map(|l| PathBuf::from(&l.target_dir)).filter(|p| p.is_dir()).unwrap_or_else(std::env::temp_dir);
     cmd.current_dir(&work_dir);
-    for (name, value) in script_env(lead, format) {
+    for (name, value) in script_env(lead, format, allow_js) {
         cmd.env(name, value);
     }
     #[cfg(windows)]
@@ -322,16 +331,18 @@ fn lang_label(interpreter: &str) -> &'static str {
     }
 }
 
-fn format_rule(output_format: &str) -> &'static str {
-    if output_format == "html" {
-        "- 출력 형식은 **html**이다(CTM_OUTPUT_FORMAT=html). 표준 출력에 HTML 조각만 낸다(<html>·<head>·<body>·<script> 없이). 그래프는 인라인 SVG나 CSS로 직접 그리고, 색은 앱 안내의 CSS 변수(var(--text), var(--accent) 등)를 쓴다. JavaScript·외부 파일은 동작하지 않는다.\n"
+fn format_rule(output_format: &str, allow_js: bool) -> &'static str {
+    if output_format == "html" && allow_js {
+        "- 출력 형식은 **html**이고 JavaScript가 허용돼 있다(CTM_OUTPUT_FORMAT=html, CTM_ALLOW_JS=true). 표준 출력에 HTML 조각만 낸다(<html>·<head>·<body> 없이). 상호작용(정렬·접기·탭·필터 등)은 인라인 <script>로 만들고, 필요한 데이터는 스크립트가 모아 HTML에 미리 넣는다. 네트워크·외부 파일은 막혀 있다. 파일/링크를 열려면 앱 안내의 window.ctm.open/reveal/editor만 쓴다(상태를 바꾸는 동작은 없다). 색은 앱 안내의 CSS 변수를 쓴다.\n"
+    } else if output_format == "html" {
+        "- 출력 형식은 **html**이다(CTM_OUTPUT_FORMAT=html, CTM_ALLOW_JS=false). 표준 출력에 HTML 조각만 낸다(<html>·<head>·<body>·<script> 없이). 그래프는 인라인 SVG나 CSS로 직접 그리고, 색은 앱 안내의 CSS 변수(var(--text), var(--accent) 등)를 쓴다. JavaScript·외부 파일은 동작하지 않는다.\n"
     } else {
         "- 출력 형식은 **markdown**이다(CTM_OUTPUT_FORMAT=markdown). 결과는 마크다운으로 표준 출력에 낸다(제목은 ## 부터, 목록·표·굵게·`코드`·[글](https://주소) 링크 사용 가능. HTML은 표시되지 않는다).\n"
     }
 }
 
 /// AI에게 스크립트를 쓰게 할 때 줄 요청문.
-pub(crate) fn build_generate_prompt(request: &str, interpreter: &str, output_format: &str) -> String {
+pub(crate) fn build_generate_prompt(request: &str, interpreter: &str, output_format: &str, allow_js: bool) -> String {
     let lang = lang_label(interpreter);
     format!(
         "너는 데스크톱 앱의 '오른쪽 패널' 슬롯에서 주기적으로 실행될 작은 스크립트를 쓴다. 아래 요구를 만족하는 {lang} 스크립트 하나만 써라.\n\
@@ -341,14 +352,14 @@ pub(crate) fn build_generate_prompt(request: &str, interpreter: &str, output_for
         - 설명 없이 코드 블록(```) 하나만 답한다.\n\n\
         ===== 앱 안내 =====\n{reference}\n===== 앱 안내 끝 =====\n\n\
         요구: {request}",
-        rule = format_rule(output_format),
+        rule = format_rule(output_format, allow_js),
         reference = reference_markdown()
     )
 }
 
 /// 시험 실행에서 나온 문제(오류·이상한 출력)를 보고 스크립트를 고치게 할 때 줄 요청문.
-pub(crate) fn build_fix_prompt(script: &str, problem: &str, note: &str, interpreter: &str, output_format: &str) -> String {
-    let base = build_generate_prompt("(아래 스크립트를 고치는 일이다 — 새로 쓰지 말고 문제만 고쳐라)", interpreter, output_format);
+pub(crate) fn build_fix_prompt(script: &str, problem: &str, note: &str, interpreter: &str, output_format: &str, allow_js: bool) -> String {
+    let base = build_generate_prompt("(아래 스크립트를 고치는 일이다 — 새로 쓰지 말고 문제만 고쳐라)", interpreter, output_format, allow_js);
     let note_line = if note.trim().is_empty() { String::new() } else { format!("\n사용자가 덧붙인 말: {}\n", note.trim()) };
     format!(
         "{base}\n\n===== 지금 스크립트 =====\n{script}\n===== 지금 스크립트 끝 =====\n\n===== 시험 실행에서 나온 결과(오류 포함) =====\n{problem}\n===== 결과 끝 =====\n{note_line}\n위 결과에서 보이는 문제의 원인을 찾아 고친 **전체 스크립트**를 코드 블록 하나로만 답해라. 원래 하려던 일은 바꾸지 마라."
@@ -377,18 +388,18 @@ mod tests {
     }
 
     fn run(dir: &Path, stem: &str, script: &str, timeout_ms: u64) -> Outcome {
-        run_script_outcome(dir, stem, "node", script, timeout_ms, None, "markdown")
+        run_script_outcome(dir, stem, "node", script, timeout_ms, None, "markdown", false)
     }
 
     #[test]
     fn documented_variables_are_exactly_the_ones_passed_and_ai_prompt_carries_the_reference() {
-        let passed: Vec<&str> = script_env(None, "markdown").iter().map(|(n, _)| *n).collect();
+        let passed: Vec<&str> = script_env(None, "markdown", false).iter().map(|(n, _)| *n).collect();
         let documented: Vec<&str> = ENV_VAR_DOCS.iter().map(|d| d.name).collect();
         assert_eq!(passed, documented, "안내 표와 실제로 넘기는 환경 변수가 어긋났다");
         let reference = reference_markdown();
         assert!(documented.iter().all(|n| reference.contains(n)), "안내 문서에 모든 변수가 있어야 한다");
         for fmt in OUTPUT_FORMATS {
-            let prompt = build_generate_prompt("브랜치 보여줘", "node", fmt);
+            let prompt = build_generate_prompt("브랜치 보여줘", "node", fmt, false);
             assert!(prompt.contains(&reference) && prompt.contains("브랜치 보여줘") && prompt.contains(&format!("CTM_OUTPUT_FORMAT={fmt}")), "AI 요청문에 안내·요구·형식이 들어가야 한다({fmt})");
         }
     }
@@ -402,7 +413,7 @@ mod tests {
         for d in ENV_VAR_DOCS.iter() {
             assert!(!out.contains(&format!("{}=UNDEFINED", d.name)), "{} 가 스크립트에 전달되지 않았다:\n{out}", d.name);
         }
-        for always in ["CTM_OUTPUT_FORMAT", "CTM_LEADS_FILE", "CTM_CLAUDE_HOME", "CTM_APP_VERSION"] {
+        for always in ["CTM_OUTPUT_FORMAT", "CTM_ALLOW_JS", "CTM_LEADS_FILE", "CTM_CLAUDE_HOME", "CTM_APP_VERSION"] {
             assert!(out.contains(&format!("{always}=SET")), "{always}는 항상 채워져야 한다:\n{out}");
         }
         assert!(out.contains("CTM_LEAD_DIR=EMPTY"), "{out}");
@@ -412,15 +423,29 @@ mod tests {
     #[test]
     fn output_format_is_passed_and_reported_but_errors_are_always_markdown() {
         let dir = scratch();
-        let ok = run_script_outcome(&dir, "f1", "node", "console.log('<b style=\"color:red\">' + process.env.CTM_OUTPUT_FORMAT + '</b>')", 8000, None, "html");
+        let ok = run_script_outcome(&dir, "f1", "node", "console.log('<b style=\"color:red\">' + process.env.CTM_OUTPUT_FORMAT + '</b>')", 8000, None, "html", false);
         assert_eq!((ok.format, ok.output.as_str()), ("html", "<b style=\"color:red\">html</b>"));
-        let md = run_script_outcome(&dir, "f2", "node", "console.log(process.env.CTM_OUTPUT_FORMAT)", 8000, None, "markdown");
+        let md = run_script_outcome(&dir, "f2", "node", "console.log(process.env.CTM_OUTPUT_FORMAT)", 8000, None, "markdown", false);
         assert_eq!((md.format, md.output.as_str()), ("markdown", "markdown"));
-        let bad = run_script_outcome(&dir, "f3", "node", "process.exit(2)", 8000, None, "html");
+        let bad = run_script_outcome(&dir, "f3", "node", "process.exit(2)", 8000, None, "html", false);
         assert_eq!(bad.format, "markdown", "오류 문구는 html로 그리면 안 된다");
-        let empty = run_script_outcome(&dir, "f4", "node", "", 8000, None, "html");
+        let empty = run_script_outcome(&dir, "f4", "node", "", 8000, None, "html", false);
         assert_eq!(empty.format, "markdown");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn allow_js_is_passed_only_for_html_and_documented_with_the_ctm_api() {
+        let get = |fmt: &str, js: bool| script_env(None, fmt, js).into_iter().find(|(n, _)| *n == "CTM_ALLOW_JS").unwrap().1;
+        assert_eq!((get("html", true).as_str(), get("html", false).as_str(), get("markdown", true).as_str()), ("true", "false", "false"));
+        let r = reference_markdown();
+        for must in ["window.ctm", "ctm.open", "ctm.reveal", "ctm.editor", "상태를 바꾸는 동작", "CTM_ALLOW_JS"] {
+            assert!(r.contains(must), "안내 문서에 {must}가 있어야 한다");
+        }
+        let js_prompt = build_generate_prompt("표 정렬", "node", "html", true);
+        let no_js_prompt = build_generate_prompt("표 정렬", "node", "html", false);
+        assert!(js_prompt.contains("JavaScript가 허용돼 있다") && !no_js_prompt.contains("JavaScript가 허용돼 있다"), "JS 허용 여부에 맞는 규칙이 요청문에 들어가야 한다");
+        assert!(no_js_prompt.contains("CTM_ALLOW_JS=false") && js_prompt.contains("window.ctm.open/reveal/editor"));
     }
 
     #[test]
@@ -470,9 +495,9 @@ mod tests {
     fn long_output_is_cut_with_a_format_appropriate_note() {
         let dir = scratch();
         let script = "console.log('가'.repeat(210000))";
-        let md = run_script_outcome(&dir, "t5", "node", script, 15000, None, "markdown");
+        let md = run_script_outcome(&dir, "t5", "node", script, 15000, None, "markdown", false);
         assert!(md.output.contains("까지만 보여 줍니다") && md.output.chars().count() < MAX_OUTPUT_CHARS + 200, "len {}", md.output.chars().count());
-        let html = run_script_outcome(&dir, "t5h", "node", script, 15000, None, "html");
+        let html = run_script_outcome(&dir, "t5h", "node", script, 15000, None, "html", false);
         assert!(html.output.ends_with(")</p>"), "html에서는 안내도 html이어야 한다");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -509,7 +534,7 @@ mod tests {
 
     #[test]
     fn fix_prompt_carries_script_error_note_and_reference() {
-        let p = build_fix_prompt("const a = 1; a = 2;", "TypeError: Assignment to constant variable.", "표로 보여줘", "node", "markdown");
+        let p = build_fix_prompt("const a = 1; a = 2;", "TypeError: Assignment to constant variable.", "표로 보여줘", "node", "markdown", false);
         assert!(p.contains("const a = 1; a = 2;") && p.contains("Assignment to constant variable") && p.contains("표로 보여줘") && p.contains(&reference_markdown()));
     }
 }

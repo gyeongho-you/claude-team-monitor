@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'self' http://ctmframe.localhost ctmframe:;" />
   <title>Claude Team Monitor</title>
   <link rel="stylesheet" href="style.css" />
 </head>
@@ -377,11 +377,21 @@
               <label class="ps-timeout" title="이 시간(ms)을 넘으면 스크립트를 중단합니다. 1000ms = 1초">제한 시간 <input type="number" id="ps-timeout" min="500" max="600000" step="500" value="10000" /> ms</label>
             </div>
             <textarea id="ps-script" class="ps-code" spellcheck="false" placeholder="스크립트 — 표준 출력(마크다운)이 패널에 표시됩니다. 직접 쓰거나, 붙여넣거나, 아래에서 AI에게 만들게 하세요."></textarea>
-            <p class="form-hint">HTML 출력은 <strong>JavaScript 실행·외부 파일 불러오기가 막힌 격리 프레임</strong>에 그려집니다. 그래프는 SVG·CSS로 직접 그리고, 앱 색 변수(<code>var(--text)</code>, <code>var(--accent)</code> 등)를 쓰면 다크/라이트에 자동으로 맞습니다. 마크다운 출력에서도 <code>data:</code> 이미지는 보입니다. 자세한 건 위 📖 안내를 보세요.</p>
+            <p class="form-hint">HTML 출력은 <strong>외부 파일 불러오기가 막힌 격리 프레임</strong>에 그려지고, JavaScript는 아래 체크박스를 켠 슬롯만 실행됩니다. 그래프는 SVG·CSS로 직접 그리고, 앱 색 변수(<code>var(--text)</code>, <code>var(--accent)</code> 등)를 쓰면 다크/라이트에 자동으로 맞습니다. 마크다운 출력에서도 <code>data:</code> 이미지는 보입니다. 자세한 건 위 📖 안내를 보세요.</p>
+            <label class="settings-check" id="ps-allow-js-row"><input type="checkbox" id="ps-allow-js" /> JavaScript 허용 — 그래픽 안에서 정렬·접기·클릭으로 파일 열기 같은 상호작용 (출력이 HTML일 때만)</label>
+            <div class="ps-warn ps-danger" id="ps-js-warn" hidden>
+              <strong>⚠ JavaScript 허용 — 이런 일을 할 수 있고, 이렇게 가둡니다</strong>
+              <ul>
+                <li><strong>할 수 있는 것</strong>: 그래픽 안의 정렬·접기·탭·필터 같은 상호작용, 링크 열기, 파일·폴더를 <u>탐색기에서 보기</u>, <u>VS Code로 열기</u>(선택한 팀장의 작업 폴더·허용한 팀원 폴더·워크트리 <em>안</em>의 파일만).</li>
+                <li><strong>막혀 있는 것</strong>: 네트워크 접속·외부 파일 불러오기, 앱 기능과 앱 화면 접근, 파일 수정·삭제·git 커밋 같은 <u>상태를 바꾸는 모든 동작</u>. 앱과 다른 출처의 별도 프레임에서 돌고, 보안 규칙(CSP)이 막습니다.</li>
+                <li><strong>남는 위험</strong>: 이 HTML에 외부에서 읽은 내용(웹 페이지, 이슈 본문 등)이 섞이면 그 안의 악성 코드가 위 "할 수 있는 것" 범위에서 움직일 수 있습니다(예: 탐색기·VS Code 창을 계속 띄우기). 직접 쓴 코드나 AI가 만든 코드는 읽어 본 뒤 저장하고, 외부 내용을 HTML에 그대로 넣는 스크립트에는 켜지 마세요.</li>
+              </ul>
+            </div>
             <div class="ps-row">
               <button type="button" id="ps-example-btn">예제: 브랜치·워크트리(마크다운)</button>
               <button type="button" id="ps-example-html-btn">예제: 브랜치 그래픽(HTML)</button>
               <button type="button" id="ps-example-graph-btn">예제: 깃 그래프·워크트리(HTML)</button>
+              <button type="button" id="ps-example-graph-js-btn" title="커밋 클릭 → 변경 파일 → 탐색기/VS Code, 워크트리 표 정렬 (JavaScript 허용 필요)">예제: 깃 그래프(상호작용·JS)</button>
               <button type="button" id="ps-test-btn" title="저장하지 않고 지금 한 번 실행해 봅니다(선택한 팀장 기준). 오류와 표준 오류 출력도 그대로 보여 줍니다">▶ 시험 실행</button>
               <button type="button" id="ps-fix-btn" title="시험 실행 결과(오류 포함)를 AI에게 보여 주고 스크립트를 고치게 합니다 — 추가 토큰이 듭니다">🛠 AI로 고치기</button>
             </div>
