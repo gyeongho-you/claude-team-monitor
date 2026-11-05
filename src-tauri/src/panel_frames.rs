@@ -86,6 +86,12 @@ pub(crate) fn handle(path: &str) -> tauri::http::Response<Vec<u8>> {
     }
 }
 
+/// 앱을 다시 시작한다 — 멈춘(무한 루프 등) JS 그래픽의 프레임 프로세스는 앱을 닫아야만 정리된다(시험으로 확인: 기다려도, 화면을 새로고침해도 복구되지 않는다).
+#[tauri::command]
+pub fn restart_app_command(app: tauri::AppHandle) {
+    app.restart();
+}
+
 #[tauri::command]
 pub fn register_panel_frame_command(html: String) -> Result<String, String> {
     let token = store(html)?;

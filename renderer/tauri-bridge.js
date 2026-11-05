@@ -152,6 +152,7 @@
   async function testPanelScript(interpreter, script, timeoutMs, leadId, outputFormat, allowJs) { return invoke('test_panel_script_command', { interpreter, script, timeoutMs, leadId: leadId || null, outputFormat: outputFormat || 'markdown', allowJs: !!allowJs }); }
   async function generatePanelScript(request, interpreter, model, outputFormat, allowJs) { return invoke('generate_panel_script_command', { request, interpreter, model, outputFormat: outputFormat || 'markdown', allowJs: !!allowJs }); }
   async function fixPanelScript(script, problem, note, interpreter, model, outputFormat, allowJs) { return invoke('fix_panel_script_command', { script, problem, note, interpreter, model, outputFormat: outputFormat || 'markdown', allowJs: !!allowJs }); }
+  async function restartApp() { return invoke('restart_app_command'); }
   async function registerPanelFrame(html) { return invoke('register_panel_frame_command', { html }); }
   async function revealPanelPath(path, leadId) { return invoke('reveal_panel_path_command', { path, leadId: leadId || null }); }
   async function openPanelPathInEditor(path, line, leadId) { return invoke('open_panel_path_in_editor_command', { path, line: line == null ? null : line, leadId: leadId || null }); }
@@ -376,6 +377,7 @@
     clearPanelScriptErrors,
     fixPanelScript,
     registerPanelFrame,
+    restartApp,
     revealPanelPath,
     openPanelPathInEditor,
     savePanelContent,

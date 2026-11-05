@@ -949,6 +949,7 @@ const JS_FRAME_BRIDGE = String.raw`(function(){
   function size(){var h=Math.max(document.documentElement.scrollHeight,document.body?document.body.scrollHeight:0);if(h!==last){last=h;post({t:'size',h:h});}}
   if(window.ResizeObserver)new ResizeObserver(size).observe(document.documentElement);
   window.addEventListener('load',size);setTimeout(size,100);setTimeout(size,500);
+  post({t:'hb'});setInterval(function(){post({t:'hb'});},1000);
 })();`;
 let jsFrameSeq = 0;
 let panelMetaText = '';
@@ -958,9 +959,41 @@ function showPanelToast(msg) {
   clearTimeout(panelToastTimer);
   panelToastTimer = setTimeout(() => { spMetaEl.textContent = panelMetaText; }, 6000);
 }
+// ---- 멈춘 JS 프레임 대응: 프레임의 연결 코드가 1초마다 보내는 신호가 끊기면(무한 루프 등) 멈춘 것으로 보고, 같은 내용을 JavaScript 없는 격리 프레임으로 대신 보여 준다 ----
+// 멈춘 프레임 프로세스는 앱을 다시 시작해야 정리되고(시험 확인), 그 전까지는 새 JS 프레임도 뜨지 못하므로 이후에는 곧바로 대체 화면을 쓴다.
+const JS_FRAME_HUNG_MS = 6000;
+let jsFramesBroken = false;
+const jsFrameFragments = new WeakMap();
+function showJsHungFallback(container, fragment) {
+  container.innerHTML = '';
+  const banner = document.createElement('div');
+  banner.className = 'js-hung-banner';
+  banner.textContent = '⚠ JavaScript 그래픽이 응답하지 않아 상호작용 없이 표시합니다(그래픽의 스크립트가 멈췄습니다 — 무한 루프 등). 멈춘 프로세스는 앱을 다시 시작해야 정리됩니다.';
+  const btn = document.createElement('button');
+  btn.textContent = '앱 다시 시작';
+  btn.addEventListener('click', async () => { if (confirm('앱을 다시 시작합니다(팀장 세션은 그대로 유지됩니다). 계속할까요?')) { try { await window.api.restartApp(); } catch (err) { console.error('재시작 실패:', err); } } });
+  banner.appendChild(btn);
+  const body = document.createElement('div');
+  container.append(banner, body);
+  renderHtmlFrame(body, fragment);
+}
+setInterval(() => {
+  if (document.visibilityState !== 'visible') return; // 창이 가려져 있으면 타이머가 늦어질 수 있어 판단하지 않는다
+  const now = Date.now();
+  for (const frame of document.querySelectorAll('iframe.sp-html-frame[data-js]')) {
+    if (frame.offsetParent === null) continue; // 안 보이는 곳(접힌 패널 등)은 건너뛴다
+    const last = Number(frame.dataset.last || frame.dataset.created || now);
+    if (now - last > JS_FRAME_HUNG_MS) {
+      jsFramesBroken = true;
+      console.warn('[패널] JS 프레임이 응답하지 않아 대체 화면으로 바꿉니다');
+      showJsHungFallback(frame.parentElement, jsFrameFragments.get(frame) || '');
+    }
+  }
+}, 1000);
 async function renderJsFrame(container, fragment, leadId) {
   const seq = ++jsFrameSeq;
   container.dataset.jsSeq = String(seq);
+  if (jsFramesBroken) { showJsHungFallback(container, fragment); return; }
   const base = "html,body{margin:0}body{padding:6px 2px;background:transparent;color:var(--text);font:12px/1.5 system-ui,-apple-system,'Segoe UI','Malgun Gothic',sans-serif;word-break:break-word}a{color:var(--accent)}img,svg{max-width:100%}table{border-collapse:collapse}button{font:inherit}";
   const doc = `<!doctype html><html><head><meta charset="utf-8"><style>${panelThemeCss()}${base}</style></head><body><script>${JS_FRAME_BRIDGE}<\/script>${fragment}</body></html>`;
   let url;
@@ -971,19 +1004,38 @@ async function renderJsFrame(container, fragment, leadId) {
   frame.className = 'sp-html-frame';
   frame.dataset.js = '1';
   frame.dataset.leadId = leadId || '';
+  frame.dataset.created = String(Date.now());
+  jsFrameFragments.set(frame, fragment);
   frame.setAttribute('sandbox', 'allow-scripts'); // allow-same-origin을 주지 않는다 — 앱 화면과 다른 출처라 앱 화면·앱 기능에 닿지 못한다
   frame.style.height = '120px';
   frame.src = url;
   container.innerHTML = '';
   container.appendChild(frame);
 }
+// 프레임이 요청(링크·탐색기·편집기 열기)을 폭주시켜 창을 수백 개 띄우지 못하게 한다: 프레임마다 3초에 FRAME_ACTION_LIMIT번까지만 처리한다(높이 알림은 제외).
+const FRAME_ACTION_LIMIT = 5, FRAME_ACTION_WINDOW_MS = 3000;
+const frameActionLog = new WeakMap();
+function allowFrameAction(frame, now = Date.now()) {
+  const log = (frameActionLog.get(frame) || []).filter(t => now - t < FRAME_ACTION_WINDOW_MS);
+  const ok = log.length < FRAME_ACTION_LIMIT;
+  if (ok) log.push(now);
+  frameActionLog.set(frame, log);
+  return ok;
+}
 window.addEventListener('message', async e => {
   const d = e.data;
   if (!d || d.ctm !== 1) return;
   const frame = [...document.querySelectorAll('iframe.sp-html-frame[data-js]')].find(f => f.contentWindow === e.source);
   if (!frame) return;
+  frame.dataset.last = String(Date.now());
+  if (d.t === 'hb') return;
   const leadId = frame.dataset.leadId || null;
   const report = msg => { if (typeof psTestPreview !== 'undefined' && psTestPreview.contains(frame)) psStatus.textContent = msg; else showPanelToast(msg); };
+  if (d.t !== 'size' && !allowFrameAction(frame)) {
+    const now = Date.now();
+    if (now - (frameActionLog.warnedAt || 0) > FRAME_ACTION_WINDOW_MS) { frameActionLog.warnedAt = now; report('그래픽의 요청이 너무 많아 일부를 무시했습니다(3초에 5번까지)'); }
+    return;
+  }
   try {
     if (d.t === 'size') { const h = Number(d.h); if (h > 0) frame.style.height = `${Math.min(4000, Math.max(40, Math.ceil(h) + 4))}px`; }
     else if (d.t === 'open-url') { if (/^https?:\/\//i.test(String(d.url))) await window.api.openExternalUrl(String(d.url)); }
@@ -1641,7 +1693,7 @@ document.getElementById('ps-test-btn').addEventListener('click', async e => {
   finally { btn.disabled = false; if (document.getElementById('ps-errors').open) loadPsErrors(); }
 });
 // 최근 에러 보기 — 화면에서 사라진 스크립트 오류를 다시 볼 수 있게 백엔드가 파일에 남긴 기록을 보여 준다.
-const PS_ERR_KIND = { spawn: '실행 실패', timeout: '시간 초과', exit: '비정상 종료', stderr: '오류 출력(정상 종료)' };
+const PS_ERR_KIND = { spawn: '실행 실패', timeout: '시간 초과', overflow: '출력이 너무 커서 중단', exit: '비정상 종료', stderr: '오류 출력(정상 종료)' };
 async function loadPsErrors() {
   const body = document.getElementById('ps-errors-body');
   let list;

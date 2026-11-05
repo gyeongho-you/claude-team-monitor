@@ -48,3 +48,45 @@ test('인라인 코드 안은 변환하지 않고, 문단의 줄바꿈은 유지
   assert.strictEqual(renderMarkdown(''), '');
   assert.strictEqual(renderMarkdown(null), '');
 });
+
+test('XSS 공격 모음: 어떤 입력도 실행 가능한 태그·속성·주소를 만들지 않는다', () => {
+  const vectors = [
+    '<script>alert(1)</script>', '<img src=x onerror=alert(1)>', '<svg onload=alert(1)>', '<iframe src="javascript:alert(1)">', '<a href="javascript:alert(1)">x</a>',
+    '[x](javascript:alert(1))', '[x]( javascript:alert(1))', '[x](JaVaScRiPt:alert(1))', '[x](&#106;avascript:alert(1))', '[x](vbscript:msgbox(1))', '[x](data:text/html,<script>alert(1)</script>)',
+    '[x](https://a.com" onmouseover="alert(1))', '[x](https://a.com\'onmouseover=\'alert(1))', '[x](https://a.com/`onmouseover=`alert(1))',
+    '[<img src=x onerror=alert(1)>](https://a.com)', '[x](https://a.com "title" onclick="alert(1)")',
+    '![x](javascript:alert(1))', '![x](https://evil.com/a.png)', '![x](data:image/svg+xml;utf8,<svg onload=alert(1)>)', '![x](data:image/png;base64,AAAA" onerror="alert(1))',
+    '`<script>alert(1)</script>`', '```\n<script>alert(1)</script>\n```', '**<img src=x onerror=alert(1)>**', '*a<img src=x onerror=alert(1)>*',
+    '| <img src=x onerror=alert(1)> | b |\n|---|---|\n| <svg onload=alert(1)> | c |', '> <img src=x onerror=alert(1)>', '# <img src=x onerror=alert(1)>', '- <img src=x onerror=alert(1)>',
+    'https://a.com/"onmouseover="alert(1)', 'https://a.com/<script>alert(1)</script>', '<<script>script>alert(1)<</script>/script>', '<math><mtext><table><mglyph><style><!--</style><img title="--&gt;&lt;img src=1 onerror=alert(1)&gt;">',
+    '\u0000<script>alert(1)</script>', '\u0000\u0001 [x](javascript:alert(1))', '<a href="&#x6A;avascript:alert(1)">x</a>',
+  ];
+  for (const v of vectors) {
+    const h = renderMarkdown(v);
+    // 태그가 되는 "<"는 우리가 직접 만든 태그뿐이어야 한다: 허용 목록 밖의 태그나 이벤트 속성이 있으면 안 된다
+    const tags = [...h.matchAll(/<\/?([a-zA-Z][a-zA-Z0-9]*)/g)].map(m => m[1].toLowerCase());
+    const allowed = new Set(['p', 'br', 'strong', 'em', 'code', 'pre', 'a', 'img', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td']);
+    assert.ok(tags.every(t => allowed.has(t)), `허용 밖 태그: ${v} → ${h}`);
+    // 글자로 이스케이프된 내용(&lt;img onerror=...&gt;)이 아니라, 진짜 태그(<...>) 안에 이벤트 속성이 있는지만 본다
+    for (const tag of h.matchAll(/<[^>]*>/g)) assert.ok(!/\son[a-z]+\s*=/i.test(tag[0]), `이벤트 속성: ${v} → ${h}`);
+    // 속성 값 안으로 따옴표가 새어 나오면 안 된다: a 태그와 img 태그의 속성은 우리가 정한 것만
+    for (const m of h.matchAll(/<(a|img)\b([^>]*)>/g)) {
+      const attrs = [...m[2].matchAll(/\s([a-z-]+)=/g)].map(x => x[1]);
+      const ok = m[1] === 'a' ? ['href', 'data-url', 'title'] : ['src', 'alt'];
+      assert.ok(attrs.every(a => ok.includes(a)), `예상 밖 속성 ${attrs}: ${v} → ${h}`);
+      const src = (m[2].match(/(?:src|data-url)="([^"]*)"/g) || []).join(' ');
+      assert.ok(!/javascript:|vbscript:|file:/i.test(src), `위험한 주소: ${v} → ${h}`);
+    }
+    // img는 base64 data: 이미지일 때만
+    for (const m of h.matchAll(/<img src="([^"]*)"/g)) assert.ok(/^data:image\/(png|jpeg|gif|webp|svg\+xml);base64,[A-Za-z0-9+\/=]+$/.test(m[1]), `허용 밖 이미지: ${v} → ${h}`);
+    // a의 실제 이동 주소(href)는 항상 #
+    for (const m of h.matchAll(/<a\b[^>]*\shref="([^"]*)"/g)) assert.strictEqual(m[1], '#', `href가 #이 아님: ${v} → ${h}`);
+  }
+});
+
+test('깊게 중첩된·긴 입력에도 오래 걸리지 않는다(정규식 폭주 방지)', () => {
+  const t = Date.now();
+  const nasty = ['**' + 'a*'.repeat(20000), '['.repeat(5000), '[x](' + 'a'.repeat(100000), '`'.repeat(50000), '> '.repeat(20000), '|'.repeat(30000) + '\n' + '-'.repeat(30000), 'https://' + 'a/'.repeat(30000), '![x](data:image/png;base64,' + 'A'.repeat(200000) + ')'];
+  for (const s of nasty) renderMarkdown(s);
+  assert.ok(Date.now() - t < 4000, `너무 오래 걸림: ${Date.now() - t}ms`);
+});

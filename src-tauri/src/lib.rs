@@ -105,6 +105,7 @@ pub fn run() {
       side_panel::fix_panel_script_command,
       side_panel::get_panel_script_errors_command,
       panel_frames::register_panel_frame_command,
+      panel_frames::restart_app_command,
       panel_actions::reveal_panel_path_command,
       panel_actions::open_panel_path_in_editor_command,
       side_panel::clear_panel_script_errors_command,

@@ -3,7 +3,8 @@
 //
 // 안전에 대한 판단: 이 앱은 서버와 연결돼 있지 않고 스크립트는 사용자 본인의 PC 권한으로 본인이 저장한 것만 돌기 때문에 샌드박스는 두지 않았다
 // (잘못되거나 나쁜 스크립트의 피해는 그 사용자에게만 간다). 대신 앱이 같이 멈추지 않게 (1) 슬롯마다 정한 제한 시간(ms), (2) 출력 길이 제한을 둔다.
-// 알려진 한계: 제한 시간이 지나면 스크립트 프로세스만 종료한다 — 스크립트가 띄운 자식 프로세스(git 등)는 그대로 끝날 때까지 남을 수 있다.
+// 앱을 지키는 장치: 제한 시간(ms) 초과 시 종료, 표준 출력이 MAX_CAPTURE_BYTES를 넘으면 종료(메모리 보호), 스크립트가 끝난 뒤 출력 통로를 물고 남은 자식이 있어도 READER_GRACE만 기다림.
+// 알려진 한계: 제한 시간이 지나면 스크립트 프로세스만 종료한다 — 스크립트가 일부러 분리해(detached) 띄운 자식 프로세스는 그대로 끝날 때까지 남는다.
 //
 // 스크립트는 슬롯 id로 정한 파일(~/.claude/claude-team-monitor/panel/scripts/<id>.<확장자>)에 써서 실행한다(명령줄 인용·길이 문제를 피한다).
 // 팀장 정보 등은 환경 변수로 넘긴다(아래 ENV_VAR_DOCS 표가 유일한 기준).
@@ -12,8 +13,17 @@ use crate::session_registry::LeadRecord;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use wait_timeout::ChildExt;
+
+/// 스크립트 출력(표준 출력)을 메모리에 담는 최대 크기. 넘으면 스크립트를 중단한다 — 출력 폭탄이 앱 메모리를 먹지 못하게(시험에서 3초 만에 3.4GB까지 늘어난 것을 막는 장치).
+const MAX_CAPTURE_BYTES: usize = 6 * 1024 * 1024;
+/// 표준 오류는 앞부분만 담는다(넘치는 건 버리되 계속 비워서 스크립트가 막히지 않게 한다).
+const MAX_STDERR_BYTES: usize = 256 * 1024;
+/// 스크립트가 끝난 뒤, 출력 통로를 물고 있는 자식 프로세스가 남아 있어도 통로가 닫히길 기다리는 최대 시간.
+const READER_GRACE: Duration = Duration::from_millis(400);
 
 pub(crate) const INTERPRETERS: [&str; 3] = ["node", "python", "shell"];
 pub(crate) const OUTPUT_FORMATS: [&str; 2] = ["markdown", "html"];
@@ -91,7 +101,7 @@ pub(crate) fn reference_markdown() -> String {
         - 실행 환경: Node.js(`node`), Python(`python`; macOS·Linux는 `python3`), 셸(Windows는 PowerShell, 그 외는 `sh`). 외부 패키지 설치는 전제하지 않는다 — 내장 모듈만 쓴다.\n\
         - 표준 입력은 비어 있다(대화형 입력 불가). 이 앱을 띄운 사용자 계정의 환경변수·PATH를 그대로 물려받으므로 `git`, `gh` 같은 명령도 그 사용자 PC에 설치돼 있으면 쓸 수 있다.\n\
         - 종료 코드가 0이 아니면 실패로 보고, 표준 오류의 앞부분이 패널에 오류로 표시된다. 정상일 때 표준 오류는 패널에 표시되지 않지만 '최근 에러'에 기록된다.\n\
-        - 슬롯마다 정한 제한 시간(ms)을 넘으면 중단된다(기본 10000ms). 출력은 {max}자까지만 보인다.\n\n\
+        - 슬롯마다 정한 제한 시간(ms)을 넘으면 중단된다(기본 10000ms). 출력은 {max}자까지만 보이고, 표준 출력이 약 6MB를 넘게 쏟아지면 스크립트를 중단한다.\n\n\
         ## 출력 형식 — 슬롯마다 둘 중 하나(`CTM_OUTPUT_FORMAT`)\n\n\
         **표준 출력**에 낸 내용이 패널에 그대로 표시된다. 그 슬롯의 형식에 맞춰 낸다.\n\n\
         ### `markdown` (글 중심)\n\n\
@@ -110,6 +120,7 @@ pub(crate) fn reference_markdown() -> String {
         - 막혀 있는 것: 네트워크 접속(`fetch`·`XMLHttpRequest`·WebSocket), 외부 스크립트·이미지·CSS 불러오기(`<script src>` 포함), 폼 전송, 팝업, `localStorage`·쿠키, 앱 화면의 변수·함수 접근, 프레임 자신의 주소를 바꾸는 것. 보안 규칙(CSP)이 막으므로 시도하지 마라. 필요한 데이터는 전부 스크립트(Node 등)가 모아서 HTML에 넣는다.\n\
         - 앱에 요청할 수 있는 동작(전역 객체 `window.ctm`): `ctm.open(url)`(http/https 주소를 기본 브라우저로), `ctm.reveal(경로)`(탐색기·Finder에서 그 파일/폴더 위치 보여 주기), `ctm.editor(경로, 줄번호)`(VS Code로 열기, 줄번호는 선택). 경로는 **절대 경로**여야 하고 선택한 팀장의 작업 폴더·허용한 팀원 폴더·그 저장소의 git 워크트리 폴더 **안**의 존재하는 것만 된다. 반환값은 없고 실패하면 앱이 패널 위쪽에 오류를 잠깐 보여 준다. `<a href=\"https://...\">` 링크는 자동으로 `ctm.open`처럼 동작한다.\n\
         - **상태를 바꾸는 동작(파일 수정·삭제, git 커밋·체크아웃 등)을 요청하는 방법은 없다.** `ctm`에는 위 세 가지뿐이다.\n\
+        - **무한 루프(`while(true)`)나 몇 초씩 걸리는 동기 계산을 쓰지 마라.** 프레임이 멈추면 앱이 6초 뒤에 감지해 상호작용 없는 화면으로 바꾸지만, 멈춘 프로세스는 앱을 다시 시작해야 정리된다. 반복은 `setInterval`/`setTimeout`으로 쪼개고, 데이터를 많이 다루는 일은 스크립트(Node 등) 쪽에서 미리 끝내서 HTML에 넣는다.\n\
         - 높이는 내용에 맞춰 자동으로 늘어난다. `<button>`·`<input>`·`<select>`는 쓸 수 있지만 `<form>` 전송은 안 된다(`onclick` 등 JavaScript로 처리).\n\
         ## 앱이 주지 않는 것\n\n\
         - 팀장의 실시간 상태(작업 중/대기), 팀원 목록, 토큰·비용 사용량, 다른 패널 슬롯의 내용은 환경 변수로 주지 않는다. 필요하면 `CTM_SESSION_FILE`(대화 기록)이나 `CTM_LEADS_FILE`을 직접 읽어서 계산하거나, 이 PC의 명령(`git`, `gh` 등)을 실행해서 알아낸다.\n\
@@ -160,7 +171,45 @@ fn find_lead<'a>(leads: &'a [LeadRecord], id: &str) -> Option<&'a LeadRecord> {
     leads.iter().find(|l| l.id == id || l.internal_id.as_deref() == Some(id))
 }
 
-/// 실행에서 생긴 문제(최근 에러 보기에 기록된다). kind: "spawn"(실행 못 함) | "timeout"(시간 초과) | "exit"(비정상 종료) | "stderr"(정상 종료했지만 오류 출력이 있었음)
+/// 읽은 만큼을 cap까지만 공유 버퍼에 담는 읽기 스레드. cap을 넘는 분은 버리되 계속 비운다(스크립트가 쓰다가 막히지 않게). 넘치면 overflow가 켜진다.
+/// 돌려주는 것: (지금까지 모인 내용, 통로가 닫혀 읽기가 끝났는지).
+fn capture<R: Read + Send + 'static>(mut r: R, cap: usize, overflow: Arc<AtomicBool>) -> (Arc<Mutex<Vec<u8>>>, Arc<AtomicBool>) {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let done = Arc::new(AtomicBool::new(false));
+    let (b2, d2) = (buf.clone(), done.clone());
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 65536];
+        loop {
+            match r.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let mut g = b2.lock().unwrap_or_else(|e| e.into_inner());
+                    if g.len() < cap {
+                        let take = n.min(cap - g.len());
+                        g.extend_from_slice(&chunk[..take]);
+                        if take < n {
+                            overflow.store(true, Ordering::SeqCst);
+                        }
+                    } else {
+                        overflow.store(true, Ordering::SeqCst);
+                    }
+                }
+            }
+        }
+        d2.store(true, Ordering::SeqCst);
+    });
+    (buf, done)
+}
+
+fn too_big_message() -> String {
+    format!("**출력이 너무 커서({}MB 넘음) 중단했습니다.**\n\n스크립트가 끝없이 출력하고 있지 않은지 확인하세요. 패널에는 그 일부(최대 {MAX_OUTPUT_CHARS}자)만 보여 줄 수 있습니다.", MAX_CAPTURE_BYTES / 1024 / 1024)
+}
+
+fn too_big_detail() -> String {
+    format!("출력이 {}MB를 넘어 중단했습니다", MAX_CAPTURE_BYTES / 1024 / 1024)
+}
+
+/// 실행에서 생긴 문제(최근 에러 보기에 기록된다). kind: "spawn"(실행 못 함) | "timeout"(시간 초과) | "overflow"(출력이 너무 커서 중단) | "exit"(비정상 종료) | "stderr"(정상 종료했지만 오류 출력이 있었음)
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ScriptProblem {
     pub kind: &'static str,
@@ -209,31 +258,49 @@ pub(crate) fn run_script_outcome(scripts_dir: &Path, file_stem: &str, interprete
         Ok(c) => c,
         Err(e) => return fail(format!("**{program}을(를) 실행하지 못했습니다:** {e}\n\n이 PC에 {program}이(가) 설치돼 있고 PATH에 있어야 합니다."), "spawn", format!("{program}을(를) 실행하지 못했습니다: {e}")),
     };
-    let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else { return fail("**출력을 열지 못했습니다.**".to_string(), "spawn", "출력을 열지 못했습니다".to_string()) };
-    let out_reader = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        let _ = stdout.read_to_end(&mut b);
-        b
-    });
-    let err_reader = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        let _ = stderr.read_to_end(&mut b);
-        b
-    });
-    let status = match child.wait_timeout(Duration::from_millis(timeout_ms)) {
-        Ok(Some(s)) => s,
-        _ => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return fail(
-                format!("**제한 시간({timeout_ms}ms)을 넘어 중단했습니다.**\n\n이 슬롯의 설정에서 제한 시간(ms)을 늘릴 수 있습니다."),
-                "timeout",
-                format!("제한 시간({timeout_ms}ms)을 넘어 중단했습니다"),
-            );
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else { return fail("**출력을 열지 못했습니다.**".to_string(), "spawn", "출력을 열지 못했습니다".to_string()) };
+    let out_over = Arc::new(AtomicBool::new(false));
+    let (out_buf, out_done) = capture(stdout, MAX_CAPTURE_BYTES, out_over.clone());
+    let (err_buf, err_done) = capture(stderr, MAX_STDERR_BYTES, Arc::new(AtomicBool::new(false)));
+    // 제한 시간과 출력 크기를 짧은 간격으로 확인하면서 기다린다.
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let status = loop {
+        match child.wait_timeout(Duration::from_millis(40)) {
+            Ok(Some(s)) => break s,
+            Ok(None) => {
+                if out_over.load(Ordering::SeqCst) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return fail(too_big_message(), "overflow", too_big_detail());
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return fail(
+                        format!("**제한 시간({timeout_ms}ms)을 넘어 중단했습니다.**\n\n이 슬롯의 설정에서 제한 시간(ms)을 늘릴 수 있습니다."),
+                        "timeout",
+                        format!("제한 시간({timeout_ms}ms)을 넘어 중단했습니다"),
+                    );
+                }
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return fail(format!("**프로세스 상태를 확인하지 못했습니다:** {e}"), "spawn", format!("프로세스 상태를 확인하지 못했습니다: {e}"));
+            }
         }
     };
-    let out = String::from_utf8_lossy(&out_reader.join().unwrap_or_default()).to_string();
-    let err = String::from_utf8_lossy(&err_reader.join().unwrap_or_default()).to_string();
+    // 스크립트가 끝난 뒤 출력 통로를 물고 남은 자식 프로세스가 있어도 오래 기다리지 않는다(지금까지 모인 것만 쓴다).
+    let grace_end = Instant::now() + READER_GRACE;
+    while !(out_done.load(Ordering::SeqCst) && err_done.load(Ordering::SeqCst)) && Instant::now() < grace_end {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if out_over.load(Ordering::SeqCst) {
+        return fail(too_big_message(), "overflow", too_big_detail());
+    }
+    let take = |b: &Arc<Mutex<Vec<u8>>>| String::from_utf8_lossy(&b.lock().unwrap_or_else(|e| e.into_inner())).to_string();
+    let out = take(&out_buf);
+    let err = take(&err_buf);
     if !status.success() {
         let (e, _) = truncate_chars(err.trim(), 1500);
         let shown = if e.is_empty() { "(오류 출력 없음)".to_string() } else { e };
@@ -453,6 +520,39 @@ mod tests {
         assert_eq!(extract_code_block("설명\n```js\nconsole.log(1)\n```\n끝"), "console.log(1)");
         assert_eq!(extract_code_block("```\na\nb\n```"), "a\nb");
         assert_eq!(extract_code_block("console.log(2)"), "console.log(2)");
+    }
+
+    #[test]
+    fn output_flood_is_stopped_quickly_instead_of_eating_memory() {
+        let dir = scratch();
+        // 끝이 있는 폭탄(약 40MB 쓰고 종료)
+        let t = Instant::now();
+        let o = run(&dir, "fl1", "const b=Buffer.alloc(1<<20,65);for(let i=0;i<40;i++)process.stdout.write(b);", 20000);
+        assert_eq!(o.problem.as_ref().map(|p| p.kind), Some("overflow"), "{}", o.output);
+        assert!(o.output.contains("너무 커서") && o.output.chars().count() < 600, "큰 출력은 오류 문구로 바뀌어야 한다");
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
+        // 끝없는 폭탄은 제한 시간(20초)이 아니라 크기 제한으로 곧 멈춘다
+        let t = Instant::now();
+        let o = run(&dir, "fl2", "const b=Buffer.alloc(1<<20,66);function w(){while(process.stdout.write(b)){}process.stdout.once('drain',w)}w();", 20000);
+        assert_eq!(o.problem.as_ref().map(|p| p.kind), Some("overflow"));
+        assert!(t.elapsed() < Duration::from_secs(8), "끝없는 출력도 곧 멈춰야 한다: {:?}", t.elapsed());
+        // 크기 제한 안쪽의 큰 출력은 정상(앞 MAX_OUTPUT_CHARS자만 보임)
+        let o = run(&dir, "fl3", "console.log('x'.repeat(3*1024*1024))", 20000);
+        assert!(o.problem.is_none() && o.output.contains("까지만 보여 줍니다"), "{}", &o.output[..80.min(o.output.len())]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_child_holding_the_output_pipe_does_not_make_the_run_wait() {
+        let dir = scratch();
+        // 부모는 곧바로 끝나지만, 출력 통로를 물려받은 자식이 20초 동안 산다 → 20초를 기다리면 안 된다
+        let script = "const {spawn}=require('child_process');spawn(process.execPath,['-e','setTimeout(()=>{},20000)'],{stdio:['ignore','inherit','inherit'],detached:true}).unref();console.log('## 부모는 바로 끝남');";
+        let t = Instant::now();
+        let o = run(&dir, "hp1", script, 5000);
+        assert!(t.elapsed() < Duration::from_secs(3), "자식을 기다리면 안 된다: {:?}", t.elapsed());
+        assert_eq!(o.output, "## 부모는 바로 끝남");
+        assert!(o.problem.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
