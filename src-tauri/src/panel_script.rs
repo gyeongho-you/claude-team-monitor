@@ -138,6 +138,11 @@ fn find_lead<'a>(leads: &'a [LeadRecord], id: &str) -> Option<&'a LeadRecord> {
 
 /// 스크립트를 한 번 실행해서 패널에 보일 마크다운을 돌려준다(실패·시간 초과도 읽을 수 있는 마크다운으로 돌려준다).
 pub(crate) fn run_script(scripts_dir: &Path, file_stem: &str, interpreter: &str, script: &str, timeout_ms: u64, lead: Option<&LeadRecord>) -> String {
+    run_script_with(scripts_dir, file_stem, interpreter, script, timeout_ms, lead, false)
+}
+
+/// show_stderr: 정상 종료(종료 코드 0)여도 표준 오류 출력을 결과 끝에 붙인다 — 설정 화면의 시험 실행용(패널에서는 오류가 아니면 숨긴다).
+pub(crate) fn run_script_with(scripts_dir: &Path, file_stem: &str, interpreter: &str, script: &str, timeout_ms: u64, lead: Option<&LeadRecord>, show_stderr: bool) -> String {
     let Some((program, ext, pre_args)) = interpreter_spec(interpreter) else { return "**알 수 없는 실행 환경입니다.**".to_string() };
     if let Err(e) = std::fs::create_dir_all(scripts_dir) {
         return format!("**스크립트 폴더를 만들지 못했습니다:** {e}");
@@ -191,13 +196,19 @@ pub(crate) fn run_script(scripts_dir: &Path, file_stem: &str, interpreter: &str,
         return format!("**스크립트가 실패했습니다**(종료 코드 {})\n\n```\n{}\n```{}", status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".to_string()), shown, if out.trim().is_empty() { String::new() } else { format!("\n\n{}", out.trim()) });
     }
     let (text, cut) = truncate_chars(out.trim(), MAX_OUTPUT_CHARS);
+    let stderr_note = if show_stderr && !err.trim().is_empty() {
+        let (e, _) = truncate_chars(err.trim(), 1500);
+        format!("\n\n---\n[표준 오류 출력 — 시험 실행에서만 보입니다]\n{e}")
+    } else {
+        String::new()
+    };
     if text.is_empty() {
-        return "(스크립트가 아무것도 출력하지 않았습니다 — 마크다운을 표준 출력으로 내보내야 패널에 보입니다)".to_string();
+        return format!("(스크립트가 아무것도 출력하지 않았습니다 — 마크다운을 표준 출력으로 내보내야 패널에 보입니다){stderr_note}");
     }
     if cut {
-        format!("{text}\n\n…(출력이 길어서 {MAX_OUTPUT_CHARS}자까지만 보여 줍니다)")
+        format!("{text}\n\n…(출력이 길어서 {MAX_OUTPUT_CHARS}자까지만 보여 줍니다){stderr_note}")
     } else {
-        text
+        format!("{text}{stderr_note}")
     }
 }
 
@@ -228,6 +239,15 @@ pub(crate) fn build_generate_prompt(request: &str, interpreter: &str) -> String 
         ===== 앱 안내 =====\n{reference}\n===== 앱 안내 끝 =====\n\n\
         요구: {request}",
         reference = reference_markdown()
+    )
+}
+
+/// 시험 실행에서 나온 문제(오류·이상한 출력)를 보고 스크립트를 고치게 할 때 줄 요청문.
+pub(crate) fn build_fix_prompt(script: &str, problem: &str, note: &str, interpreter: &str) -> String {
+    let base = build_generate_prompt("(아래 스크립트를 고치는 일이다 — 새로 쓰지 말고 문제만 고쳐라)", interpreter);
+    let note_line = if note.trim().is_empty() { String::new() } else { format!("\n사용자가 덧붙인 말: {}\n", note.trim()) };
+    format!(
+        "{base}\n\n===== 지금 스크립트 =====\n{script}\n===== 지금 스크립트 끝 =====\n\n===== 시험 실행에서 나온 결과(오류 포함) =====\n{problem}\n===== 결과 끝 =====\n{note_line}\n위 결과에서 보이는 문제의 원인을 찾아 고친 **전체 스크립트**를 코드 블록 하나로만 답해라. 원래 하려던 일은 바꾸지 마라."
     )
 }
 
@@ -278,6 +298,23 @@ mod tests {
         }
         assert!(out.contains("CTM_LEAD_DIR=EMPTY"), "{out}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stderr_is_hidden_on_success_in_the_panel_but_shown_in_test_runs() {
+        let dir = scratch();
+        let js = "console.log('## 제목'); console.error('경고: 일부 실패'); process.exitCode = 0;";
+        let panel = run_script(&dir, "t7", "node", js, 8000, None);
+        assert!(panel.contains("## 제목") && !panel.contains("경고: 일부 실패"), "{panel}");
+        let test = run_script_with(&dir, "t7", "node", js, 8000, None, true);
+        assert!(test.contains("## 제목") && test.contains("표준 오류 출력") && test.contains("경고: 일부 실패"), "{test}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fix_prompt_carries_script_error_note_and_reference() {
+        let p = build_fix_prompt("const a = 1; a = 2;", "TypeError: Assignment to constant variable.", "표로 보여줘", "node");
+        assert!(p.contains("const a = 1; a = 2;") && p.contains("Assignment to constant variable") && p.contains("표로 보여줘") && p.contains(&reference_markdown()));
     }
 
     #[test]

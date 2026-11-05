@@ -151,6 +151,7 @@
   async function getPanelContent(slotId, leadId, force) { return invoke('get_panel_content_command', { slotId, leadId: leadId || null, force: !!force }); }
   async function testPanelScript(interpreter, script, timeoutMs, leadId) { return invoke('test_panel_script_command', { interpreter, script, timeoutMs, leadId: leadId || null }); }
   async function generatePanelScript(request, interpreter, model) { return invoke('generate_panel_script_command', { request, interpreter, model }); }
+  async function fixPanelScript(script, problem, note, interpreter, model) { return invoke('fix_panel_script_command', { script, problem, note, interpreter, model }); }
   async function getPanelScriptReference() { return invoke('get_panel_script_reference_command'); }
   async function savePanelContent(slotId, markdown) { return invoke('save_panel_content_command', { slotId, markdown }); }
   async function refreshPanelSlot(slotId) { return invoke('refresh_panel_slot_command', { slotId }); }
@@ -366,6 +367,7 @@
     testPanelScript,
     generatePanelScript,
     getPanelScriptReference,
+    fixPanelScript,
     savePanelContent,
     refreshPanelSlot,
     openExternalUrl,

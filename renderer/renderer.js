@@ -1164,6 +1164,17 @@ document.getElementById('ps-test-btn').addEventListener('click', async e => {
   catch (err) { psTestOut.textContent = errMsg(err); }
   finally { btn.disabled = false; }
 });
+document.getElementById('ps-fix-btn').addEventListener('click', async e => {
+  const btn = e.currentTarget;
+  if (!psScript.value.trim()) { psStatus.textContent = '고칠 스크립트가 없습니다.'; return; }
+  if (psTestOut.hidden || !psTestOut.textContent.trim() || psTestOut.textContent === '실행하는 중...') { psStatus.textContent = '먼저 "▶ 시험 실행"으로 문제가 나오는 결과를 만든 뒤 눌러 주세요.'; return; }
+  btn.disabled = true; psStatus.textContent = 'AI가 시험 실행 결과를 보고 스크립트를 고치는 중입니다(최대 2분)...';
+  try {
+    psScript.value = await window.api.fixPanelScript(psScript.value, psTestOut.textContent, document.getElementById('ps-gen-request').value, psInterp.value, document.getElementById('ps-gen-model').value);
+    psStatus.textContent = '고쳤습니다. 코드를 읽어 보고 다시 "▶ 시험 실행"으로 확인하세요(아직 저장되지 않았습니다).';
+  } catch (err) { psStatus.textContent = errMsg(err); }
+  finally { btn.disabled = false; }
+});
 document.getElementById('ps-gen-btn').addEventListener('click', async e => {
   const btn = e.currentTarget;
   const request = document.getElementById('ps-gen-request').value.trim();

@@ -859,10 +859,36 @@ pub async fn test_panel_script_command(interpreter: String, script: String, time
         return Err(format!("제한 시간은 {}~{}ms 사이로 입력하세요.", crate::panel_script::MIN_TIMEOUT_MS, crate::panel_script::MAX_TIMEOUT_MS));
     }
     let lead = crate::panel_script::lead_by_id(&load_leads(), lead_id.as_deref());
-    tokio::task::spawn_blocking(move || crate::panel_script::run_script(&panel_dir().join("scripts"), "_test", &interpreter, &script, timeout_ms, lead.as_ref())).await.map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || crate::panel_script::run_script_with(&panel_dir().join("scripts"), "_test", &interpreter, &script, timeout_ms, lead.as_ref(), true)).await.map_err(|e| e.to_string())
 }
 
 /// 스크립트 작성 안내(앱이 주는 정보·출력 형식·제한) — 설정 화면에 보여 주고, AI 요청문에도 같은 글이 들어간다.
+/// "AI로 고치기": 시험 실행에서 나온 결과(오류 포함)를 보고 모델이 스크립트를 고쳐 온다. 마찬가지로 저장은 사용자가 코드를 보고 직접 한다.
+#[tauri::command]
+pub async fn fix_panel_script_command(script: String, problem: String, note: String, interpreter: String, model: String) -> Result<String, String> {
+    if script.trim().is_empty() || script.chars().count() > crate::panel_script::MAX_SCRIPT_CHARS {
+        return Err("고칠 스크립트가 비었거나 너무 깁니다.".to_string());
+    }
+    if problem.trim().is_empty() {
+        return Err("먼저 \"시험 실행\"으로 문제가 나오는 결과를 만든 뒤 눌러 주세요.".to_string());
+    }
+    if !crate::panel_script::INTERPRETERS.contains(&interpreter.as_str()) || !AI_MODELS.contains(&model.as_str()) {
+        return Err("실행 환경 또는 모델이 올바르지 않습니다.".to_string());
+    }
+    let problem: String = problem.chars().take(4000).collect();
+    let note: String = note.chars().take(1000).collect();
+    if AI_BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return Err("다른 AI 작업이 진행 중입니다. 잠시 후 다시 누르세요.".to_string());
+    }
+    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_fix_prompt(&script, &problem, &note, &interpreter))).await;
+    AI_BUSY.store(false, Ordering::SeqCst);
+    let code = crate::panel_script::extract_code_block(&result.map_err(|e| e.to_string())??);
+    if code.trim().is_empty() {
+        return Err("모델이 고친 스크립트를 내놓지 못했습니다. 다시 시도하세요.".to_string());
+    }
+    Ok(code)
+}
+
 #[tauri::command]
 pub fn get_panel_script_reference_command() -> String {
     crate::panel_script::reference_markdown()
