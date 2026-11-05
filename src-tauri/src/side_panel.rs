@@ -6,6 +6,7 @@
 //             템플릿 안내와 같은 방식). 팀장이 지정된 파일을 마크다운으로 갱신한다. AI가 따르는 방식이라 빠뜨릴 수 있다.
 //  - ai     : 팀장이 일을 마칠 때마다(또는 새로고침 버튼으로) 앱이 모델(슬롯마다 선택)에게 팀장의 최근 대화를 읽혀 사용자가 적어 둔 요청대로 내용을 갱신한다.
 //             호출은 도구·설정·스킬을 읽지 않는 최소 맥락으로 한다(실측: 호출당 Haiku 약 0.0006달러, Sonnet 0.008, Opus 0.017, Fable 0.2).
+//  - script : 사용자가 쓰거나 AI가 써 준 작은 스크립트를 이 PC에서 돌려 그 출력(마크다운)을 보여 준다 — 브랜치·워크트리처럼 프리셋으로 못 하는 것용(panel_script.rs).
 //  - manual : 사용자가 직접 쓴다.
 // 내용 파일은 ~/.claude/claude-team-monitor/panel/<슬롯id>.md (auto는 파일 없이 그때그때 만든다).
 
@@ -16,7 +17,7 @@ use crate::session_registry::{load_leads, LeadRecord};
 use crate::timing::now_ms;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -27,7 +28,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use wait_timeout::ChildExt;
 
 pub(crate) const PANEL_NOTICE_MARKER: &str = "[알림:패널 지침]";
-const MODES: [&str; 4] = ["auto", "lead", "ai", "manual"];
+const MODES: [&str; 5] = ["auto", "lead", "ai", "manual", "script"];
 const PRESETS: [&str; 2] = ["artifact-reports", "github-pr"];
 const AI_MODELS: [&str; 4] = ["haiku", "sonnet", "opus", "fable"];
 const MAX_CONTENT_CHARS: usize = 8000;
@@ -53,6 +54,12 @@ fn default_ai_model() -> String {
 }
 fn default_ai_include() -> String {
     "none".to_string()
+}
+fn default_interpreter() -> String {
+    "node".to_string()
+}
+fn default_timeout_ms() -> u64 {
+    crate::panel_script::DEFAULT_TIMEOUT_MS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -84,6 +91,13 @@ pub struct PanelSlot {
     pub enabled: bool,
     #[serde(default)]
     pub created_at: i64,
+    /// script 전용: 실행 환경("node" | "python" | "shell"), 스크립트 본문, 제한 시간(ms — 슬롯마다 사용자가 정한다)
+    #[serde(default = "default_interpreter")]
+    pub interpreter: String,
+    #[serde(default)]
+    pub script: String,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -115,6 +129,12 @@ pub struct PanelSlotInput {
     pub ai_include: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default = "default_interpreter")]
+    pub interpreter: String,
+    #[serde(default)]
+    pub script: String,
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -149,6 +169,21 @@ pub(crate) fn slot_from_input(input: &PanelSlotInput, id: String, created_at: i6
     if instruction.chars().count() > 2000 {
         return Err("지침은 2000자 이하로 입력하세요.".to_string());
     }
+    let is_script = input.mode == "script";
+    if is_script {
+        if !crate::panel_script::INTERPRETERS.contains(&input.interpreter.as_str()) {
+            return Err("스크립트 실행 환경이 올바르지 않습니다.".to_string());
+        }
+        if input.script.trim().is_empty() {
+            return Err("스크립트를 입력하세요.".to_string());
+        }
+        if input.script.chars().count() > crate::panel_script::MAX_SCRIPT_CHARS {
+            return Err(format!("스크립트는 {}자 이하로 입력하세요.", crate::panel_script::MAX_SCRIPT_CHARS));
+        }
+        if !(crate::panel_script::MIN_TIMEOUT_MS..=crate::panel_script::MAX_TIMEOUT_MS).contains(&input.timeout_ms) {
+            return Err(format!("제한 시간은 {}~{}ms 사이로 입력하세요.", crate::panel_script::MIN_TIMEOUT_MS, crate::panel_script::MAX_TIMEOUT_MS));
+        }
+    }
     Ok(PanelSlot {
         id,
         name,
@@ -161,6 +196,9 @@ pub(crate) fn slot_from_input(input: &PanelSlotInput, id: String, created_at: i6
         ai_include: if input.mode == "ai" { input.ai_include.clone() } else { "none".to_string() },
         enabled: input.enabled,
         created_at,
+        interpreter: if is_script { input.interpreter.clone() } else { default_interpreter() },
+        script: if is_script { input.script.clone() } else { String::new() },
+        timeout_ms: if is_script { input.timeout_ms } else { default_timeout_ms() },
     })
 }
 
@@ -275,6 +313,8 @@ pub(crate) struct RawItem {
 struct ScanState {
     offset: u64,
     items: HashMap<String, RawItem>,
+    /// github-pr: PR 만들기 호출의 tool_use id(그 결과가 나중 줄에 오므로 파일을 이어 읽는 동안 기억해 둔다)
+    pr_ids: HashSet<String>,
 }
 
 fn published_re() -> &'static Regex {
@@ -332,17 +372,69 @@ fn block_texts(rec: &serde_json::Value) -> Vec<(String, String)> {
 }
 
 /// 기록 한 줄에서 프리셋에 맞는 링크를 뽑아 items에 합친다(같은 주소는 최신 버전·시각으로 갱신).
-pub(crate) fn process_line(preset: &str, line: &str, items: &mut HashMap<String, RawItem>) {
-    let wanted = if preset == "github-pr" { "/pull/" } else { "artifact" };
-    if !line.contains(wanted) {
+fn pr_create_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\bgh\s+pr\s+create\b").unwrap())
+}
+
+/// 팀장이 PR을 만든 호출(gh pr create, 또는 GitHub 도구의 create_pull_request)의 tool_use id를 적어 둔다.
+fn note_pr_create_calls(rec: &serde_json::Value, ids: &mut HashSet<String>) {
+    let Some(arr) = rec.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array()) else { return };
+    for b in arr.iter().filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use")) {
+        let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("");
+        let cmd = b.get("input").and_then(|i| i.get("command")).and_then(|c| c.as_str()).unwrap_or("");
+        if let Some(id) = b.get("id").and_then(|i| i.as_str()) {
+            if pr_create_re().is_match(cmd) || name.contains("create_pull_request") {
+                ids.insert(id.to_string());
+            }
+        }
+    }
+}
+
+/// github-pr 프리셋: 팀장이 만든 PR만 모은다. 대화에 등장하는 아무 PR 주소(읽은 코드·목록 조회·남의 PR)는 팀장의 작업이 아니므로 모으지 않고,
+/// PR 만들기 호출의 결과에 찍힌 주소만 쓴다.
+fn process_pr_line(line: &str, items: &mut HashMap<String, RawItem>, pr_ids: &mut HashSet<String>) {
+    if !line.contains("pr create") && !line.contains("create_pull_request") && !line.contains("/pull/") && !line.contains("pr  create") {
+        return;
+    }
+    let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else { return };
+    match rec.get("type").and_then(|t| t.as_str()) {
+        Some("assistant") => note_pr_create_calls(&rec, pr_ids),
+        Some("user") => {
+            let ts = rec.get("timestamp").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let Some(arr) = rec.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_array()) else { return };
+            for b in arr.iter().filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_result")) {
+                if !b.get("tool_use_id").and_then(|i| i.as_str()).map_or(false, |id| pr_ids.contains(id)) {
+                    continue;
+                }
+                let text = match b.get("content") {
+                    Some(serde_json::Value::String(s)) => s.clone(),
+                    Some(serde_json::Value::Array(parts)) => parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("\n"),
+                    _ => String::new(),
+                };
+                for (title, url) in find_pr_links(&text) {
+                    let e = items.entry(url).or_insert(RawItem { title: title.clone(), version: 1, ts: ts.clone() });
+                    if ts > e.ts {
+                        e.ts = ts.clone();
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn process_line(preset: &str, line: &str, items: &mut HashMap<String, RawItem>, pr_ids: &mut HashSet<String>) {
+    if preset == "github-pr" {
+        return process_pr_line(line, items, pr_ids);
+    }
+    if !line.contains("artifact") {
         return;
     }
     let Ok(rec) = serde_json::from_str::<serde_json::Value>(line) else { return };
     let ts = rec.get("timestamp").and_then(|t| t.as_str()).unwrap_or("").to_string();
     for (kind, text) in block_texts(&rec) {
-        let found: Vec<(String, String, u32)> = if preset == "github-pr" {
-            find_pr_links(&text).into_iter().map(|(t, u)| (t, u, 1)).collect()
-        } else if kind == "tool" {
+        let found: Vec<(String, String, u32)> = if kind == "tool" {
             parse_published_result(&text).into_iter().collect()
         } else {
             Vec::new()
@@ -380,7 +472,7 @@ fn scan_file(preset: &str, path: &Path) -> HashMap<String, RawItem> {
         if f.read_to_end(&mut buf).is_ok() {
             if let Some(last_nl) = buf.iter().rposition(|&b| b == b'\n') {
                 for line in String::from_utf8_lossy(&buf[..last_nl]).lines() {
-                    process_line(preset, line, &mut state.items);
+                    process_line(preset, line, &mut state.items, &mut state.pr_ids);
                 }
                 state.offset += (last_nl + 1) as u64;
             }
@@ -708,8 +800,93 @@ pub async fn delete_panel_slot_command(id: String) -> Result<PanelConfig, String
     Ok(cfg)
 }
 
+/// 스크립트 슬롯의 마지막 실행 결과(패널이 3초마다 조회해도 스크립트를 그때마다 돌리지 않게 잠깐 보관한다).
+struct ScriptCacheEntry {
+    key: String,
+    at: std::time::Instant,
+    updated_at: i64,
+    markdown: String,
+}
+const SCRIPT_CACHE_TTL: Duration = Duration::from_secs(5);
+
+fn script_cache() -> &'static Mutex<HashMap<String, ScriptCacheEntry>> {
+    static C: OnceLock<Mutex<HashMap<String, ScriptCacheEntry>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+fn script_running() -> &'static Mutex<HashSet<String>> {
+    static R: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+async fn script_content(slot: PanelSlot, lead_id: Option<String>, force: bool) -> Result<PanelContent, String> {
+    let leads = load_leads();
+    let lead = crate::panel_script::lead_by_id(&leads, lead_id.as_deref());
+    // 스크립트·실행 환경·제한 시간·선택한 팀장이 바뀌면 다른 결과다.
+    let key = format!("{}|{}|{}|{}|{}", slot.interpreter, slot.timeout_ms, lead.as_ref().map(|l| l.id.as_str()).unwrap_or(""), slot.script.len(), slot.script);
+    let note = "스크립트를 이 PC에서 실행한 결과입니다".to_string();
+    let cached = |c: &HashMap<String, ScriptCacheEntry>| c.get(&slot.id).filter(|e| e.key == key).map(|e| (e.markdown.clone(), e.updated_at, e.at.elapsed()));
+    if let Some((md, at, age)) = cached(&script_cache().lock().unwrap_or_else(|e| e.into_inner())) {
+        if !force && age < SCRIPT_CACHE_TTL {
+            return Ok(PanelContent { markdown: md, updated_at: Some(at), mode: slot.mode, note, items: Vec::new() });
+        }
+    }
+    // 같은 슬롯이 이미 돌고 있으면 또 시작하지 않고 가진 결과(없으면 안내)를 보여 준다.
+    if !script_running().lock().unwrap_or_else(|e| e.into_inner()).insert(slot.id.clone()) {
+        let (md, at) = cached(&script_cache().lock().unwrap_or_else(|e| e.into_inner())).map(|(m, a, _)| (m, Some(a))).unwrap_or(("스크립트를 실행하는 중입니다...".to_string(), None));
+        return Ok(PanelContent { markdown: md, updated_at: at, mode: slot.mode, note, items: Vec::new() });
+    }
+    let (id, interpreter, script, timeout_ms) = (slot.id.clone(), slot.interpreter.clone(), slot.script.clone(), slot.timeout_ms);
+    let md = tokio::task::spawn_blocking(move || crate::panel_script::run_script(&panel_dir().join("scripts"), &id, &interpreter, &script, timeout_ms, lead.as_ref()))
+        .await
+        .map_err(|e| e.to_string());
+    script_running().lock().unwrap_or_else(|e| e.into_inner()).remove(&slot.id);
+    let md = md?;
+    let at = now_ms();
+    script_cache().lock().unwrap_or_else(|e| e.into_inner()).insert(slot.id.clone(), ScriptCacheEntry { key, at: std::time::Instant::now(), updated_at: at, markdown: md.clone() });
+    Ok(PanelContent { markdown: md, updated_at: Some(at), mode: slot.mode, note, items: Vec::new() })
+}
+
+/// 설정 화면의 "시험 실행": 저장하지 않은 스크립트를 지금 돌려 결과를 보여 준다.
 #[tauri::command]
-pub async fn get_panel_content_command(slot_id: String, lead_id: Option<String>) -> Result<PanelContent, String> {
+pub async fn test_panel_script_command(interpreter: String, script: String, timeout_ms: u64, lead_id: Option<String>) -> Result<String, String> {
+    if !crate::panel_script::INTERPRETERS.contains(&interpreter.as_str()) {
+        return Err("스크립트 실행 환경이 올바르지 않습니다.".to_string());
+    }
+    if script.trim().is_empty() || script.chars().count() > crate::panel_script::MAX_SCRIPT_CHARS {
+        return Err("스크립트가 비었거나 너무 깁니다.".to_string());
+    }
+    if !(crate::panel_script::MIN_TIMEOUT_MS..=crate::panel_script::MAX_TIMEOUT_MS).contains(&timeout_ms) {
+        return Err(format!("제한 시간은 {}~{}ms 사이로 입력하세요.", crate::panel_script::MIN_TIMEOUT_MS, crate::panel_script::MAX_TIMEOUT_MS));
+    }
+    let lead = crate::panel_script::lead_by_id(&load_leads(), lead_id.as_deref());
+    tokio::task::spawn_blocking(move || crate::panel_script::run_script(&panel_dir().join("scripts"), "_test", &interpreter, &script, timeout_ms, lead.as_ref())).await.map_err(|e| e.to_string())
+}
+
+/// "AI로 스크립트 만들기": 요청을 모델에게 주고 스크립트 초안을 받아 온다(저장은 사용자가 코드를 보고 직접 한다). 모델 호출이라 추가 토큰이 든다.
+#[tauri::command]
+pub async fn generate_panel_script_command(request: String, interpreter: String, model: String) -> Result<String, String> {
+    let request = request.trim().to_string();
+    if request.is_empty() || request.chars().count() > 1000 {
+        return Err("만들고 싶은 내용을 1000자 이하로 적어 주세요.".to_string());
+    }
+    if !crate::panel_script::INTERPRETERS.contains(&interpreter.as_str()) || !AI_MODELS.contains(&model.as_str()) {
+        return Err("실행 환경 또는 모델이 올바르지 않습니다.".to_string());
+    }
+    if AI_BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return Err("다른 AI 작업이 진행 중입니다. 잠시 후 다시 누르세요.".to_string());
+    }
+    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_generate_prompt(&request, &interpreter))).await;
+    AI_BUSY.store(false, Ordering::SeqCst);
+    let text = result.map_err(|e| e.to_string())??;
+    let code = crate::panel_script::extract_code_block(&text);
+    if code.trim().is_empty() {
+        return Err("모델이 스크립트를 만들지 못했습니다. 요청을 바꿔 다시 시도하세요.".to_string());
+    }
+    Ok(code)
+}
+
+#[tauri::command]
+pub async fn get_panel_content_command(slot_id: String, lead_id: Option<String>, force: Option<bool>) -> Result<PanelContent, String> {
     let config = load_panel_config();
     let Some(slot) = config.slots.into_iter().find(|s| s.id == slot_id) else { return Err("그 슬롯을 찾지 못했습니다.".to_string()) };
     if !is_safe_id(&slot.id) {
@@ -725,6 +902,9 @@ pub async fn get_panel_content_command(slot_id: String, lead_id: Option<String>)
         .await
         .map_err(|e| e.to_string())?;
         return Ok(PanelContent { markdown: md, updated_at: None, mode: slot.mode, note: "대화 기록에서 자동으로 모았습니다".to_string(), items });
+    }
+    if slot.mode == "script" {
+        return script_content(slot, lead_id, force.unwrap_or(false)).await;
     }
     let (text, mtime) = read_content(&panel_dir(), &slot.id);
     let note = match slot.mode.as_str() {
@@ -804,7 +984,35 @@ mod tests {
     use super::*;
 
     fn input(mode: &str) -> PanelSlotInput {
-        PanelSlotInput { id: None, name: "보고서".into(), mode: mode.into(), scope: "all".into(), preset: "artifact-reports".into(), instruction: "".into(), auto_update: false, ai_model: "sonnet".into(), ai_include: "none".into(), enabled: true }
+        PanelSlotInput { id: None, name: "보고서".into(), mode: mode.into(), scope: "all".into(), preset: "artifact-reports".into(), instruction: "".into(), auto_update: false, ai_model: "sonnet".into(), ai_include: "none".into(), enabled: true, interpreter: "node".into(), script: "".into(), timeout_ms: 10_000 }
+    }
+
+    #[test]
+    fn script_slot_needs_a_script_and_a_time_limit_in_range_and_other_modes_ignore_script_fields() {
+        let mut i = input("script");
+        assert!(slot_from_input(&i, "s1".into(), 0).unwrap_err().contains("스크립트를 입력"));
+        i.script = "console.log(1)".into();
+        let ok = slot_from_input(&i, "s1".into(), 0).unwrap();
+        assert_eq!((ok.interpreter.as_str(), ok.timeout_ms), ("node", 10_000));
+        i.timeout_ms = 100;
+        assert!(slot_from_input(&i, "s1".into(), 0).unwrap_err().contains("제한 시간"));
+        i.timeout_ms = 700_000;
+        assert!(slot_from_input(&i, "s1".into(), 0).is_err());
+        i.timeout_ms = 3000;
+        i.interpreter = "ruby".into();
+        assert!(slot_from_input(&i, "s1".into(), 0).unwrap_err().contains("실행 환경"));
+        // 스크립트가 아닌 슬롯은 스크립트 칸 값이 와도 저장하지 않는다
+        let mut m = input("manual");
+        m.script = "x".into();
+        m.timeout_ms = 1;
+        let slot = slot_from_input(&m, "s2".into(), 0).unwrap();
+        assert!(slot.script.is_empty() && slot.timeout_ms == 10_000);
+    }
+
+    #[test]
+    fn old_config_files_without_script_fields_still_load_with_defaults() {
+        let cfg: PanelConfig = serde_json::from_str(r#"{"enabled":true,"slots":[{"id":"a","name":"보고서","mode":"auto"}]}"#).unwrap();
+        assert_eq!((cfg.slots[0].interpreter.as_str(), cfg.slots[0].timeout_ms, cfg.slots[0].script.as_str()), ("node", 10_000, ""));
     }
 
     fn lead(id: &str, internal: Option<&str>) -> LeadRecord {
@@ -839,28 +1047,39 @@ mod tests {
     #[test]
     fn report_lines_are_deduped_by_url_keeping_the_latest_version_and_time() {
         let mut items = HashMap::new();
-        process_line("artifact-reports", &tool_result_line("2026-11-01T01:00:00Z", "Published /a/first.html at https://claude.ai/artifact/AAA (Version 1)"), &mut items);
-        process_line("artifact-reports", &tool_result_line("2026-11-02T01:00:00Z", "Published /a/second-name.html at https://claude.ai/artifact/AAA (Version 2)"), &mut items);
-        process_line("artifact-reports", &tool_result_line("2026-11-01T05:00:00Z", "Published /a/other.html at https://claude.ai/artifact/BBB"), &mut items);
-        process_line("artifact-reports", &tool_result_line("2026-11-03T00:00:00Z", "Quickstart ... https://claude.ai/artifact/CCC"), &mut items);
+        process_line("artifact-reports", &tool_result_line("2026-11-01T01:00:00Z", "Published /a/first.html at https://claude.ai/artifact/AAA (Version 1)"), &mut items, &mut HashSet::new());
+        process_line("artifact-reports", &tool_result_line("2026-11-02T01:00:00Z", "Published /a/second-name.html at https://claude.ai/artifact/AAA (Version 2)"), &mut items, &mut HashSet::new());
+        process_line("artifact-reports", &tool_result_line("2026-11-01T05:00:00Z", "Published /a/other.html at https://claude.ai/artifact/BBB"), &mut items, &mut HashSet::new());
+        process_line("artifact-reports", &tool_result_line("2026-11-03T00:00:00Z", "Quickstart ... https://claude.ai/artifact/CCC"), &mut items, &mut HashSet::new());
         assert_eq!(items.len(), 2);
         let a = &items["https://claude.ai/artifact/AAA"];
         assert_eq!((a.title.as_str(), a.version, a.ts.as_str()), ("second-name", 2, "2026-11-02T01:00:00Z"));
         // 답변 본문에 적힌 링크는 보고서 프리셋에서 모으지 않는다(게시 결과만)
         let say = serde_json::json!({"type":"assistant","timestamp":"2026-11-04T00:00:00Z","message":{"content":[{"type":"text","text":"https://claude.ai/artifact/ZZZ 참고"}]}}).to_string();
-        process_line("artifact-reports", &say, &mut items);
+        process_line("artifact-reports", &say, &mut items, &mut HashSet::new());
         assert_eq!(items.len(), 2);
     }
 
     #[test]
-    fn github_pr_preset_collects_pull_request_links_from_answers_and_tool_results() {
-        let mut items = HashMap::new();
-        let say = serde_json::json!({"type":"assistant","timestamp":"2026-11-04T00:00:00Z","message":{"content":[{"type":"text","text":"PR을 올렸습니다: https://github.com/acme/web-app/pull/42 입니다."}]}}).to_string();
-        process_line("github-pr", &say, &mut items);
-        process_line("github-pr", &tool_result_line("2026-11-04T01:00:00Z", "https://github.com/acme/api/pull/7\nhttps://github.com/acme/api/issues/3"), &mut items);
+    fn github_pr_preset_collects_only_prs_the_lead_created() {
+        let call = |id: &str, name: &str, cmd: &str| serde_json::json!({"type":"assistant","timestamp":"2026-11-04T00:00:00Z","message":{"content":[{"type":"tool_use","id":id,"name":name,"input":{"command":cmd}}]}}).to_string();
+        let result = |ts: &str, id: &str, text: &str| serde_json::json!({"type":"user","timestamp":ts,"message":{"content":[{"type":"tool_result","tool_use_id":id,"content":text}]}}).to_string();
+        let (mut items, mut ids) = (HashMap::new(), HashSet::new());
+        // 팀장이 만든 PR: gh pr create 호출의 결과
+        process_line("github-pr", &call("c1", "Bash", "cd repo && gh  pr create --title x --body y"), &mut items, &mut ids);
+        process_line("github-pr", &result("2026-11-04T01:00:00Z", "c1", "Creating pull request...\nhttps://github.com/acme/api/pull/7"), &mut items, &mut ids);
+        // 남의 PR을 조회하거나 읽은 것, 답변에 적힌 주소는 모으지 않는다
+        process_line("github-pr", &call("c2", "Bash", "gh pr list --repo other/repo"), &mut items, &mut ids);
+        process_line("github-pr", &result("2026-11-04T02:00:00Z", "c2", "https://github.com/other/repo/pull/99"), &mut items, &mut ids);
+        let say = serde_json::json!({"type":"assistant","timestamp":"2026-11-04T03:00:00Z","message":{"content":[{"type":"text","text":"참고: https://github.com/acme/web-app/pull/42"}]}}).to_string();
+        process_line("github-pr", &say, &mut items, &mut ids);
+        process_line("github-pr", &result("2026-11-04T04:00:00Z", "unknown", "https://github.com/acme/web-app/pull/43"), &mut items, &mut ids);
+        // GitHub 도구로 만든 PR
+        process_line("github-pr", &call("c3", "mcp__github__create_pull_request", ""), &mut items, &mut ids);
+        process_line("github-pr", &result("2026-11-04T05:00:00Z", "c3", "{\"html_url\":\"https://github.com/acme/web/pull/5\"}"), &mut items, &mut ids);
         let mut titles: Vec<&str> = items.values().map(|i| i.title.as_str()).collect();
         titles.sort();
-        assert_eq!(titles, vec!["acme/api#7", "acme/web-app#42"]);
+        assert_eq!(titles, vec!["acme/api#7", "acme/web#5"]);
     }
 
     #[test]

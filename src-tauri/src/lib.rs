@@ -28,6 +28,7 @@ mod paths;
 mod resume;
 mod session_model;
 mod session_registry;
+mod panel_script;
 mod side_panel;
 mod settings;
 mod stall_watchdog;
@@ -94,6 +95,8 @@ pub fn run() {
       side_panel::save_panel_content_command,
       side_panel::refresh_panel_slot_command,
       side_panel::open_external_url_command,
+      side_panel::test_panel_script_command,
+      side_panel::generate_panel_script_command,
       app_skills::get_app_skills_command,
       app_skills::add_app_skill_command,
       app_skills::update_app_skill_command,

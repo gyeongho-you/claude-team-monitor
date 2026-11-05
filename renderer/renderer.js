@@ -799,7 +799,7 @@ let panelContent = null;
 let panelEditing = false;
 let panelBusy = false;
 let panelLastKey = '';
-const PANEL_MODE_LABELS = { auto: '자동 수집', lead: '팀장이 채움', ai: 'AI가 정리', manual: '직접 쓰기' };
+const PANEL_MODE_LABELS = { auto: '자동 수집', lead: '팀장이 채움', ai: 'AI가 정리', manual: '직접 쓰기', script: '스크립트' };
 
 function panelCollapsed() {
   try {
@@ -829,9 +829,9 @@ function renderPanelChrome() {
 async function refreshPanelContent(force) {
   const slot = activePanelSlot();
   if (!slot || spEl.hidden || panelEditing) return;
-  const leadId = slot.mode === 'auto' && slot.scope === 'selected' ? selectedLeadId : null;
+  const leadId = (slot.mode === 'auto' && slot.scope === 'selected') || slot.mode === 'script' ? selectedLeadId : null;
   let c;
-  try { c = await window.api.getPanelContent(slot.id, leadId); } catch (err) { spMetaEl.textContent = `불러오지 못했습니다: ${errMsg(err)}`; return; }
+  try { c = await window.api.getPanelContent(slot.id, leadId, force === true && slot.mode === 'script'); } catch (err) { spMetaEl.textContent = `불러오지 못했습니다: ${errMsg(err)}`; return; }
   const auto = slot.mode === 'auto' && Array.isArray(c.items);
   const key = `${slot.id}|${leadId || ''}|${c.updatedAt || ''}|${c.markdown.length}|${c.markdown.slice(0, 64)}|${auto ? `${panelFilter.lead}|${panelFilter.range}|${panelFilter.current ? selectedLeadId : ''}` : ''}`;
   panelContent = c;
@@ -991,8 +991,8 @@ setInterval(() => {
   if (selectedLeadId === panelSeenLeadId) return;
   panelSeenLeadId = selectedLeadId;
   const slot = activePanelSlot();
-  if (spEl.hidden || !slot || slot.mode !== 'auto') return;
-  if (slot.scope === 'selected') { panelLastKey = ''; refreshPanelContent(true); } // 서버가 팀장별로 모아 주는 슬롯은 다시 불러온다
+  if (spEl.hidden || !slot || (slot.mode !== 'auto' && slot.mode !== 'script')) return;
+  if (slot.mode === 'script' || slot.scope === 'selected') { panelLastKey = ''; refreshPanelContent(true); } // 서버가 팀장별로 모아 주는 슬롯은 다시 불러온다
   else if (panelFilter.current && panelContent) { panelLastKey = ''; renderPanelBody(slot, panelContent); } // 이미 가진 목록을 다시 거르기만 하면 된다
 }, 100);
 
@@ -1012,7 +1012,12 @@ const psCostHint = document.getElementById('ps-cost-hint');
 const psSaveBtn = document.getElementById('ps-save-btn');
 const psCancelBtn = document.getElementById('ps-cancel-btn');
 const psStatus = document.getElementById('ps-status');
+const psInterp = document.getElementById('ps-interp');
+const psTimeout = document.getElementById('ps-timeout');
+const psScript = document.getElementById('ps-script');
+const psTestOut = document.getElementById('ps-test-out');
 let psEditingId = null;
+const PS_DEFAULT_TIMEOUT_MS = 10000;
 const PS_MODEL_NAMES = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus', fable: 'Fable' };
 
 function updatePsFormVisibility() {
@@ -1033,7 +1038,7 @@ psAutoUpdate.addEventListener('change', updatePsFormVisibility);
 function renderPanelSettings() {
   panelEnabledEl.checked = !!panelConfig.enabled;
   panelSlotListEl.innerHTML = (panelConfig.slots || []).map(s => {
-    const extra = s.mode === 'ai' ? ` · ${PS_MODEL_NAMES[s.aiModel] || s.aiModel}${s.aiInclude === 'artifact-reports' ? ' · 보고서 목록 포함' : s.aiInclude === 'github-pr' ? ' · PR 목록 포함' : ''}${s.autoUpdate ? ' · 자동' : ''}` : s.mode === 'auto' ? ` · ${s.preset === 'github-pr' ? 'GitHub PR' : 'Artifact 보고서'}${s.scope === 'selected' ? ' · 선택한 팀장' : ''}` : '';
+    const extra = s.mode === 'ai' ? ` · ${PS_MODEL_NAMES[s.aiModel] || s.aiModel}${s.aiInclude === 'artifact-reports' ? ' · 보고서 목록 포함' : s.aiInclude === 'github-pr' ? ' · PR 목록 포함' : ''}${s.autoUpdate ? ' · 자동' : ''}` : s.mode === 'script' ? ` · ${{ node: 'Node.js', python: 'Python', shell: '셸' }[s.interpreter] || s.interpreter} · 제한 ${s.timeoutMs}ms` : s.mode === 'auto' ? ` · ${s.preset === 'github-pr' ? 'GitHub PR' : 'Artifact 보고서'}${s.scope === 'selected' ? ' · 선택한 팀장' : ''}` : '';
     return `<div class="skill-item ${s.enabled ? '' : 'off'}">
       <label><input type="checkbox" data-ps-toggle="${escapeHtml(s.id)}" ${s.enabled ? 'checked' : ''} /> ${escapeHtml(s.name)}</label>
       <span class="skill-desc">${escapeHtml(PANEL_MODE_LABELS[s.mode] || s.mode)}${escapeHtml(extra)}</span>
@@ -1048,6 +1053,7 @@ function resetPsForm() {
   psEditingId = null;
   psName.value = ''; psMode.value = 'auto'; psPreset.value = 'artifact-reports'; psScope.value = 'all';
   psLeadInstruction.value = ''; psAiInstruction.value = ''; psModel.value = 'sonnet'; psInclude.value = 'none'; psAutoUpdate.checked = false;
+  psInterp.value = 'node'; psTimeout.value = PS_DEFAULT_TIMEOUT_MS; psScript.value = ''; psTestOut.hidden = true; psTestOut.textContent = '';
   psSaveBtn.textContent = '슬롯 추가'; psCancelBtn.hidden = true;
   updatePsFormVisibility();
 }
@@ -1058,6 +1064,7 @@ function psInputFromForm(enabled) {
     id: psEditingId, name: psName.value, mode, scope: psScope.value, preset: psPreset.value,
     instruction: mode === 'lead' ? psLeadInstruction.value : mode === 'ai' ? psAiInstruction.value : '',
     autoUpdate: mode === 'ai' && psAutoUpdate.checked, aiModel: psModel.value, aiInclude: mode === 'ai' ? psInclude.value : 'none', enabled,
+    interpreter: psInterp.value, script: mode === 'script' ? psScript.value : '', timeoutMs: Number(psTimeout.value) || PS_DEFAULT_TIMEOUT_MS,
   };
 }
 
@@ -1084,6 +1091,7 @@ panelSlotListEl.addEventListener('click', async e => {
     psEditingId = s.id; psName.value = s.name; psMode.value = s.mode; psPreset.value = s.preset; psScope.value = s.scope;
     psLeadInstruction.value = s.mode === 'lead' ? s.instruction : ''; psAiInstruction.value = s.mode === 'ai' ? s.instruction : '';
     psModel.value = s.aiModel; psInclude.value = s.aiInclude || 'none'; psAutoUpdate.checked = !!s.autoUpdate;
+    psInterp.value = s.interpreter || 'node'; psTimeout.value = s.timeoutMs || PS_DEFAULT_TIMEOUT_MS; psScript.value = s.mode === 'script' ? s.script : ''; psTestOut.hidden = true;
     psSaveBtn.textContent = '수정 저장'; psCancelBtn.hidden = false; updatePsFormVisibility();
     psStatus.textContent = `"${s.name}" 수정 중`;
     return;
@@ -1105,9 +1113,53 @@ panelSlotListEl.addEventListener('change', async e => {
   const s = (panelConfig.slots || []).find(x => x.id === t.dataset.psToggle);
   if (!s) return;
   try {
-    panelConfig = await window.api.savePanelSlot({ id: s.id, name: s.name, mode: s.mode, scope: s.scope, preset: s.preset, instruction: s.instruction, autoUpdate: s.autoUpdate, aiModel: s.aiModel, aiInclude: s.aiInclude || 'none', enabled: t.checked });
+    panelConfig = await window.api.savePanelSlot({ id: s.id, name: s.name, mode: s.mode, scope: s.scope, preset: s.preset, instruction: s.instruction, autoUpdate: s.autoUpdate, aiModel: s.aiModel, aiInclude: s.aiInclude || 'none', interpreter: s.interpreter || 'node', script: s.script || '', timeoutMs: s.timeoutMs || PS_DEFAULT_TIMEOUT_MS, enabled: t.checked });
     renderPanelChrome(); renderPanelSettings(); panelLastKey = ''; refreshPanelContent(true);
   } catch (err) { psStatus.textContent = errMsg(err); t.checked = !t.checked; }
+});
+const PS_EXAMPLE_NODE = `// 선택한 팀장의 git 브랜치·워크트리·변경 파일 수를 보여 줍니다(읽기만 하는 명령).
+const { execFileSync } = require('child_process');
+const dir = process.env.CTM_LEAD_DIR;
+if (!dir) { console.log('작업 탭에서 팀장을 선택하세요.'); process.exit(0); }
+const git = (...args) => { try { return execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
+const inside = git('rev-parse', '--is-inside-work-tree');
+console.log('## ' + (process.env.CTM_LEAD_LABEL || '팀장'));
+if (inside !== 'true') { console.log('\\n이 폴더는 git 저장소가 아닙니다: ' + dir); process.exit(0); }
+const branch = git('branch', '--show-current') || '(분리된 HEAD)';
+const changed = (git('status', '--short') || '').split('\\n').filter(Boolean).length;
+console.log('\\n- 브랜치: **' + branch + '**');
+console.log('- 변경된 파일: ' + changed + '개');
+const last = git('log', '-1', '--format=%h %s (%cr)');
+if (last) console.log('- 마지막 커밋: ' + last);
+const wts = (git('worktree', 'list') || '').split('\\n').filter(Boolean);
+console.log('\\n### 워크트리 ' + wts.length + '개\\n');
+console.log('| 경로 | 커밋 | 브랜치 |\\n|---|---|---|');
+for (const l of wts) { const m = l.match(/^(.+?)\\s+([0-9a-f]+)\\s+(.*)$/); console.log(m ? '| ' + m[1] + ' | ' + m[2] + ' | ' + m[3] + ' |' : '| ' + l + ' | | |'); }
+`;
+document.getElementById('ps-example-btn').addEventListener('click', () => {
+  if (psScript.value.trim() && !confirm('입력해 둔 스크립트를 예제로 바꿉니다. 계속할까요?')) return;
+  psInterp.value = 'node'; psScript.value = PS_EXAMPLE_NODE; psTestOut.hidden = true;
+  if (!psName.value.trim()) psName.value = '브랜치·워크트리';
+});
+document.getElementById('ps-test-btn').addEventListener('click', async e => {
+  const btn = e.currentTarget;
+  btn.disabled = true; psTestOut.hidden = false; psTestOut.textContent = '실행하는 중...';
+  try { psTestOut.textContent = await window.api.testPanelScript(psInterp.value, psScript.value, Number(psTimeout.value) || PS_DEFAULT_TIMEOUT_MS, selectedLeadId); }
+  catch (err) { psTestOut.textContent = errMsg(err); }
+  finally { btn.disabled = false; }
+});
+document.getElementById('ps-gen-btn').addEventListener('click', async e => {
+  const btn = e.currentTarget;
+  const request = document.getElementById('ps-gen-request').value.trim();
+  if (!request) { psStatus.textContent = '만들고 싶은 내용을 먼저 적어 주세요.'; return; }
+  if (psScript.value.trim() && !confirm('입력해 둔 스크립트가 AI가 만든 것으로 바뀝니다. 계속할까요?')) return;
+  btn.disabled = true; psStatus.textContent = 'AI가 스크립트를 만드는 중입니다(최대 2분)...';
+  try {
+    psScript.value = await window.api.generatePanelScript(request, psInterp.value, document.getElementById('ps-gen-model').value);
+    psStatus.textContent = '만들었습니다. 코드를 읽어 보고, 시험 실행으로 확인한 뒤 저장하세요(아직 저장되지 않았습니다).';
+    if (!psName.value.trim()) psName.value = request.slice(0, 30);
+  } catch (err) { psStatus.textContent = errMsg(err); }
+  finally { btn.disabled = false; }
 });
 document.querySelector('.tab-btn[data-tab="app-settings"]').addEventListener('click', loadPanelConfig);
 resetPsForm();
