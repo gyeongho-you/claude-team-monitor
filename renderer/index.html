@@ -370,11 +370,17 @@
                 <option value="python">Python (python)</option>
                 <option value="shell">셸 (Windows: PowerShell, 그 외: sh)</option>
               </select>
+              <select id="ps-format" title="스크립트가 내는 출력의 형식">
+                <option value="markdown">출력: 마크다운 (글·표·링크·이미지)</option>
+                <option value="html">출력: HTML (그래픽 — SVG·CSS 차트, 색·배치)</option>
+              </select>
               <label class="ps-timeout" title="이 시간(ms)을 넘으면 스크립트를 중단합니다. 1000ms = 1초">제한 시간 <input type="number" id="ps-timeout" min="500" max="600000" step="500" value="10000" /> ms</label>
             </div>
             <textarea id="ps-script" class="ps-code" spellcheck="false" placeholder="스크립트 — 표준 출력(마크다운)이 패널에 표시됩니다. 직접 쓰거나, 붙여넣거나, 아래에서 AI에게 만들게 하세요."></textarea>
+            <p class="form-hint">HTML 출력은 <strong>JavaScript 실행·외부 파일 불러오기가 막힌 격리 프레임</strong>에 그려집니다. 그래프는 SVG·CSS로 직접 그리고, 앱 색 변수(<code>var(--text)</code>, <code>var(--accent)</code> 등)를 쓰면 다크/라이트에 자동으로 맞습니다. 마크다운 출력에서도 <code>data:</code> 이미지는 보입니다. 자세한 건 위 📖 안내를 보세요.</p>
             <div class="ps-row">
-              <button type="button" id="ps-example-btn">예제: 브랜치·워크트리 보기</button>
+              <button type="button" id="ps-example-btn">예제: 브랜치·워크트리(마크다운)</button>
+              <button type="button" id="ps-example-html-btn">예제: 브랜치 그래픽(HTML)</button>
               <button type="button" id="ps-test-btn" title="저장하지 않고 지금 한 번 실행해 봅니다(선택한 팀장 기준). 오류와 표준 오류 출력도 그대로 보여 줍니다">▶ 시험 실행</button>
               <button type="button" id="ps-fix-btn" title="시험 실행 결과(오류 포함)를 AI에게 보여 주고 스크립트를 고치게 합니다 — 추가 토큰이 듭니다">🛠 AI로 고치기</button>
             </div>
@@ -389,6 +395,7 @@
               <button type="button" id="ps-gen-btn">AI로 만들기</button>
             </div>
             <p class="form-hint">"AI로 만들기"와 "AI로 고치기"는 모델을 한 번 호출하므로 <strong>추가 토큰이 듭니다</strong>(스크립트를 만들거나 고칠 때만, 이후 실행은 무료). 결과는 위 칸에 채워지기만 하고 저장되지 않으니 코드를 읽어 보고 저장하세요. "고치기"는 시험 실행 결과(오류)를 보고 고치며, 위 입력칸에 적은 말은 추가 요청으로 같이 전달됩니다.</p>
+            <div id="ps-test-preview" class="ps-test-preview sp-body md" hidden></div>
             <pre id="ps-test-out" class="ps-test-out" hidden></pre>
             <details id="ps-errors" class="ps-ref">
               <summary id="ps-errors-summary">🕘 최근 에러 보기</summary>

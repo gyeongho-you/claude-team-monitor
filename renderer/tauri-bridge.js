@@ -149,9 +149,9 @@
   async function savePanelSlot(input) { return invoke('save_panel_slot_command', { input }); }
   async function deletePanelSlot(id) { return invoke('delete_panel_slot_command', { id }); }
   async function getPanelContent(slotId, leadId, force) { return invoke('get_panel_content_command', { slotId, leadId: leadId || null, force: !!force }); }
-  async function testPanelScript(interpreter, script, timeoutMs, leadId) { return invoke('test_panel_script_command', { interpreter, script, timeoutMs, leadId: leadId || null }); }
-  async function generatePanelScript(request, interpreter, model) { return invoke('generate_panel_script_command', { request, interpreter, model }); }
-  async function fixPanelScript(script, problem, note, interpreter, model) { return invoke('fix_panel_script_command', { script, problem, note, interpreter, model }); }
+  async function testPanelScript(interpreter, script, timeoutMs, leadId, outputFormat) { return invoke('test_panel_script_command', { interpreter, script, timeoutMs, leadId: leadId || null, outputFormat: outputFormat || 'markdown' }); }
+  async function generatePanelScript(request, interpreter, model, outputFormat) { return invoke('generate_panel_script_command', { request, interpreter, model, outputFormat: outputFormat || 'markdown' }); }
+  async function fixPanelScript(script, problem, note, interpreter, model, outputFormat) { return invoke('fix_panel_script_command', { script, problem, note, interpreter, model, outputFormat: outputFormat || 'markdown' }); }
   async function getPanelScriptErrors() { return invoke('get_panel_script_errors_command'); }
   async function clearPanelScriptErrors() { return invoke('clear_panel_script_errors_command'); }
   async function getPanelScriptReference() { return invoke('get_panel_script_reference_command'); }

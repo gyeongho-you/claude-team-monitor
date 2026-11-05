@@ -1,11 +1,12 @@
-// 오른쪽 패널의 "스크립트" 슬롯 실행기 — 사용자가 쓰거나(또는 AI가 써 준) 작은 스크립트를 이 PC에서 돌리고, 표준 출력(마크다운)을 패널에 보여 준다.
+// 오른쪽 패널의 "스크립트" 슬롯 실행기 — 사용자가 쓰거나(또는 AI가 써 준) 작은 스크립트를 이 PC에서 돌리고, 표준 출력을 패널에 보여 준다.
+// 출력 형식은 슬롯마다 고른다: "markdown"(글·표·링크·data: 이미지) 또는 "html"(SVG·CSS 그래픽 — 화면 쪽에서 스크립트 실행이 막힌 격리 프레임에 그린다).
 //
 // 안전에 대한 판단: 이 앱은 서버와 연결돼 있지 않고 스크립트는 사용자 본인의 PC 권한으로 본인이 저장한 것만 돌기 때문에 샌드박스는 두지 않았다
 // (잘못되거나 나쁜 스크립트의 피해는 그 사용자에게만 간다). 대신 앱이 같이 멈추지 않게 (1) 슬롯마다 정한 제한 시간(ms), (2) 출력 길이 제한을 둔다.
 // 알려진 한계: 제한 시간이 지나면 스크립트 프로세스만 종료한다 — 스크립트가 띄운 자식 프로세스(git 등)는 그대로 끝날 때까지 남을 수 있다.
 //
 // 스크립트는 슬롯 id로 정한 파일(~/.claude/claude-team-monitor/panel/scripts/<id>.<확장자>)에 써서 실행한다(명령줄 인용·길이 문제를 피한다).
-// 팀장 정보는 환경 변수로 넘긴다: CTM_LEAD_ID, CTM_LEAD_LABEL, CTM_LEAD_DIR, CTM_SESSION_ID, CTM_SESSION_FILE (선택한 팀장이 없으면 비어 있다).
+// 팀장 정보 등은 환경 변수로 넘긴다(아래 ENV_VAR_DOCS 표가 유일한 기준).
 
 use crate::session_registry::LeadRecord;
 use std::io::Read;
@@ -15,11 +16,13 @@ use std::time::Duration;
 use wait_timeout::ChildExt;
 
 pub(crate) const INTERPRETERS: [&str; 3] = ["node", "python", "shell"];
+pub(crate) const OUTPUT_FORMATS: [&str; 2] = ["markdown", "html"];
 pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 pub(crate) const MIN_TIMEOUT_MS: u64 = 500;
 pub(crate) const MAX_TIMEOUT_MS: u64 = 600_000;
 pub(crate) const MAX_SCRIPT_CHARS: usize = 20_000;
-const MAX_OUTPUT_CHARS: usize = 16_000;
+/// 출력 길이 제한(글자 수). 그래픽은 data: 이미지(base64)나 SVG가 길어지므로 넉넉하게 둔다.
+pub(crate) const MAX_OUTPUT_CHARS: usize = 200_000;
 
 // ---------------------------------------------------------------------------------------------
 // 스크립트에 앱이 주는 정보 — 이 표가 유일한 기준이다: 실제로 넘기는 환경 변수(script_env), 설정 화면의 안내, AI에게 주는 요청문이 모두 여기서 나온다.
@@ -34,7 +37,8 @@ pub(crate) struct EnvVarDoc {
     pub when_empty: &'static str,
 }
 
-pub(crate) const ENV_VAR_DOCS: [EnvVarDoc; 9] = [
+pub(crate) const ENV_VAR_DOCS: [EnvVarDoc; 10] = [
+    EnvVarDoc { name: "CTM_OUTPUT_FORMAT", what: "이 슬롯이 기대하는 출력 형식: `markdown` 또는 `html`. 아래 '출력 형식'을 보고 그 형식으로 낸다", when_empty: "항상 채워진다" },
     EnvVarDoc { name: "CTM_LEAD_ID", what: "선택한 팀장의 앱 내부 id (예: `ed09bf70`)", when_empty: "팀장을 고르지 않았을 때" },
     EnvVarDoc { name: "CTM_LEAD_LABEL", what: "사용자가 팀장에게 붙인 이름 (예: `g1cl-front-leader`)", when_empty: "팀장을 고르지 않았거나 이름을 안 붙였을 때" },
     EnvVarDoc { name: "CTM_LEAD_TITLE", what: "claude가 세션에 자동으로 붙인 주제 (예: `team lead launch setup`)", when_empty: "팀장을 고르지 않았거나 아직 주제가 없을 때" },
@@ -47,7 +51,7 @@ pub(crate) const ENV_VAR_DOCS: [EnvVarDoc; 9] = [
 ];
 
 /// 스크립트에 넘길 환경 변수 전부(팀장이 없으면 팀장 관련 값은 빈 문자열). 이름은 ENV_VAR_DOCS와 같아야 한다.
-pub(crate) fn script_env(lead: Option<&LeadRecord>) -> Vec<(&'static str, String)> {
+pub(crate) fn script_env(lead: Option<&LeadRecord>, output_format: &str) -> Vec<(&'static str, String)> {
     let (id, label, title, dir, session_id, session_file) = match lead {
         Some(l) => (
             l.id.clone(),
@@ -60,6 +64,7 @@ pub(crate) fn script_env(lead: Option<&LeadRecord>) -> Vec<(&'static str, String
         None => Default::default(),
     };
     vec![
+        ("CTM_OUTPUT_FORMAT", output_format.to_string()),
         ("CTM_LEAD_ID", id),
         ("CTM_LEAD_LABEL", label),
         ("CTM_LEAD_TITLE", title),
@@ -83,19 +88,29 @@ pub(crate) fn reference_markdown() -> String {
         - 스크립트는 **실행할 때마다 새 프로세스**로 돈다(이전 실행의 변수·상태가 남지 않는다). 패널을 보는 동안 몇 초마다, 새로고침 버튼을 누를 때, 팀장을 바꿀 때 실행된다.\n\
         - 실행 환경: Node.js(`node`), Python(`python`; macOS·Linux는 `python3`), 셸(Windows는 PowerShell, 그 외는 `sh`). 외부 패키지 설치는 전제하지 않는다 — 내장 모듈만 쓴다.\n\
         - 표준 입력은 비어 있다(대화형 입력 불가). 이 앱을 띄운 사용자 계정의 환경변수·PATH를 그대로 물려받으므로 `git`, `gh` 같은 명령도 그 사용자 PC에 설치돼 있으면 쓸 수 있다.\n\
-        - 종료 코드가 0이 아니면 실패로 보고, 표준 오류의 앞부분이 패널에 오류로 표시된다. 정상일 때 표준 오류는 표시되지 않는다.\n\
-        - 슬롯마다 정한 제한 시간(ms)을 넘으면 중단된다(기본 10000ms). 출력은 16000자까지만 보인다.\n\n\
-        ## 출력 형식\n\n\
-        - **표준 출력에 낸 마크다운**이 그대로 패널에 표시된다.\n\
+        - 종료 코드가 0이 아니면 실패로 보고, 표준 오류의 앞부분이 패널에 오류로 표시된다. 정상일 때 표준 오류는 패널에 표시되지 않지만 '최근 에러'에 기록된다.\n\
+        - 슬롯마다 정한 제한 시간(ms)을 넘으면 중단된다(기본 10000ms). 출력은 {max}자까지만 보인다.\n\n\
+        ## 출력 형식 — 슬롯마다 둘 중 하나(`CTM_OUTPUT_FORMAT`)\n\n\
+        **표준 출력**에 낸 내용이 패널에 그대로 표시된다. 그 슬롯의 형식에 맞춰 낸다.\n\n\
+        ### `markdown` (글 중심)\n\n\
         - 지원: 제목(`#`은 한 단계 낮춰 보임), **굵게**, *기울임*, `인라인 코드`, 코드 블록, 목록(`-`, `1.`), 표, 인용(`>`), 구분선(`---`), 링크 `[글](https://주소)`와 맨 주소(**http/https만** 링크가 되며 누르면 기본 브라우저로 열린다).\n\
-        - 지원하지 않음: HTML, 이미지, 색·글꼴 지정, 버튼·입력 같은 상호작용, 자동 새로고침 간격 지정.\n\n\
+        - 이미지: `![설명](data:image/png;base64,....)` 처럼 **`data:` 주소(png, jpeg, gif, webp, svg+xml)만** 보인다. 파일 경로나 http 주소 이미지는 보이지 않는다(스크립트가 파일을 읽어 base64로 바꿔 넣어야 한다).\n\
+        - 지원하지 않음: HTML, 색·글꼴 지정, 버튼·입력 같은 상호작용.\n\n\
+        ### `html` (그래픽 중심 — 차트·카드·색 배치)\n\n\
+        - **HTML 조각**을 낸다(`<html>`·`<head>`·`<body>` 태그 없이, 본문에 들어갈 요소만). 패널 안의 격리된 프레임에 그려진다.\n\
+        - 되는 것: 모든 HTML 요소와 `<style>`·인라인 `style`(flex·grid·그라디언트·border-radius 등 CSS), **인라인 `<svg>`**(막대·선·원 그래프, 다이어그램), 표, `data:` 이미지, 링크 `<a href=\"https://...\">`(누르면 기본 브라우저로 열린다).\n\
+        - 안 되는 것: **JavaScript 전부**(`<script>`, `onclick` 같은 이벤트 속성, `javascript:` 주소 — 실행되지 않는다), 외부 파일 불러오기(http 이미지·CSS·글꼴·`<iframe>`·폼 전송), 마우스에 반응하는 동작(CSS `:hover` 정도만 가능). 그래서 차트 라이브러리는 못 쓰고 SVG·CSS로 직접 그린다.\n\
+        - 앱 테마(다크/라이트)에 맞는 색 변수를 쓴다: `var(--text)`, `var(--text-soft)`, `var(--text-bright)`, `var(--bg)`, `var(--surface)`, `var(--surface-2)`, `var(--border)`, `var(--border-2)`, `var(--accent)`. 고정 색(`#fff`, `black`)은 다크/라이트 한쪽에서 안 보일 수 있으니 피하고, 의미 색(성공 `#3fb950`, 경고 `#d29922`, 오류 `#f85149`)만 직접 쓴다.\n\
+        - 패널 너비는 약 300~600px로 좁다. 고정 `px` 너비 대신 `width:100%`·`max-width:100%`·flex-wrap을 쓰고, SVG는 `viewBox`를 주고 `width=\"100%\"`로 둔다. 높이는 내용에 맞춰 자동으로 늘어난다. 기본 글자 크기는 12px.\n\n\
         ## 앱이 주지 않는 것\n\n\
         - 팀장의 실시간 상태(작업 중/대기), 팀원 목록, 토큰·비용 사용량, 다른 패널 슬롯의 내용은 환경 변수로 주지 않는다. 필요하면 `CTM_SESSION_FILE`(대화 기록)이나 `CTM_LEADS_FILE`을 직접 읽어서 계산하거나, 이 PC의 명령(`git`, `gh` 등)을 실행해서 알아낸다.\n\
         - 앱이나 팀장 세션을 조작하는 기능(메시지 보내기, 종료 등)은 없다. 스크립트는 **보여 주기 전용**이다.\n\n\
         ## 쓸 때 권장\n\n\
         - 읽기만 하는 명령을 쓴다(상태를 바꾸는 `git commit`·`checkout`, 파일 삭제·수정은 하지 않는다).\n\
         - 팀장을 고르지 않아 `CTM_LEAD_DIR`이 비어 있는 경우를 먼저 처리해 안내 문구를 출력하고 끝낸다.\n\
-        - 외부 명령은 실패할 수 있으니 예외로 죽지 말고 읽을 수 있는 문구를 출력한다.\n"
+        - 외부 명령은 실패할 수 있으니 예외로 죽지 말고 읽을 수 있는 문구를 출력한다.\n\
+        - `html`에서 사용자 데이터(폴더 이름, 커밋 메시지 등)를 넣을 때는 `&`, `<`, `>`를 이스케이프한다(그대로 넣으면 모양이 깨진다).\n",
+        max = MAX_OUTPUT_CHARS
     )
 }
 
@@ -144,27 +159,21 @@ pub(crate) struct ScriptProblem {
 }
 
 pub(crate) struct Outcome {
-    pub markdown: String,
+    /// 패널에 보일 내용. 문제가 있어서 못 돌았거나 실패했으면 읽을 수 있는 **마크다운** 오류 문구, 정상이면 스크립트가 낸 출력 그대로.
+    pub output: String,
+    /// output이 스크립트의 정상 출력이면 슬롯의 출력 형식("markdown"|"html"), 오류 문구면 항상 "markdown".
+    pub format: &'static str,
+    /// 정상 종료 때의 표준 오류 출력(앞 1500자). 패널에서는 숨기고 시험 실행에서만 보여 준다.
+    pub stderr: String,
     pub problem: Option<ScriptProblem>,
 }
 
 fn fail(markdown: String, kind: &'static str, detail: String) -> Outcome {
-    Outcome { markdown, problem: Some(ScriptProblem { kind, detail }) }
+    Outcome { output: markdown, format: "markdown", stderr: String::new(), problem: Some(ScriptProblem { kind, detail }) }
 }
 
-/// 스크립트를 한 번 실행해서 패널에 보일 마크다운을 돌려준다(실패·시간 초과도 읽을 수 있는 마크다운으로 돌려준다).
-#[cfg(test)]
-pub(crate) fn run_script(scripts_dir: &Path, file_stem: &str, interpreter: &str, script: &str, timeout_ms: u64, lead: Option<&LeadRecord>) -> String {
-    run_script_outcome(scripts_dir, file_stem, interpreter, script, timeout_ms, lead, false).markdown
-}
-
-/// show_stderr: 정상 종료(종료 코드 0)여도 표준 오류 출력을 결과 끝에 붙인다 — 설정 화면의 시험 실행용(패널에서는 오류가 아니면 숨긴다).
-#[cfg(test)]
-pub(crate) fn run_script_with(scripts_dir: &Path, file_stem: &str, interpreter: &str, script: &str, timeout_ms: u64, lead: Option<&LeadRecord>, show_stderr: bool) -> String {
-    run_script_outcome(scripts_dir, file_stem, interpreter, script, timeout_ms, lead, show_stderr).markdown
-}
-
-pub(crate) fn run_script_outcome(scripts_dir: &Path, file_stem: &str, interpreter: &str, script: &str, timeout_ms: u64, lead: Option<&LeadRecord>, show_stderr: bool) -> Outcome {
+pub(crate) fn run_script_outcome(scripts_dir: &Path, file_stem: &str, interpreter: &str, script: &str, timeout_ms: u64, lead: Option<&LeadRecord>, output_format: &str) -> Outcome {
+    let format: &'static str = if output_format == "html" { "html" } else { "markdown" };
     let Some((program, ext, pre_args)) = interpreter_spec(interpreter) else { return fail("**알 수 없는 실행 환경입니다.**".to_string(), "spawn", format!("알 수 없는 실행 환경: {interpreter}")) };
     if let Err(e) = std::fs::create_dir_all(scripts_dir) {
         return fail(format!("**스크립트 폴더를 만들지 못했습니다:** {e}"), "spawn", format!("스크립트 폴더를 만들지 못했습니다: {e}"));
@@ -179,7 +188,7 @@ pub(crate) fn run_script_outcome(scripts_dir: &Path, file_stem: &str, interprete
     cmd.env("PYTHONIOENCODING", "utf-8").env("PYTHONUTF8", "1");
     let work_dir = lead.map(|l| PathBuf::from(&l.target_dir)).filter(|p| p.is_dir()).unwrap_or_else(std::env::temp_dir);
     cmd.current_dir(&work_dir);
-    for (name, value) in script_env(lead) {
+    for (name, value) in script_env(lead, format) {
         cmd.env(name, value);
     }
     #[cfg(windows)]
@@ -220,21 +229,27 @@ pub(crate) fn run_script_outcome(scripts_dir: &Path, file_stem: &str, interprete
         let (e, _) = truncate_chars(err.trim(), 1500);
         let shown = if e.is_empty() { "(오류 출력 없음)".to_string() } else { e };
         let code = status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".to_string());
-        let md = format!("**스크립트가 실패했습니다**(종료 코드 {code})\n\n```\n{shown}\n```{}", if out.trim().is_empty() { String::new() } else { format!("\n\n{}", out.trim()) });
+        let md = format!("**스크립트가 실패했습니다**(종료 코드 {code})\n\n```\n{shown}\n```");
         return fail(md, "exit", format!("종료 코드 {code}\n{shown}"));
     }
     let (text, cut) = truncate_chars(out.trim(), MAX_OUTPUT_CHARS);
     let (err_text, _) = truncate_chars(err.trim(), 1500);
-    let stderr_note = if show_stderr && !err_text.is_empty() { format!("\n\n---\n[표준 오류 출력 — 시험 실행에서만 보입니다]\n{err_text}") } else { String::new() };
-    let md = if text.is_empty() {
-        format!("(스크립트가 아무것도 출력하지 않았습니다 — 마크다운을 표준 출력으로 내보내야 패널에 보입니다){stderr_note}")
+    let hint = format!("출력이 길어서 {MAX_OUTPUT_CHARS}자까지만 보여 줍니다");
+    let output = if text.is_empty() {
+        // 빈 출력 안내는 형식과 상관없이 읽을 수 있게 마크다운으로 둔다
+        return Outcome {
+            output: "(스크립트가 아무것도 출력하지 않았습니다 — 표준 출력으로 내보내야 패널에 보입니다)".to_string(),
+            format: "markdown",
+            stderr: err_text.clone(),
+            problem: if err_text.is_empty() { None } else { Some(ScriptProblem { kind: "stderr", detail: err_text }) },
+        };
     } else if cut {
-        format!("{text}\n\n…(출력이 길어서 {MAX_OUTPUT_CHARS}자까지만 보여 줍니다){stderr_note}")
+        if format == "html" { format!("{text}<p>…({hint})</p>") } else { format!("{text}\n\n…({hint})") }
     } else {
-        format!("{text}{stderr_note}")
+        text
     };
     // 정상 종료했어도 오류 출력이 있었으면 "최근 에러"에 남긴다(패널에서는 숨기므로 나중에 다시 볼 수 있어야 한다).
-    Outcome { markdown: md, problem: if err_text.is_empty() { None } else { Some(ScriptProblem { kind: "stderr", detail: err_text }) } }
+    Outcome { output, format, stderr: err_text.clone(), problem: if err_text.is_empty() { None } else { Some(ScriptProblem { kind: "stderr", detail: err_text }) } }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -293,9 +308,8 @@ pub(crate) fn lead_by_id(leads: &[LeadRecord], id: Option<&str>) -> Option<LeadR
     id.filter(|s| !s.is_empty()).and_then(|id| find_lead(leads, id)).cloned()
 }
 
-/// AI에게 스크립트를 쓰게 할 때 줄 요청문.
-pub(crate) fn build_generate_prompt(request: &str, interpreter: &str) -> String {
-    let lang = match interpreter {
+fn lang_label(interpreter: &str) -> &'static str {
+    match interpreter {
         "node" => "Node.js(CommonJS, 외부 패키지 없이 내장 모듈만)",
         "python" => "Python 3(표준 라이브러리만)",
         _ => {
@@ -305,22 +319,36 @@ pub(crate) fn build_generate_prompt(request: &str, interpreter: &str) -> String 
                 "POSIX sh"
             }
         }
-    };
+    }
+}
+
+fn format_rule(output_format: &str) -> &'static str {
+    if output_format == "html" {
+        "- 출력 형식은 **html**이다(CTM_OUTPUT_FORMAT=html). 표준 출력에 HTML 조각만 낸다(<html>·<head>·<body>·<script> 없이). 그래프는 인라인 SVG나 CSS로 직접 그리고, 색은 앱 안내의 CSS 변수(var(--text), var(--accent) 등)를 쓴다. JavaScript·외부 파일은 동작하지 않는다.\n"
+    } else {
+        "- 출력 형식은 **markdown**이다(CTM_OUTPUT_FORMAT=markdown). 결과는 마크다운으로 표준 출력에 낸다(제목은 ## 부터, 목록·표·굵게·`코드`·[글](https://주소) 링크 사용 가능. HTML은 표시되지 않는다).\n"
+    }
+}
+
+/// AI에게 스크립트를 쓰게 할 때 줄 요청문.
+pub(crate) fn build_generate_prompt(request: &str, interpreter: &str, output_format: &str) -> String {
+    let lang = lang_label(interpreter);
     format!(
         "너는 데스크톱 앱의 '오른쪽 패널' 슬롯에서 주기적으로 실행될 작은 스크립트를 쓴다. 아래 요구를 만족하는 {lang} 스크립트 하나만 써라.\n\
         규칙:\n\
-        - 결과는 마크다운으로 표준 출력에 낸다(제목은 ## 부터, 목록·표·굵게·`코드`·[글](https://주소) 링크 사용 가능. HTML·이미지는 표시되지 않는다).\n\
+        {rule}\
         - 아래 '앱 안내'에 적힌 것만 앱이 주는 정보다. 거기 없는 환경 변수·기능을 지어내서 쓰지 마라.\n\
         - 설명 없이 코드 블록(```) 하나만 답한다.\n\n\
         ===== 앱 안내 =====\n{reference}\n===== 앱 안내 끝 =====\n\n\
         요구: {request}",
+        rule = format_rule(output_format),
         reference = reference_markdown()
     )
 }
 
 /// 시험 실행에서 나온 문제(오류·이상한 출력)를 보고 스크립트를 고치게 할 때 줄 요청문.
-pub(crate) fn build_fix_prompt(script: &str, problem: &str, note: &str, interpreter: &str) -> String {
-    let base = build_generate_prompt("(아래 스크립트를 고치는 일이다 — 새로 쓰지 말고 문제만 고쳐라)", interpreter);
+pub(crate) fn build_fix_prompt(script: &str, problem: &str, note: &str, interpreter: &str, output_format: &str) -> String {
+    let base = build_generate_prompt("(아래 스크립트를 고치는 일이다 — 새로 쓰지 말고 문제만 고쳐라)", interpreter, output_format);
     let note_line = if note.trim().is_empty() { String::new() } else { format!("\n사용자가 덧붙인 말: {}\n", note.trim()) };
     format!(
         "{base}\n\n===== 지금 스크립트 =====\n{script}\n===== 지금 스크립트 끝 =====\n\n===== 시험 실행에서 나온 결과(오류 포함) =====\n{problem}\n===== 결과 끝 =====\n{note_line}\n위 결과에서 보이는 문제의 원인을 찾아 고친 **전체 스크립트**를 코드 블록 하나로만 답해라. 원래 하려던 일은 바꾸지 마라."
@@ -348,15 +376,21 @@ mod tests {
         std::env::temp_dir().join(format!("ctm_script_{}", uuid::Uuid::new_v4()))
     }
 
+    fn run(dir: &Path, stem: &str, script: &str, timeout_ms: u64) -> Outcome {
+        run_script_outcome(dir, stem, "node", script, timeout_ms, None, "markdown")
+    }
+
     #[test]
     fn documented_variables_are_exactly_the_ones_passed_and_ai_prompt_carries_the_reference() {
-        let passed: Vec<&str> = script_env(None).iter().map(|(n, _)| *n).collect();
+        let passed: Vec<&str> = script_env(None, "markdown").iter().map(|(n, _)| *n).collect();
         let documented: Vec<&str> = ENV_VAR_DOCS.iter().map(|d| d.name).collect();
         assert_eq!(passed, documented, "안내 표와 실제로 넘기는 환경 변수가 어긋났다");
         let reference = reference_markdown();
         assert!(documented.iter().all(|n| reference.contains(n)), "안내 문서에 모든 변수가 있어야 한다");
-        let prompt = build_generate_prompt("브랜치 보여줘", "node");
-        assert!(prompt.contains(&reference) && prompt.contains("브랜치 보여줘"), "AI 요청문에 안내 문서와 요구가 모두 들어가야 한다");
+        for fmt in OUTPUT_FORMATS {
+            let prompt = build_generate_prompt("브랜치 보여줘", "node", fmt);
+            assert!(prompt.contains(&reference) && prompt.contains("브랜치 보여줘") && prompt.contains(&format!("CTM_OUTPUT_FORMAT={fmt}")), "AI 요청문에 안내·요구·형식이 들어가야 한다({fmt})");
+        }
     }
 
     #[test]
@@ -364,12 +398,11 @@ mod tests {
         let dir = scratch();
         let names: Vec<String> = ENV_VAR_DOCS.iter().map(|d| format!("'{}'", d.name)).collect();
         let script = format!("const n=[{}]; console.log(n.map(k=>k+'='+(process.env[k]===undefined?'UNDEFINED':(process.env[k]===''?'EMPTY':'SET'))).join('\\n'))", names.join(","));
-        let out = run_script(&dir, "t6", "node", &script, 8000, None);
+        let out = run(&dir, "t6", &script, 8000).output;
         for d in ENV_VAR_DOCS.iter() {
             assert!(!out.contains(&format!("{}=UNDEFINED", d.name)), "{} 가 스크립트에 전달되지 않았다:\n{out}", d.name);
         }
-        // 팀장이 없어도 항상 채워진다고 안내한 것들은 실제로 채워져 있어야 한다
-        for always in ["CTM_LEADS_FILE", "CTM_CLAUDE_HOME", "CTM_APP_VERSION"] {
+        for always in ["CTM_OUTPUT_FORMAT", "CTM_LEADS_FILE", "CTM_CLAUDE_HOME", "CTM_APP_VERSION"] {
             assert!(out.contains(&format!("{always}=SET")), "{always}는 항상 채워져야 한다:\n{out}");
         }
         assert!(out.contains("CTM_LEAD_DIR=EMPTY"), "{out}");
@@ -377,32 +410,83 @@ mod tests {
     }
 
     #[test]
-    fn stderr_is_hidden_on_success_in_the_panel_but_shown_in_test_runs() {
+    fn output_format_is_passed_and_reported_but_errors_are_always_markdown() {
         let dir = scratch();
-        let js = "console.log('## 제목'); console.error('경고: 일부 실패'); process.exitCode = 0;";
-        let panel = run_script(&dir, "t7", "node", js, 8000, None);
-        assert!(panel.contains("## 제목") && !panel.contains("경고: 일부 실패"), "{panel}");
-        let test = run_script_with(&dir, "t7", "node", js, 8000, None, true);
-        assert!(test.contains("## 제목") && test.contains("표준 오류 출력") && test.contains("경고: 일부 실패"), "{test}");
+        let ok = run_script_outcome(&dir, "f1", "node", "console.log('<b style=\"color:red\">' + process.env.CTM_OUTPUT_FORMAT + '</b>')", 8000, None, "html");
+        assert_eq!((ok.format, ok.output.as_str()), ("html", "<b style=\"color:red\">html</b>"));
+        let md = run_script_outcome(&dir, "f2", "node", "console.log(process.env.CTM_OUTPUT_FORMAT)", 8000, None, "markdown");
+        assert_eq!((md.format, md.output.as_str()), ("markdown", "markdown"));
+        let bad = run_script_outcome(&dir, "f3", "node", "process.exit(2)", 8000, None, "html");
+        assert_eq!(bad.format, "markdown", "오류 문구는 html로 그리면 안 된다");
+        let empty = run_script_outcome(&dir, "f4", "node", "", 8000, None, "html");
+        assert_eq!(empty.format, "markdown");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn fix_prompt_carries_script_error_note_and_reference() {
-        let p = build_fix_prompt("const a = 1; a = 2;", "TypeError: Assignment to constant variable.", "표로 보여줘", "node");
-        assert!(p.contains("const a = 1; a = 2;") && p.contains("Assignment to constant variable") && p.contains("표로 보여줘") && p.contains(&reference_markdown()));
+    fn code_block_is_extracted_with_or_without_fences() {
+        assert_eq!(extract_code_block("설명\n```js\nconsole.log(1)\n```\n끝"), "console.log(1)");
+        assert_eq!(extract_code_block("```\na\nb\n```"), "a\nb");
+        assert_eq!(extract_code_block("console.log(2)"), "console.log(2)");
+    }
+
+    #[test]
+    fn output_is_returned_and_lead_env_is_passed() {
+        let dir = scratch();
+        let out = run(&dir, "t1", "console.log('## 안녕\\n' + (process.env.CTM_LEAD_ID === '' ? '비어있음' : 'x'))", 8000).output;
+        assert!(out.contains("## 안녕") && out.contains("비어있음"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failures_and_empty_output_are_readable_markdown() {
+        let dir = scratch();
+        let fail = run(&dir, "t2", "console.error('boom'); process.exit(3)", 8000).output;
+        assert!(fail.contains("실패") && fail.contains("종료 코드 3") && fail.contains("boom"), "{fail}");
+        let empty = run(&dir, "t3", "", 8000).output;
+        assert!(empty.contains("아무것도 출력하지 않았습니다"), "{empty}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stderr_is_kept_separately_and_never_mixed_into_the_output() {
+        let dir = scratch();
+        let o = run(&dir, "t7", "console.log('## 제목'); console.error('경고: 일부 실패');", 8000);
+        assert_eq!((o.output.as_str(), o.stderr.as_str()), ("## 제목", "경고: 일부 실패"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn slow_scripts_are_stopped_at_the_per_script_time_limit() {
+        let dir = scratch();
+        let t = std::time::Instant::now();
+        let out = run(&dir, "t4", "setTimeout(() => console.log('late'), 5000)", 700).output;
+        assert!(out.contains("제한 시간(700ms)"), "{out}");
+        assert!(t.elapsed() < Duration::from_secs(4), "제한 시간이 지나면 바로 끝나야 한다");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn long_output_is_cut_with_a_format_appropriate_note() {
+        let dir = scratch();
+        let script = "console.log('가'.repeat(210000))";
+        let md = run_script_outcome(&dir, "t5", "node", script, 15000, None, "markdown");
+        assert!(md.output.contains("까지만 보여 줍니다") && md.output.chars().count() < MAX_OUTPUT_CHARS + 200, "len {}", md.output.chars().count());
+        let html = run_script_outcome(&dir, "t5h", "node", script, 15000, None, "html");
+        assert!(html.output.ends_with(")</p>"), "html에서는 안내도 html이어야 한다");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn problems_are_classified_and_recorded_with_dedupe_and_cap() {
         let dir = scratch();
-        let fail_o = run_script_outcome(&dir, "e1", "node", "console.error('boom'); process.exit(2)", 8000, None, false);
+        let fail_o = run(&dir, "e1", "console.error('boom'); process.exit(2)", 8000);
         assert_eq!(fail_o.problem.as_ref().map(|p| p.kind), Some("exit"));
-        let slow = run_script_outcome(&dir, "e2", "node", "setTimeout(()=>{},5000)", 600, None, false);
+        let slow = run(&dir, "e2", "setTimeout(()=>{},5000)", 600);
         assert_eq!(slow.problem.as_ref().map(|p| p.kind), Some("timeout"));
-        let warn = run_script_outcome(&dir, "e3", "node", "console.log('x'); console.error('w')", 8000, None, false);
-        assert_eq!((warn.problem.as_ref().map(|p| p.kind), warn.markdown.as_str()), (Some("stderr"), "x"));
-        let clean = run_script_outcome(&dir, "e4", "node", "console.log('x')", 8000, None, false);
+        let warn = run(&dir, "e3", "console.log('x'); console.error('w')", 8000);
+        assert_eq!((warn.problem.as_ref().map(|p| p.kind), warn.output.as_str()), (Some("stderr"), "x"));
+        let clean = run(&dir, "e4", "console.log('x')", 8000);
         assert!(clean.problem.is_none());
 
         let log = dir.join("errors.json");
@@ -424,45 +508,8 @@ mod tests {
     }
 
     #[test]
-    fn code_block_is_extracted_with_or_without_fences() {
-        assert_eq!(extract_code_block("설명\n```js\nconsole.log(1)\n```\n끝"), "console.log(1)");
-        assert_eq!(extract_code_block("```\na\nb\n```"), "a\nb");
-        assert_eq!(extract_code_block("console.log(2)"), "console.log(2)");
-    }
-
-    #[test]
-    fn output_is_returned_and_lead_env_is_passed() {
-        let dir = scratch();
-        let out = run_script(&dir, "t1", "node", "console.log('## 안녕\\n' + (process.env.CTM_LEAD_ID === '' ? '비어있음' : 'x'))", 8000, None);
-        assert!(out.contains("## 안녕") && out.contains("비어있음"), "{out}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn failures_and_empty_output_are_readable_markdown() {
-        let dir = scratch();
-        let fail = run_script(&dir, "t2", "node", "console.error('boom'); process.exit(3)", 8000, None);
-        assert!(fail.contains("실패") && fail.contains("종료 코드 3") && fail.contains("boom"), "{fail}");
-        let empty = run_script(&dir, "t3", "node", "", 8000, None);
-        assert!(empty.contains("아무것도 출력하지 않았습니다"), "{empty}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn slow_scripts_are_stopped_at_the_per_script_time_limit() {
-        let dir = scratch();
-        let t = std::time::Instant::now();
-        let out = run_script(&dir, "t4", "node", "setTimeout(() => console.log('late'), 5000)", 700, None);
-        assert!(out.contains("제한 시간(700ms)"), "{out}");
-        assert!(t.elapsed() < Duration::from_secs(4), "제한 시간이 지나면 바로 끝나야 한다");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn long_output_is_cut() {
-        let dir = scratch();
-        let out = run_script(&dir, "t5", "node", "console.log('가'.repeat(20000))", 8000, None);
-        assert!(out.contains("까지만 보여 줍니다") && out.chars().count() < 16_200, "len {}", out.chars().count());
-        let _ = std::fs::remove_dir_all(&dir);
+    fn fix_prompt_carries_script_error_note_and_reference() {
+        let p = build_fix_prompt("const a = 1; a = 2;", "TypeError: Assignment to constant variable.", "표로 보여줘", "node", "markdown");
+        assert!(p.contains("const a = 1; a = 2;") && p.contains("Assignment to constant variable") && p.contains("표로 보여줘") && p.contains(&reference_markdown()));
     }
 }

@@ -61,6 +61,9 @@ fn default_interpreter() -> String {
 fn default_timeout_ms() -> u64 {
     crate::panel_script::DEFAULT_TIMEOUT_MS
 }
+fn default_output_format() -> String {
+    "markdown".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -98,6 +101,9 @@ pub struct PanelSlot {
     pub script: String,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    /// script 전용: 출력 형식 "markdown"(글·표·링크·data: 이미지) | "html"(SVG·CSS 그래픽, 화면에서 스크립트 실행이 막힌 프레임에 그린다)
+    #[serde(default = "default_output_format")]
+    pub output_format: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -135,6 +141,8 @@ pub struct PanelSlotInput {
     pub script: String,
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default = "default_output_format")]
+    pub output_format: String,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -183,6 +191,9 @@ pub(crate) fn slot_from_input(input: &PanelSlotInput, id: String, created_at: i6
         if !(crate::panel_script::MIN_TIMEOUT_MS..=crate::panel_script::MAX_TIMEOUT_MS).contains(&input.timeout_ms) {
             return Err(format!("제한 시간은 {}~{}ms 사이로 입력하세요.", crate::panel_script::MIN_TIMEOUT_MS, crate::panel_script::MAX_TIMEOUT_MS));
         }
+        if !crate::panel_script::OUTPUT_FORMATS.contains(&input.output_format.as_str()) {
+            return Err("출력 형식이 올바르지 않습니다.".to_string());
+        }
     }
     Ok(PanelSlot {
         id,
@@ -199,6 +210,7 @@ pub(crate) fn slot_from_input(input: &PanelSlotInput, id: String, created_at: i6
         interpreter: if is_script { input.interpreter.clone() } else { default_interpreter() },
         script: if is_script { input.script.clone() } else { String::new() },
         timeout_ms: if is_script { input.timeout_ms } else { default_timeout_ms() },
+        output_format: if is_script { input.output_format.clone() } else { default_output_format() },
     })
 }
 
@@ -748,6 +760,8 @@ pub struct PanelContent {
     pub note: String,
     /// 자동 수집 슬롯일 때만 채운다 — 화면의 리더·기간 필터가 이걸 거른다(모델에 넘기는 재료는 거르지 않는다).
     pub items: Vec<CollectedItem>,
+    /// markdown이면 마크다운 렌더러로, html이면 스크립트가 막힌 격리 프레임에 그린다(스크립트 슬롯의 정상 출력만 html일 수 있다).
+    pub format: String,
 }
 
 #[tauri::command]
@@ -809,7 +823,8 @@ struct ScriptCacheEntry {
     key: String,
     at: std::time::Instant,
     updated_at: i64,
-    markdown: String,
+    output: String,
+    format: String,
 }
 const SCRIPT_CACHE_TTL: Duration = Duration::from_secs(5);
 
@@ -825,22 +840,23 @@ fn script_running() -> &'static Mutex<HashSet<String>> {
 async fn script_content(slot: PanelSlot, lead_id: Option<String>, force: bool) -> Result<PanelContent, String> {
     let leads = load_leads();
     let lead = crate::panel_script::lead_by_id(&leads, lead_id.as_deref());
-    // 스크립트·실행 환경·제한 시간·선택한 팀장이 바뀌면 다른 결과다.
-    let key = format!("{}|{}|{}|{}|{}", slot.interpreter, slot.timeout_ms, lead.as_ref().map(|l| l.id.as_str()).unwrap_or(""), slot.script.len(), slot.script);
+    // 스크립트·실행 환경·제한 시간·출력 형식·선택한 팀장이 바뀌면 다른 결과다.
+    let key = format!("{}|{}|{}|{}|{}|{}", slot.interpreter, slot.timeout_ms, slot.output_format, lead.as_ref().map(|l| l.id.as_str()).unwrap_or(""), slot.script.len(), slot.script);
     let note = "스크립트를 이 PC에서 실행한 결과입니다".to_string();
-    let cached = |c: &HashMap<String, ScriptCacheEntry>| c.get(&slot.id).filter(|e| e.key == key).map(|e| (e.markdown.clone(), e.updated_at, e.at.elapsed()));
-    if let Some((md, at, age)) = cached(&script_cache().lock().unwrap_or_else(|e| e.into_inner())) {
+    let cached = |c: &HashMap<String, ScriptCacheEntry>| c.get(&slot.id).filter(|e| e.key == key).map(|e| (e.output.clone(), e.format.clone(), e.updated_at, e.at.elapsed()));
+    let content = |output: String, format: String, at: Option<i64>, slot: &PanelSlot, note: String| PanelContent { markdown: output, updated_at: at, mode: slot.mode.clone(), note, items: Vec::new(), format };
+    if let Some((out, fmt, at, age)) = cached(&script_cache().lock().unwrap_or_else(|e| e.into_inner())) {
         if !force && age < SCRIPT_CACHE_TTL {
-            return Ok(PanelContent { markdown: md, updated_at: Some(at), mode: slot.mode, note, items: Vec::new() });
+            return Ok(content(out, fmt, Some(at), &slot, note));
         }
     }
     // 같은 슬롯이 이미 돌고 있으면 또 시작하지 않고 가진 결과(없으면 안내)를 보여 준다.
     if !script_running().lock().unwrap_or_else(|e| e.into_inner()).insert(slot.id.clone()) {
-        let (md, at) = cached(&script_cache().lock().unwrap_or_else(|e| e.into_inner())).map(|(m, a, _)| (m, Some(a))).unwrap_or(("스크립트를 실행하는 중입니다...".to_string(), None));
-        return Ok(PanelContent { markdown: md, updated_at: at, mode: slot.mode, note, items: Vec::new() });
+        let (out, fmt, at) = cached(&script_cache().lock().unwrap_or_else(|e| e.into_inner())).map(|(o, f, a, _)| (o, f, Some(a))).unwrap_or(("스크립트를 실행하는 중입니다...".to_string(), "markdown".to_string(), None));
+        return Ok(content(out, fmt, at, &slot, note));
     }
-    let (id, interpreter, script, timeout_ms) = (slot.id.clone(), slot.interpreter.clone(), slot.script.clone(), slot.timeout_ms);
-    let outcome = tokio::task::spawn_blocking(move || crate::panel_script::run_script_outcome(&panel_dir().join("scripts"), &id, &interpreter, &script, timeout_ms, lead.as_ref(), false))
+    let (id, interpreter, script, timeout_ms, format) = (slot.id.clone(), slot.interpreter.clone(), slot.script.clone(), slot.timeout_ms, slot.output_format.clone());
+    let outcome = tokio::task::spawn_blocking(move || crate::panel_script::run_script_outcome(&panel_dir().join("scripts"), &id, &interpreter, &script, timeout_ms, lead.as_ref(), &format))
         .await
         .map_err(|e| e.to_string());
     script_running().lock().unwrap_or_else(|e| e.into_inner()).remove(&slot.id);
@@ -848,15 +864,23 @@ async fn script_content(slot: PanelSlot, lead_id: Option<String>, force: bool) -
     if let Some(problem) = &outcome.problem {
         crate::panel_script::record_error_at(&script_errors_path(), &slot.id, &slot.name, "panel", problem, now_ms());
     }
-    let md = outcome.markdown;
     let at = now_ms();
-    script_cache().lock().unwrap_or_else(|e| e.into_inner()).insert(slot.id.clone(), ScriptCacheEntry { key, at: std::time::Instant::now(), updated_at: at, markdown: md.clone() });
-    Ok(PanelContent { markdown: md, updated_at: Some(at), mode: slot.mode, note, items: Vec::new() })
+    script_cache().lock().unwrap_or_else(|e| e.into_inner()).insert(slot.id.clone(), ScriptCacheEntry { key, at: std::time::Instant::now(), updated_at: at, output: outcome.output.clone(), format: outcome.format.to_string() });
+    Ok(content(outcome.output, outcome.format.to_string(), Some(at), &slot, note))
+}
+
+/// 시험 실행 결과: 출력(정상이면 스크립트가 낸 것, 문제가 있으면 마크다운 오류 문구)과 그 형식, 그리고 정상 종료 때의 표준 오류 출력.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptTestResult {
+    pub output: String,
+    pub format: String,
+    pub stderr: String,
 }
 
 /// 설정 화면의 "시험 실행": 저장하지 않은 스크립트를 지금 돌려 결과를 보여 준다.
 #[tauri::command]
-pub async fn test_panel_script_command(interpreter: String, script: String, timeout_ms: u64, lead_id: Option<String>) -> Result<String, String> {
+pub async fn test_panel_script_command(interpreter: String, script: String, timeout_ms: u64, lead_id: Option<String>, output_format: Option<String>) -> Result<ScriptTestResult, String> {
     if !crate::panel_script::INTERPRETERS.contains(&interpreter.as_str()) {
         return Err("스크립트 실행 환경이 올바르지 않습니다.".to_string());
     }
@@ -866,12 +890,16 @@ pub async fn test_panel_script_command(interpreter: String, script: String, time
     if !(crate::panel_script::MIN_TIMEOUT_MS..=crate::panel_script::MAX_TIMEOUT_MS).contains(&timeout_ms) {
         return Err(format!("제한 시간은 {}~{}ms 사이로 입력하세요.", crate::panel_script::MIN_TIMEOUT_MS, crate::panel_script::MAX_TIMEOUT_MS));
     }
+    let format = output_format.unwrap_or_else(default_output_format);
+    if !crate::panel_script::OUTPUT_FORMATS.contains(&format.as_str()) {
+        return Err("출력 형식이 올바르지 않습니다.".to_string());
+    }
     let lead = crate::panel_script::lead_by_id(&load_leads(), lead_id.as_deref());
-    let outcome = tokio::task::spawn_blocking(move || crate::panel_script::run_script_outcome(&panel_dir().join("scripts"), "_test", &interpreter, &script, timeout_ms, lead.as_ref(), true)).await.map_err(|e| e.to_string())?;
+    let outcome = tokio::task::spawn_blocking(move || crate::panel_script::run_script_outcome(&panel_dir().join("scripts"), "_test", &interpreter, &script, timeout_ms, lead.as_ref(), &format)).await.map_err(|e| e.to_string())?;
     if let Some(problem) = &outcome.problem {
         crate::panel_script::record_error_at(&script_errors_path(), "_test", "(시험 실행)", "test", problem, now_ms());
     }
-    Ok(outcome.markdown)
+    Ok(ScriptTestResult { output: outcome.output, format: outcome.format.to_string(), stderr: outcome.stderr })
 }
 
 fn script_errors_path() -> PathBuf {
@@ -892,7 +920,11 @@ pub fn clear_panel_script_errors_command() {
 /// 스크립트 작성 안내(앱이 주는 정보·출력 형식·제한) — 설정 화면에 보여 주고, AI 요청문에도 같은 글이 들어간다.
 /// "AI로 고치기": 시험 실행에서 나온 결과(오류 포함)를 보고 모델이 스크립트를 고쳐 온다. 마찬가지로 저장은 사용자가 코드를 보고 직접 한다.
 #[tauri::command]
-pub async fn fix_panel_script_command(script: String, problem: String, note: String, interpreter: String, model: String) -> Result<String, String> {
+pub async fn fix_panel_script_command(script: String, problem: String, note: String, interpreter: String, model: String, output_format: Option<String>) -> Result<String, String> {
+    let output_format = output_format.unwrap_or_else(default_output_format);
+    if !crate::panel_script::OUTPUT_FORMATS.contains(&output_format.as_str()) {
+        return Err("출력 형식이 올바르지 않습니다.".to_string());
+    }
     if script.trim().is_empty() || script.chars().count() > crate::panel_script::MAX_SCRIPT_CHARS {
         return Err("고칠 스크립트가 비었거나 너무 깁니다.".to_string());
     }
@@ -907,7 +939,7 @@ pub async fn fix_panel_script_command(script: String, problem: String, note: Str
     if AI_BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
         return Err("다른 AI 작업이 진행 중입니다. 잠시 후 다시 누르세요.".to_string());
     }
-    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_fix_prompt(&script, &problem, &note, &interpreter))).await;
+    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_fix_prompt(&script, &problem, &note, &interpreter, &output_format))).await;
     AI_BUSY.store(false, Ordering::SeqCst);
     let code = crate::panel_script::extract_code_block(&result.map_err(|e| e.to_string())??);
     if code.trim().is_empty() {
@@ -923,7 +955,11 @@ pub fn get_panel_script_reference_command() -> String {
 
 /// "AI로 스크립트 만들기": 요청을 모델에게 주고 스크립트 초안을 받아 온다(저장은 사용자가 코드를 보고 직접 한다). 모델 호출이라 추가 토큰이 든다.
 #[tauri::command]
-pub async fn generate_panel_script_command(request: String, interpreter: String, model: String) -> Result<String, String> {
+pub async fn generate_panel_script_command(request: String, interpreter: String, model: String, output_format: Option<String>) -> Result<String, String> {
+    let output_format = output_format.unwrap_or_else(default_output_format);
+    if !crate::panel_script::OUTPUT_FORMATS.contains(&output_format.as_str()) {
+        return Err("출력 형식이 올바르지 않습니다.".to_string());
+    }
     let request = request.trim().to_string();
     if request.is_empty() || request.chars().count() > 1000 {
         return Err("만들고 싶은 내용을 1000자 이하로 적어 주세요.".to_string());
@@ -934,7 +970,7 @@ pub async fn generate_panel_script_command(request: String, interpreter: String,
     if AI_BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
         return Err("다른 AI 작업이 진행 중입니다. 잠시 후 다시 누르세요.".to_string());
     }
-    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_generate_prompt(&request, &interpreter))).await;
+    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_generate_prompt(&request, &interpreter, &output_format))).await;
     AI_BUSY.store(false, Ordering::SeqCst);
     let text = result.map_err(|e| e.to_string())??;
     let code = crate::panel_script::extract_code_block(&text);
@@ -960,7 +996,7 @@ pub async fn get_panel_content_command(slot_id: String, lead_id: Option<String>,
         })
         .await
         .map_err(|e| e.to_string())?;
-        return Ok(PanelContent { markdown: md, updated_at: None, mode: slot.mode, note: "대화 기록에서 자동으로 모았습니다".to_string(), items });
+        return Ok(PanelContent { markdown: md, updated_at: None, mode: slot.mode, note: "대화 기록에서 자동으로 모았습니다".to_string(), items, format: "markdown".to_string() });
     }
     if slot.mode == "script" {
         return script_content(slot, lead_id, force.unwrap_or(false)).await;
@@ -971,7 +1007,7 @@ pub async fn get_panel_content_command(slot_id: String, lead_id: Option<String>,
         "ai" => "AI가 정리한 내용입니다(틀릴 수 있습니다)",
         _ => "직접 쓴 내용입니다",
     };
-    Ok(PanelContent { markdown: text, updated_at: mtime, mode: slot.mode, note: note.to_string(), items: Vec::new() })
+    Ok(PanelContent { markdown: text, updated_at: mtime, mode: slot.mode, note: note.to_string(), items: Vec::new(), format: "markdown".to_string() })
 }
 
 /// 직접 쓰는 슬롯(manual)과 ai/lead 슬롯의 내용을 사용자가 고쳐 저장한다.
@@ -1002,7 +1038,7 @@ pub async fn refresh_panel_slot_command(slot_id: String) -> Result<PanelContent,
     AI_BUSY.store(false, Ordering::SeqCst);
     let text = result.map_err(|e| e.to_string())??;
     let (_, mtime) = read_content(&panel_dir(), &slot.id);
-    Ok(PanelContent { markdown: text, updated_at: mtime, mode: slot.mode, note: "AI가 정리한 내용입니다(틀릴 수 있습니다)".to_string(), items: Vec::new() })
+    Ok(PanelContent { markdown: text, updated_at: mtime, mode: slot.mode, note: "AI가 정리한 내용입니다(틀릴 수 있습니다)".to_string(), items: Vec::new(), format: "markdown".to_string() })
 }
 
 pub(crate) fn is_safe_external_url(url: &str) -> bool {
@@ -1043,7 +1079,7 @@ mod tests {
     use super::*;
 
     fn input(mode: &str) -> PanelSlotInput {
-        PanelSlotInput { id: None, name: "보고서".into(), mode: mode.into(), scope: "all".into(), preset: "artifact-reports".into(), instruction: "".into(), auto_update: false, ai_model: "sonnet".into(), ai_include: "none".into(), enabled: true, interpreter: "node".into(), script: "".into(), timeout_ms: 10_000 }
+        PanelSlotInput { id: None, name: "보고서".into(), mode: mode.into(), scope: "all".into(), preset: "artifact-reports".into(), instruction: "".into(), auto_update: false, ai_model: "sonnet".into(), ai_include: "none".into(), enabled: true, interpreter: "node".into(), script: "".into(), timeout_ms: 10_000, output_format: "markdown".into() }
     }
 
     #[test]
@@ -1058,6 +1094,10 @@ mod tests {
         i.timeout_ms = 700_000;
         assert!(slot_from_input(&i, "s1".into(), 0).is_err());
         i.timeout_ms = 3000;
+        i.output_format = "pdf".into();
+        assert!(slot_from_input(&i, "s1".into(), 0).unwrap_err().contains("출력 형식"));
+        i.output_format = "html".into();
+        assert_eq!(slot_from_input(&i, "s1".into(), 0).unwrap().output_format, "html");
         i.interpreter = "ruby".into();
         assert!(slot_from_input(&i, "s1".into(), 0).unwrap_err().contains("실행 환경"));
         // 스크립트가 아닌 슬롯은 스크립트 칸 값이 와도 저장하지 않는다
@@ -1071,7 +1111,7 @@ mod tests {
     #[test]
     fn old_config_files_without_script_fields_still_load_with_defaults() {
         let cfg: PanelConfig = serde_json::from_str(r#"{"enabled":true,"slots":[{"id":"a","name":"보고서","mode":"auto"}]}"#).unwrap();
-        assert_eq!((cfg.slots[0].interpreter.as_str(), cfg.slots[0].timeout_ms, cfg.slots[0].script.as_str()), ("node", 10_000, ""));
+        assert_eq!((cfg.slots[0].interpreter.as_str(), cfg.slots[0].timeout_ms, cfg.slots[0].script.as_str(), cfg.slots[0].output_format.as_str()), ("node", 10_000, "", "markdown"));
     }
 
     fn lead(id: &str, internal: Option<&str>) -> LeadRecord {

@@ -1,7 +1,7 @@
 // 아주 작은 마크다운 → HTML 변환기(오른쪽 패널 표시용). 팀장이나 모델이 쓴 글을 그대로 보여 주므로 안전이 먼저다:
 //  - 입력의 모든 HTML은 먼저 이스케이프한다(태그가 그대로 살아남지 않는다).
 //  - 링크는 http/https만 허용하고 href를 "#"로 두고 실제 주소는 data-url에 넣는다(화면 이동 없이 앱이 기본 브라우저로 연다).
-//  - 이미지, 스크립트, 인라인 스타일은 지원하지 않는다(이미지는 링크로 보인다).
+//  - 이미지는 data: 주소(png, jpeg, gif, webp, svg+xml의 base64)만 그린다 — 외부 주소 이미지는 추적·유출 위험이 있어 링크 글자로만 보인다. 스크립트, 인라인 스타일은 지원하지 않는다.
 // 지원: 제목(#), 굵게(**), 기울임(*), 인라인 코드(\`), 코드 블록(\`\`\`), 링크([글](주소)와 맨 주소), 목록(-,*,숫자.), 인용(>), 구분선(---), 표.
 // status.js와 같은 방식으로 CommonJS(require)와 브라우저 전역(<script>)에서 모두 쓴다.
 
@@ -17,6 +17,8 @@ function renderInline(raw) {
   let s = String(raw);
   // 인라인 코드는 안쪽을 건드리지 않게 먼저 빼 둔다
   s = s.replace(/`([^`\n]+)`/g, (_, code) => keep(`<code>${escapeHtmlMd(code)}</code>`));
+  // 이미지: data: 주소(base64 문자만 허용 — 속성을 빠져나갈 문자가 없다)만 그린다
+  s = s.replace(/!\[([^\]\n]*)\]\((data:image\/(?:png|jpeg|gif|webp|svg\+xml);base64,[A-Za-z0-9+\/=]+)\)/g, (_, alt, url) => keep(`<img src="${url}" alt="${escapeHtmlMd(alt)}">`));
   // [글](주소) — 주소가 http/https일 때만 링크, 아니면 글만 보인다
   s = s.replace(/!?\[([^\]\n]*)\]\(([^)\s]+)\)/g, (_, text, url) => {
     if (SAFE_URL.test(url)) return keep(`<a href="#" data-url="${escapeHtmlMd(url)}" title="${escapeHtmlMd(url)}">${escapeHtmlMd(text || url)}</a>`);

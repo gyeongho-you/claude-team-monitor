@@ -833,7 +833,7 @@ async function refreshPanelContent(force) {
   let c;
   try { c = await window.api.getPanelContent(slot.id, leadId, force === true && slot.mode === 'script'); } catch (err) { spMetaEl.textContent = `불러오지 못했습니다: ${errMsg(err)}`; return; }
   const auto = slot.mode === 'auto' && Array.isArray(c.items);
-  const key = `${slot.id}|${leadId || ''}|${c.updatedAt || ''}|${c.markdown.length}|${c.markdown.slice(0, 64)}|${auto ? `${panelFilter.lead}|${panelFilter.range}|${panelFilter.current ? selectedLeadId : ''}` : ''}`;
+  const key = `${slot.id}|${leadId || ''}|${c.updatedAt || ''}|${c.markdown.length}|${c.markdown.slice(0, 64)}|${hashStr(c.markdown)}|${c.format || ''}|${auto ? `${panelFilter.lead}|${panelFilter.range}|${panelFilter.current ? selectedLeadId : ''}` : ''}`;
   panelContent = c;
   if (!force && key === panelLastKey) return;
   panelLastKey = key;
@@ -881,6 +881,59 @@ function renderPanelFilterBar(items) {
   spFilterRangeEl.value = panelFilter.range;
   spFilterCurrentEl.checked = panelFilter.current;
 }
+// ---- 그래픽(HTML) 출력: 스크립트가 막힌 격리 프레임에 그린다 ----
+// 스크립트가 낸 HTML은 (1) 파싱해서 script·iframe·form·meta 등과 on* 속성, 외부 주소(href/src)를 먼저 걷어 내고, (2) sandbox 속성에 allow-scripts를 주지 않아
+// 프레임 안에서는 어떤 코드도 실행되지 않으며, (3) 프레임 안 CSP로 data: 이미지·인라인 스타일 외의 불러오기를 막는다. allow-same-origin만 주는 이유는
+// 코드가 못 도는 문서라서 안전하고, 그래야 앱이 링크 클릭을 가로채 기본 브라우저로 열고 내용 높이를 잴 수 있기 때문이다.
+function hashStr(s) { let h = 5381; for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return h; }
+function panelThemeCss() {
+  const cs = getComputedStyle(document.documentElement);
+  const get = n => cs.getPropertyValue(n).trim();
+  const vars = ['--bg', '--surface', '--surface-2', '--text', '--text-soft', '--text-bright', '--border', '--border-2'].filter(n => get(n)).map(n => `${n}:${get(n)}`);
+  vars.push(`--accent:${get('--accent-2') || '#58a6ff'}`);
+  return `:root{${vars.join(';')};color-scheme:${document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'}}`;
+}
+function sanitizeHtmlFragment(html) {
+  const doc = new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html');
+  doc.querySelectorAll('script,iframe,frame,frameset,object,embed,meta,link,base,form,input,button,textarea,select,noscript,template,applet').forEach(n => n.remove());
+  doc.body.querySelectorAll('*').forEach(el => {
+    for (const a of [...el.attributes]) {
+      const n = a.name.toLowerCase(), v = a.value.trim();
+      if (n.startsWith('on') || n === 'srcset' || n === 'formaction' || n === 'ping') el.removeAttribute(a.name);
+      else if (n === 'href' || n === 'xlink:href') {
+        const ok = el.tagName.toLowerCase() === 'a' ? /^https?:\/\//i.test(v) : v.startsWith('#');
+        if (!ok) el.removeAttribute(a.name);
+      } else if (n === 'src' && !/^data:image\//i.test(v)) el.removeAttribute(a.name);
+    }
+  });
+  return doc.body.innerHTML;
+}
+function buildHtmlDoc(fragment) {
+  const csp = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:";
+  const base = "html,body{margin:0}body{padding:6px 2px;background:transparent;color:var(--text);font:12px/1.5 system-ui,-apple-system,'Segoe UI','Malgun Gothic',sans-serif;word-break:break-word}a{color:var(--accent)}img,svg{max-width:100%}table{border-collapse:collapse}";
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>${panelThemeCss()}${base}</style></head><body>${sanitizeHtmlFragment(fragment)}</body></html>`;
+}
+function renderHtmlFrame(container, fragment) {
+  const frame = document.createElement('iframe');
+  frame.className = 'sp-html-frame';
+  frame.setAttribute('sandbox', 'allow-same-origin'); // allow-scripts를 주지 않는다 — 프레임 안에서 코드가 실행되지 않는다
+  frame.srcdoc = buildHtmlDoc(fragment);
+  frame.addEventListener('load', () => {
+    const doc = frame.contentDocument;
+    if (!doc) return;
+    const fit = () => { frame.style.height = `${Math.min(4000, doc.documentElement.scrollHeight + 4)}px`; };
+    fit(); setTimeout(fit, 300);
+    doc.addEventListener('click', e => {
+      const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+      if (!a) return;
+      e.preventDefault();
+      const u = a.getAttribute('href') || '';
+      if (/^https?:\/\//i.test(u)) window.api.openExternalUrl(u).catch(err => console.error('링크 열기 실패:', err));
+    });
+  });
+  container.innerHTML = '';
+  container.appendChild(frame);
+}
 function renderPanelBody(slot, c) {
   const auto = slot.mode === 'auto' && Array.isArray(c.items);
   spFilterEl.hidden = !auto;
@@ -889,7 +942,8 @@ function renderPanelBody(slot, c) {
     renderPanelFilterBar(c.items);
     md = panelItemsMarkdown(filterPanelItems(c.items, panelFilter, selectedLeadId), c.items.length) || c.markdown;
   }
-  spBodyEl.innerHTML = md.trim() ? renderMarkdown(md) : '<p class="empty-hint">아직 내용이 없습니다.</p>';
+  if (c.format === 'html' && md.trim()) renderHtmlFrame(spBodyEl, md);
+  else spBodyEl.innerHTML = md.trim() ? renderMarkdown(md) : '<p class="empty-hint">아직 내용이 없습니다.</p>';
   const when = c.updatedAt ? ` · ${formatAgo(c.updatedAt)} 갱신` : '';
   spMetaEl.textContent = `${PANEL_MODE_LABELS[slot.mode] || slot.mode} · ${c.note}${when}`;
 }
@@ -1016,6 +1070,10 @@ const psInterp = document.getElementById('ps-interp');
 const psTimeout = document.getElementById('ps-timeout');
 const psScript = document.getElementById('ps-script');
 const psTestOut = document.getElementById('ps-test-out');
+const psTestPreview = document.getElementById('ps-test-preview');
+const psFormat = document.getElementById('ps-format');
+let psLastProblem = '';
+function clearPsTest() { psTestOut.hidden = true; psTestOut.textContent = ''; psTestPreview.hidden = true; psTestPreview.innerHTML = ''; psLastProblem = ''; }
 let psEditingId = null;
 const PS_DEFAULT_TIMEOUT_MS = 10000;
 const PS_MODEL_NAMES = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus', fable: 'Fable' };
@@ -1038,7 +1096,7 @@ psAutoUpdate.addEventListener('change', updatePsFormVisibility);
 function renderPanelSettings() {
   panelEnabledEl.checked = !!panelConfig.enabled;
   panelSlotListEl.innerHTML = (panelConfig.slots || []).map(s => {
-    const extra = s.mode === 'ai' ? ` · ${PS_MODEL_NAMES[s.aiModel] || s.aiModel}${s.aiInclude === 'artifact-reports' ? ' · 보고서 목록 포함' : s.aiInclude === 'github-pr' ? ' · PR 목록 포함' : ''}${s.autoUpdate ? ' · 자동' : ''}` : s.mode === 'script' ? ` · ${{ node: 'Node.js', python: 'Python', shell: '셸' }[s.interpreter] || s.interpreter} · 제한 ${s.timeoutMs}ms` : s.mode === 'auto' ? ` · ${s.preset === 'github-pr' ? 'GitHub PR' : 'Artifact 보고서'}${s.scope === 'selected' ? ' · 선택한 팀장' : ''}` : '';
+    const extra = s.mode === 'ai' ? ` · ${PS_MODEL_NAMES[s.aiModel] || s.aiModel}${s.aiInclude === 'artifact-reports' ? ' · 보고서 목록 포함' : s.aiInclude === 'github-pr' ? ' · PR 목록 포함' : ''}${s.autoUpdate ? ' · 자동' : ''}` : s.mode === 'script' ? ` · ${{ node: 'Node.js', python: 'Python', shell: '셸' }[s.interpreter] || s.interpreter} · 제한 ${s.timeoutMs}ms · ${s.outputFormat === 'html' ? 'HTML 그래픽' : '마크다운'}` : s.mode === 'auto' ? ` · ${s.preset === 'github-pr' ? 'GitHub PR' : 'Artifact 보고서'}${s.scope === 'selected' ? ' · 선택한 팀장' : ''}` : '';
     return `<div class="skill-item ${s.enabled ? '' : 'off'}">
       <label><input type="checkbox" data-ps-toggle="${escapeHtml(s.id)}" ${s.enabled ? 'checked' : ''} /> ${escapeHtml(s.name)}</label>
       <span class="skill-desc">${escapeHtml(PANEL_MODE_LABELS[s.mode] || s.mode)}${escapeHtml(extra)}</span>
@@ -1053,7 +1111,7 @@ function resetPsForm() {
   psEditingId = null;
   psName.value = ''; psMode.value = 'auto'; psPreset.value = 'artifact-reports'; psScope.value = 'all';
   psLeadInstruction.value = ''; psAiInstruction.value = ''; psModel.value = 'sonnet'; psInclude.value = 'none'; psAutoUpdate.checked = false;
-  psInterp.value = 'node'; psTimeout.value = PS_DEFAULT_TIMEOUT_MS; psScript.value = ''; psTestOut.hidden = true; psTestOut.textContent = '';
+  psInterp.value = 'node'; psTimeout.value = PS_DEFAULT_TIMEOUT_MS; psScript.value = ''; psFormat.value = 'markdown'; clearPsTest();
   psSaveBtn.textContent = '슬롯 추가'; psCancelBtn.hidden = true;
   updatePsFormVisibility();
 }
@@ -1065,6 +1123,7 @@ function psInputFromForm(enabled) {
     instruction: mode === 'lead' ? psLeadInstruction.value : mode === 'ai' ? psAiInstruction.value : '',
     autoUpdate: mode === 'ai' && psAutoUpdate.checked, aiModel: psModel.value, aiInclude: mode === 'ai' ? psInclude.value : 'none', enabled,
     interpreter: psInterp.value, script: mode === 'script' ? psScript.value : '', timeoutMs: Number(psTimeout.value) || PS_DEFAULT_TIMEOUT_MS,
+    outputFormat: mode === 'script' ? psFormat.value : 'markdown',
   };
 }
 
@@ -1091,7 +1150,7 @@ panelSlotListEl.addEventListener('click', async e => {
     psEditingId = s.id; psName.value = s.name; psMode.value = s.mode; psPreset.value = s.preset; psScope.value = s.scope;
     psLeadInstruction.value = s.mode === 'lead' ? s.instruction : ''; psAiInstruction.value = s.mode === 'ai' ? s.instruction : '';
     psModel.value = s.aiModel; psInclude.value = s.aiInclude || 'none'; psAutoUpdate.checked = !!s.autoUpdate;
-    psInterp.value = s.interpreter || 'node'; psTimeout.value = s.timeoutMs || PS_DEFAULT_TIMEOUT_MS; psScript.value = s.mode === 'script' ? s.script : ''; psTestOut.hidden = true;
+    psInterp.value = s.interpreter || 'node'; psTimeout.value = s.timeoutMs || PS_DEFAULT_TIMEOUT_MS; psScript.value = s.mode === 'script' ? s.script : ''; psFormat.value = s.outputFormat || 'markdown'; clearPsTest();
     psSaveBtn.textContent = '수정 저장'; psCancelBtn.hidden = false; updatePsFormVisibility();
     psStatus.textContent = `"${s.name}" 수정 중`;
     return;
@@ -1113,7 +1172,7 @@ panelSlotListEl.addEventListener('change', async e => {
   const s = (panelConfig.slots || []).find(x => x.id === t.dataset.psToggle);
   if (!s) return;
   try {
-    panelConfig = await window.api.savePanelSlot({ id: s.id, name: s.name, mode: s.mode, scope: s.scope, preset: s.preset, instruction: s.instruction, autoUpdate: s.autoUpdate, aiModel: s.aiModel, aiInclude: s.aiInclude || 'none', interpreter: s.interpreter || 'node', script: s.script || '', timeoutMs: s.timeoutMs || PS_DEFAULT_TIMEOUT_MS, enabled: t.checked });
+    panelConfig = await window.api.savePanelSlot({ id: s.id, name: s.name, mode: s.mode, scope: s.scope, preset: s.preset, instruction: s.instruction, autoUpdate: s.autoUpdate, aiModel: s.aiModel, aiInclude: s.aiInclude || 'none', interpreter: s.interpreter || 'node', script: s.script || '', timeoutMs: s.timeoutMs || PS_DEFAULT_TIMEOUT_MS, outputFormat: s.outputFormat || 'markdown', enabled: t.checked });
     renderPanelChrome(); renderPanelSettings(); panelLastKey = ''; refreshPanelContent(true);
   } catch (err) { psStatus.textContent = errMsg(err); t.checked = !t.checked; }
 });
@@ -1152,16 +1211,64 @@ document.getElementById('ps-ref-copy').addEventListener('click', async e => {
   catch { btn.textContent = '복사 실패 — 아래 글을 직접 선택해 복사하세요'; document.getElementById('ps-ref').open = true; }
   setTimeout(() => { btn.textContent = '안내문 복사'; }, 2500);
 });
+const PS_EXAMPLE_HTML = String.raw`// 선택한 팀장의 git 브랜치·변경 파일·워크트리를 카드와 막대 그래픽(HTML)으로 보여 줍니다(읽기만 하는 명령).
+const { execFileSync } = require('child_process');
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const dir = process.env.CTM_LEAD_DIR;
+if (!dir) { console.log('<p style="color:var(--text-soft)">작업 탭에서 팀장을 선택하세요.</p>'); process.exit(0); }
+const git = (...a) => { try { return execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
+if (git('rev-parse', '--is-inside-work-tree') !== 'true') { console.log('<p>git 저장소가 아닙니다: <code>' + esc(dir) + '</code></p>'); process.exit(0); }
+const branch = git('branch', '--show-current') || '(분리된 HEAD)';
+const status = (git('status', '--short') || '').split('\n').filter(Boolean);
+const kinds = { M: 0, A: 0, D: 0, N: 0 };
+for (const l of status) { const x = l.slice(0, 2); kinds[x.includes('?') ? 'N' : x.includes('D') ? 'D' : x.includes('A') ? 'A' : 'M']++; }
+const colors = { M: '#d29922', A: '#3fb950', D: '#f85149', N: '#8b949e' };
+const names = { M: '수정', A: '추가', D: '삭제', N: '새 파일' };
+const used = Object.keys(kinds).filter(k => kinds[k]);
+const bar = used.map(k => '<div title="' + names[k] + ' ' + kinds[k] + '" style="flex:' + kinds[k] + ';background:' + colors[k] + '"></div>').join('');
+const legend = used.map(k => '<span style="color:' + colors[k] + '">● ' + names[k] + ' ' + kinds[k] + '</span>').join(' ');
+const wts = (git('worktree', 'list') || '').split('\n').filter(Boolean);
+console.log('<div style="border:1px solid var(--border);border-radius:8px;padding:10px;background:var(--surface-2)">');
+console.log('<div style="font-size:11px;color:var(--text-soft)">' + esc(process.env.CTM_LEAD_LABEL || '팀장') + '</div>');
+console.log('<div style="font-size:16px;font-weight:600;margin:2px 0 8px">⎇ ' + esc(branch) + '</div>');
+console.log('<div style="display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--border)">' + bar + '</div>');
+console.log('<div style="font-size:11px;margin-top:4px;color:var(--text-soft)">변경 ' + status.length + '개 &nbsp; ' + legend + '</div></div>');
+console.log('<div style="margin:10px 0 4px;font-weight:600">워크트리 ' + wts.length + '개</div>');
+for (const l of wts) {
+  const m = l.match(/^(.+?)\s+([0-9a-f]+)\s+(.*)$/);
+  console.log('<div style="display:flex;gap:6px;align-items:baseline;padding:4px 0;border-bottom:1px solid var(--border)"><span style="flex:1;word-break:break-all;font-size:11px">' + esc(m ? m[1] : l) + '</span>' + (m ? '<code style="color:var(--accent)">' + esc(m[3]) + '</code>' : '') + '</div>');
+}
+`;
 document.getElementById('ps-example-btn').addEventListener('click', () => {
   if (psScript.value.trim() && !confirm('입력해 둔 스크립트를 예제로 바꿉니다. 계속할까요?')) return;
-  psInterp.value = 'node'; psScript.value = PS_EXAMPLE_NODE; psTestOut.hidden = true;
+  psInterp.value = 'node'; psFormat.value = 'markdown'; psScript.value = PS_EXAMPLE_NODE; clearPsTest();
   if (!psName.value.trim()) psName.value = '브랜치·워크트리';
+});
+document.getElementById('ps-example-html-btn').addEventListener('click', () => {
+  if (psScript.value.trim() && !confirm('입력해 둔 스크립트를 예제로 바꿉니다. 계속할까요?')) return;
+  psInterp.value = 'node'; psFormat.value = 'html'; psScript.value = PS_EXAMPLE_HTML; clearPsTest();
+  if (!psName.value.trim()) psName.value = '브랜치 그래픽';
+});
+// 시험 실행 결과: 실제로 패널에서 보일 모습(마크다운은 렌더링, HTML은 격리 프레임)을 미리 보여 주고, 표준 오류 출력은 따로 보여 준다.
+function showPsTestResult(res) {
+  const stderrBlock = res.stderr ? `[표준 오류 출력 — 시험 실행에서만 보입니다]\n${res.stderr}` : '';
+  psTestPreview.hidden = false;
+  if (res.format === 'html') renderHtmlFrame(psTestPreview, res.output);
+  else psTestPreview.innerHTML = renderMarkdown(res.output);
+  psTestOut.hidden = !stderrBlock; psTestOut.textContent = stderrBlock;
+  psLastProblem = `${res.format === 'html' ? '(HTML 출력 앞부분)\n' : ''}${res.output.slice(0, 3000)}${stderrBlock ? `\n\n${stderrBlock}` : ''}`;
+}
+psTestPreview.addEventListener('click', async e => {
+  const a = e.target.closest('a[data-url]');
+  if (!a) return;
+  e.preventDefault();
+  try { await window.api.openExternalUrl(a.dataset.url); } catch (err) { console.error('링크 열기 실패:', err); }
 });
 document.getElementById('ps-test-btn').addEventListener('click', async e => {
   const btn = e.currentTarget;
-  btn.disabled = true; psTestOut.hidden = false; psTestOut.textContent = '실행하는 중...';
-  try { psTestOut.textContent = await window.api.testPanelScript(psInterp.value, psScript.value, Number(psTimeout.value) || PS_DEFAULT_TIMEOUT_MS, selectedLeadId); }
-  catch (err) { psTestOut.textContent = errMsg(err); }
+  btn.disabled = true; clearPsTest(); psTestOut.hidden = false; psTestOut.textContent = '실행하는 중...';
+  try { showPsTestResult(await window.api.testPanelScript(psInterp.value, psScript.value, Number(psTimeout.value) || PS_DEFAULT_TIMEOUT_MS, selectedLeadId, psFormat.value)); }
+  catch (err) { psTestOut.hidden = false; psTestOut.textContent = errMsg(err); psLastProblem = errMsg(err); }
   finally { btn.disabled = false; if (document.getElementById('ps-errors').open) loadPsErrors(); }
 });
 // 최근 에러 보기 — 화면에서 사라진 스크립트 오류를 다시 볼 수 있게 백엔드가 파일에 남긴 기록을 보여 준다.
@@ -1186,10 +1293,10 @@ document.getElementById('ps-errors-clear').addEventListener('click', async () =>
 document.getElementById('ps-fix-btn').addEventListener('click', async e => {
   const btn = e.currentTarget;
   if (!psScript.value.trim()) { psStatus.textContent = '고칠 스크립트가 없습니다.'; return; }
-  if (psTestOut.hidden || !psTestOut.textContent.trim() || psTestOut.textContent === '실행하는 중...') { psStatus.textContent = '먼저 "▶ 시험 실행"으로 문제가 나오는 결과를 만든 뒤 눌러 주세요.'; return; }
+  if (!psLastProblem.trim()) { psStatus.textContent = '먼저 "▶ 시험 실행"으로 문제가 나오는 결과를 만든 뒤 눌러 주세요.'; return; }
   btn.disabled = true; psStatus.textContent = 'AI가 시험 실행 결과를 보고 스크립트를 고치는 중입니다(최대 2분)...';
   try {
-    psScript.value = await window.api.fixPanelScript(psScript.value, psTestOut.textContent, document.getElementById('ps-gen-request').value, psInterp.value, document.getElementById('ps-gen-model').value);
+    psScript.value = await window.api.fixPanelScript(psScript.value, psLastProblem, document.getElementById('ps-gen-request').value, psInterp.value, document.getElementById('ps-gen-model').value, psFormat.value);
     psStatus.textContent = '고쳤습니다. 코드를 읽어 보고 다시 "▶ 시험 실행"으로 확인하세요(아직 저장되지 않았습니다).';
   } catch (err) { psStatus.textContent = errMsg(err); }
   finally { btn.disabled = false; }
@@ -1201,7 +1308,7 @@ document.getElementById('ps-gen-btn').addEventListener('click', async e => {
   if (psScript.value.trim() && !confirm('입력해 둔 스크립트가 AI가 만든 것으로 바뀝니다. 계속할까요?')) return;
   btn.disabled = true; psStatus.textContent = 'AI가 스크립트를 만드는 중입니다(최대 2분)...';
   try {
-    psScript.value = await window.api.generatePanelScript(request, psInterp.value, document.getElementById('ps-gen-model').value);
+    psScript.value = await window.api.generatePanelScript(request, psInterp.value, document.getElementById('ps-gen-model').value, psFormat.value);
     psStatus.textContent = '만들었습니다. 코드를 읽어 보고, 시험 실행으로 확인한 뒤 저장하세요(아직 저장되지 않았습니다).';
     if (!psName.value.trim()) psName.value = request.slice(0, 30);
   } catch (err) { psStatus.textContent = errMsg(err); }

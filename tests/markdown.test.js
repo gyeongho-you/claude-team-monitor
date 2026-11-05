@@ -18,7 +18,17 @@ test('링크는 http/https만 허용하고 href는 #이며 주소는 data-url에
     assert.ok(!h.includes('<a '), `${bad}는 링크가 되면 안 된다: ${h}`);
   }
   assert.ok(renderMarkdown('https://example.com/a 를 보세요').includes('data-url="https://example.com/a"'), '맨 주소는 자동 링크');
-  assert.ok(!renderMarkdown('![그림](https://x.com/a.png)').includes('<img'), '이미지는 지원하지 않는다');
+  assert.ok(!renderMarkdown('![그림](https://x.com/a.png)').includes('<img'), '외부 주소 이미지는 그리지 않는다');
+});
+
+test('이미지는 base64 data: 주소만 그린다', () => {
+  const ok = renderMarkdown('![차트](data:image/png;base64,iVBORw0KGgo=)');
+  assert.strictEqual(ok, '<p><img src="data:image/png;base64,iVBORw0KGgo=" alt="차트"></p>');
+  assert.ok(renderMarkdown('![x](data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=)').includes('<img src="data:image/svg+xml;base64,'));
+  for (const bad of ['![x](data:text/html;base64,PGI+)', '![x](data:image/png;base64,AA"onerror="x)', '![x](javascript:alert(1))', '![x](file:///c:/a.png)', '![x](data:image/png,raw)']) {
+    const h = renderMarkdown(bad);
+    assert.ok(!h.includes('<img'), `${bad} → ${h}`);
+  }
 });
 
 test('제목, 목록, 표, 인용, 코드 블록, 구분선', () => {
