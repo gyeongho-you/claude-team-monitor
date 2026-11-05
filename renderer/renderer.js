@@ -841,6 +841,42 @@ spBodyEl.addEventListener('click', async e => {
   e.preventDefault();
   try { await window.api.openExternalUrl(a.dataset.url); } catch (err) { console.error('링크 열기 실패:', err); }
 });
+// 패널 너비 조절: 왼쪽 가장자리를 끌면 바뀌고, 값은 이 PC에 저장한다(더블클릭하면 기본 340px).
+const PANEL_WIDTH_KEY = 'ctm.panelWidth';
+const PANEL_WIDTH_DEFAULT = 340, PANEL_WIDTH_MIN = 240, PANEL_MAIN_MIN = 420;
+function clampPanelWidth(w) {
+  const max = Math.max(PANEL_WIDTH_MIN, window.innerWidth - PANEL_MAIN_MIN - 30); // 메인이 너무 좁아지지 않게
+  return Math.round(Math.min(max, Math.max(PANEL_WIDTH_MIN, w)));
+}
+function applyPanelWidth(w) { document.documentElement.style.setProperty('--sp-w', `${clampPanelWidth(w)}px`); }
+function savedPanelWidth() {
+  try { const v = Number(localStorage.getItem(PANEL_WIDTH_KEY)); return v > 0 ? v : PANEL_WIDTH_DEFAULT; } catch { return PANEL_WIDTH_DEFAULT; }
+}
+applyPanelWidth(savedPanelWidth());
+window.addEventListener('resize', () => applyPanelWidth(savedPanelWidth()));
+const spResizeEl = document.getElementById('sp-resize');
+spResizeEl.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  spResizeEl.setPointerCapture(e.pointerId);
+  document.body.classList.add('sp-resizing');
+  const startX = e.clientX, startW = spEl.getBoundingClientRect().width;
+  let w = startW;
+  const move = ev => { w = clampPanelWidth(startW + (startX - ev.clientX)); applyPanelWidth(w); };
+  const up = () => {
+    spResizeEl.removeEventListener('pointermove', move);
+    spResizeEl.removeEventListener('pointerup', up);
+    spResizeEl.removeEventListener('pointercancel', up);
+    document.body.classList.remove('sp-resizing');
+    try { localStorage.setItem(PANEL_WIDTH_KEY, String(w)); } catch { /* 저장 안 돼도 이번 화면에서는 적용 */ }
+  };
+  spResizeEl.addEventListener('pointermove', move);
+  spResizeEl.addEventListener('pointerup', up);
+  spResizeEl.addEventListener('pointercancel', up);
+});
+spResizeEl.addEventListener('dblclick', () => {
+  applyPanelWidth(PANEL_WIDTH_DEFAULT);
+  try { localStorage.removeItem(PANEL_WIDTH_KEY); } catch { /* 지울 게 없으면 그대로 */ }
+});
 spCollapseBtn.addEventListener('click', () => setPanelCollapsed(true));
 spExpandBtn.addEventListener('click', () => setPanelCollapsed(false));
 spRefreshBtn.addEventListener('click', async () => {
