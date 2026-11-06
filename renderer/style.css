@@ -282,14 +282,16 @@ body.modal-open { overflow: hidden; }
   overscroll-behavior: contain;
   padding: 0 16px 16px;
 }
-#help-panel .section-header {
-  margin-bottom: 8px;
-  padding-top: 16px;
+/* 헤더와 탭 줄을 한 덩어리로 고정한다(둘 사이에 틈이 생기면 스크롤 중인 본문이 비쳐 보인다) */
+#help-panel .help-sticky {
   position: sticky;
   top: 0;
   z-index: 3;
   background: var(--surface);
+  padding-top: 16px;
+  margin-bottom: 8px;
 }
+#help-panel .section-header { margin-bottom: 0; }
 .help-content { display: flex; flex-direction: column; gap: 20px; }
 .help-section h3 { margin: 0 0 8px; font-size: 13px; color: var(--accent-2); }
 .help-section img { width: 100%; border: 1px solid var(--border-2); border-radius: 4px; display: block; margin-bottom: 8px; }
@@ -1017,3 +1019,16 @@ body.sp-resizing { user-select: none; cursor: col-resize; }
 .ps-diff-same { color: var(--text-muted); }
 .ps-diff-gap { color: var(--text-dim); }
 .ps-history { margin-top: 6px; }
+
+/* 도움말 탭: 항목을 한 번에 하나씩 보여 준다(세로로 길게 이어지지 않게) */
+.help-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 4px 0 0; padding: 6px 0 8px; border-bottom: 1px solid var(--border); }
+.help-tabs-label { font-size: 11px; color: var(--text-muted); margin: 0 2px 0 6px; }
+.help-tabs-label:first-child { margin-left: 0; }
+.help-tabs button { font-size: 12px; padding: 3px 10px; border-radius: 12px; background: transparent; border: 1px solid var(--border-2); color: var(--text-soft); cursor: pointer; }
+.help-tabs button:hover { border-color: var(--accent-2); color: var(--text-bright); }
+.help-tabs button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.help-new { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 8px; background: var(--success-strong); color: #fff; vertical-align: middle; }
+.help-section[hidden] { display: none; }
+.help-section .help-list { margin: 8px 0; padding-left: 20px; color: var(--text-soft); font-size: 12px; line-height: 1.6; }
+.help-section .help-list li { margin: 3px 0; }
+.help-section p + p, .help-section p + ul, .help-section ul + p { margin-top: 8px; }

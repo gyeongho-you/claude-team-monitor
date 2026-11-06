@@ -4470,3 +4470,30 @@ tplAddBtn.addEventListener('click', async () => {
 
 updateLeadSectionVisibility();
 updateMemberSectionVisibility();
+
+// ---------------- 도움말 탭 ----------------
+// 항목을 탭으로 나눠 한 번에 하나만 보여 준다. 마지막으로 본 탭을 기억한다.
+const HELP_TAB_KEY = 'ctm.helpTab';
+function showHelpTab(key) {
+  const secs = [...document.querySelectorAll('#help-content .help-section[data-help]')];
+  if (!secs.length) return;
+  if (!secs.some(sec => sec.dataset.help === key)) key = secs[0].dataset.help;
+  secs.forEach(sec => { sec.hidden = sec.dataset.help !== key; });
+  document.querySelectorAll('#help-tabs [data-help-tab]').forEach(b => {
+    const on = b.dataset.helpTab === key;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  try { localStorage.setItem(HELP_TAB_KEY, key); } catch { /* 저장 안 돼도 이번 화면에서는 적용 */ }
+  const scroller = helpPanelEl.querySelector('.modal-scroll-inner');
+  if (scroller) scroller.scrollTop = 0;
+}
+document.getElementById('help-tabs').addEventListener('click', e => {
+  const b = e.target.closest('[data-help-tab]');
+  if (b) showHelpTab(b.dataset.helpTab);
+});
+{
+  let last = '';
+  try { last = localStorage.getItem(HELP_TAB_KEY) || ''; } catch { /* 첫 탭으로 */ }
+  showHelpTab(last);
+}
