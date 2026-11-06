@@ -1,0 +1,84 @@
+name: CI
+
+# 푸시와 PR마다 시험을 돌린다. 이 앱은 Windows에서 개발·검증했으므로 Windows 러너에서 돌린다.
+# (macOS·Linux 러너는 아직 넣지 않았다 — Tauri 크레이트 전체를 그쪽에서 빌드·시험해 본 적이 없다.)
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: npm 의존성 설치
+        run: npm ci
+
+      - name: 타입 검사
+        run: npm run typecheck
+
+      - name: JS 시험
+        run: npm test
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # 스크립트 슬롯 시험이 node·python·PowerShell을 실제로 실행한다(windows-latest에 모두 있다).
+      # 진짜 claude CLI를 부르는 시험은 #[ignore]라 여기서 돌지 않는다.
+      - name: Rust 시험
+        working-directory: src-tauri
+        run: cargo test --lib
+
+  installer:
+    # 설치 파일(NSIS)이 만들어지고, 앱이 실행 중에 읽는 파일(dist/teamMemberServer.js, resources/)이 들어 있는지 확인한다.
+    needs: test
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: 설치 파일 빌드
+        run: npm run tauri:build:release
+
+      - name: 설치 파일 목록 확인
+        shell: bash
+        run: |
+          ls -la src-tauri/target/release/bundle/nsis/
+          test -n "$(ls src-tauri/target/release/bundle/nsis/*-setup.exe 2>/dev/null)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error

@@ -982,6 +982,13 @@ body.sp-resizing { user-select: none; cursor: col-resize; }
 .ps-group { display: none; flex-direction: column; gap: 6px; }
 .ps-group.show { display: flex; }
 .settings-check { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 12px; color: var(--text-soft); }
+#env-banner:empty { display: none; }
+#env-banner .env-card { position: relative; margin: 6px 16px; padding: 8px 36px 8px 12px; border: 1px solid #d29922; border-radius: 8px; background: var(--surface); font-size: 12px; line-height: 1.5; }
+#env-banner .env-card.error { border-color: var(--danger); }
+#env-banner .env-card strong { display: block; margin-bottom: 2px; }
+#env-banner .env-card ul { margin: 2px 0 0; padding-left: 18px; }
+#env-banner .env-card .env-close { position: absolute; top: 4px; right: 6px; background: transparent; border: none; color: inherit; cursor: pointer; font-size: 14px; padding: 2px 6px; opacity: 0.7; }
+#env-banner .env-card .env-recheck { margin-top: 4px; background: transparent; color: var(--text-soft); border: 1px solid var(--border-2); border-radius: 6px; padding: 1px 10px; font-size: 11px; cursor: pointer; }
 #update-banner:empty { display: none; }
 #update-banner .update-card { position: relative; margin: 6px 16px; padding: 8px 36px 8px 12px; border: 1px solid var(--accent-2); border-radius: 8px; background: var(--surface); font-size: 12px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 #update-banner .update-card.info { border-color: var(--border-2); color: var(--text-soft); }
@@ -989,3 +996,24 @@ body.sp-resizing { user-select: none; cursor: col-resize; }
 #update-banner .update-card .update-close { position: absolute; top: 4px; right: 6px; background: transparent; border: none; color: inherit; cursor: pointer; font-size: 14px; padding: 2px 6px; opacity: 0.7; }
 .model-change-warning { margin: 8px 0; }
 #model-change-status { margin-top: 8px; font-size: 12px; color: var(--text-soft); }
+
+/* AI가 작업하는 동안 "스크립트 설정" 영역만 덮고 진행 상태를 보여 주는 표시(다른 화면·설정은 그대로 조작 가능) */
+.ps-group[data-mode="script"] { position: relative; }
+.ai-busy { position: absolute; inset: 0; z-index: 50; background: var(--overlay); border-radius: 6px; }
+.ai-busy[hidden] { display: none; }
+.ai-busy-card { position: sticky; top: 30vh; margin: 0 auto; width: fit-content; background: var(--surface); color: var(--text); border: 1px solid var(--border-2); border-radius: 10px; padding: 20px 28px; text-align: center; max-width: 340px; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); }
+.ai-busy-title { font-size: 15px; font-weight: 600; margin: 12px 0 6px; color: var(--text-bright); }
+.ai-busy-time { font-size: 13px; color: var(--accent-2); font-variant-numeric: tabular-nums; }
+.ai-busy-hint { font-size: 12px; color: var(--text-muted); margin-top: 10px; }
+.ai-busy-spinner { width: 34px; height: 34px; margin: 0 auto; border: 3px solid var(--border-2); border-top-color: var(--accent-2); border-radius: 50%; animation: ai-busy-spin 0.9s linear infinite; }
+@keyframes ai-busy-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .ai-busy-spinner { animation-duration: 3s; } }
+
+/* "AI로 수정" 뒤 바뀐 부분 보기 */
+.ps-diff { margin: 6px 0 0; padding: 8px; max-height: 260px; overflow: auto; font-size: 12px; line-height: 1.45; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; white-space: pre; }
+.ps-diff span { display: block; }
+.ps-diff-add { background: rgba(106, 153, 85, 0.22); color: var(--text-bright); }
+.ps-diff-del { background: rgba(241, 76, 76, 0.2); color: var(--text-soft); text-decoration: line-through; text-decoration-color: rgba(241, 76, 76, 0.5); }
+.ps-diff-same { color: var(--text-muted); }
+.ps-diff-gap { color: var(--text-dim); }
+.ps-history { margin-top: 6px; }

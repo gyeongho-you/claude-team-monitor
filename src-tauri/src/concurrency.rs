@@ -68,7 +68,7 @@ where
     T: Send + 'static,
 {
     let tx = {
-        let mut guard = lead_queues().lock().unwrap();
+        let mut guard = lead_queues().lock().unwrap_or_else(|e| e.into_inner());
         guard
             .entry(internal_id.to_string())
             .or_insert_with(|| LeadQueue { tx: spawn_lead_actor() })

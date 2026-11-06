@@ -170,7 +170,9 @@ mod tests {
         assert_eq!(get_status(None, None), "");
     }
 
+    // 진짜 `claude agents --json`을 실행한다 — claude CLI가 없는 환경(CI 등)에서는 통과할 수 없으므로 기본 실행에서 뺐다. 수동: cargo test -- --ignored parses_real_claude_agents_output
     #[test]
+    #[ignore = "실제 claude CLI가 필요하다. 수동으로만: cargo test -- --ignored parses_real_claude_agents_output"]
     fn parses_real_claude_agents_output() {
         let value = get_agents_json().expect("claude agents --json 실행 실패 — PATH에 claude가 있는지 확인 필요");
         assert!(value.is_array(), "claude agents --json은 배열을 돌려줘야 한다");

@@ -151,7 +151,9 @@
   async function getPanelContent(slotId, leadId, force) { return invoke('get_panel_content_command', { slotId, leadId: leadId || null, force: !!force }); }
   async function testPanelScript(interpreter, script, timeoutMs, leadId, outputFormat, allowJs) { return invoke('test_panel_script_command', { interpreter, script, timeoutMs, leadId: leadId || null, outputFormat: outputFormat || 'markdown', allowJs: !!allowJs }); }
   async function generatePanelScript(request, interpreter, model, outputFormat, allowJs) { return invoke('generate_panel_script_command', { request, interpreter, model, outputFormat: outputFormat || 'markdown', allowJs: !!allowJs }); }
+  async function modifyPanelScript(script, change, history, lastRun, interpreter, model, outputFormat, allowJs) { return invoke('modify_panel_script_command', { script, change, history: history || [], lastRun: lastRun || '', interpreter, model, outputFormat: outputFormat || 'markdown', allowJs: !!allowJs }); }
   async function fixPanelScript(script, problem, note, interpreter, model, outputFormat, allowJs) { return invoke('fix_panel_script_command', { script, problem, note, interpreter, model, outputFormat: outputFormat || 'markdown', allowJs: !!allowJs }); }
+  async function checkEnvironment() { return invoke('check_environment_command'); }
   async function restartApp() { return invoke('restart_app_command'); }
   async function registerPanelFrame(html) { return invoke('register_panel_frame_command', { html }); }
   async function revealPanelPath(path, leadId) { return invoke('reveal_panel_path_command', { path, leadId: leadId || null }); }
@@ -173,6 +175,7 @@
   async function getAppVersion() {
     return invoke('get_app_version_command');
   }
+  async function getBuildTime() { return invoke('get_build_time_command'); }
   async function checkForUpdate() {
     return invoke('check_for_update_command');
   }
@@ -376,8 +379,10 @@
     getPanelScriptErrors,
     clearPanelScriptErrors,
     fixPanelScript,
+    modifyPanelScript,
     registerPanelFrame,
     restartApp,
+    checkEnvironment,
     revealPanelPath,
     openPanelPathInEditor,
     savePanelContent,
@@ -392,6 +397,7 @@
     listUserSkills,
     readUserSkill,
     getAppVersion,
+    getBuildTime,
     checkForUpdate,
     openReleasePage,
     endLeadWork,

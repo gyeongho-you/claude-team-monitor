@@ -28,6 +28,7 @@ mod paths;
 mod resume;
 mod session_model;
 mod session_registry;
+mod env_check;
 mod panel_actions;
 mod panel_frames;
 mod panel_script;
@@ -103,7 +104,9 @@ pub fn run() {
       side_panel::generate_panel_script_command,
       side_panel::get_panel_script_reference_command,
       side_panel::fix_panel_script_command,
+      side_panel::modify_panel_script_command,
       side_panel::get_panel_script_errors_command,
+      env_check::check_environment_command,
       panel_frames::register_panel_frame_command,
       panel_frames::restart_app_command,
       panel_actions::reveal_panel_path_command,
@@ -118,6 +121,7 @@ pub fn run() {
       app_skills::list_user_skills_command,
       app_skills::read_user_skill_command,
       update_check::get_app_version_command,
+      update_check::get_build_time_command,
       update_check::check_for_update_command,
       update_check::open_release_page_command,
       daemon_state::get_blocked_needs_command,

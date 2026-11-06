@@ -303,7 +303,7 @@ fn build_lead_record_row(lead: &LeadRecord, offline: bool) -> SessionRow {
 fn compute_offline_leads(leads: &[LeadRecord], agent_ids: &HashSet<String>, now: i64, grace_ms: i64, members: &[MemberRecord]) -> Vec<LeadRecord> {
     let mut offline = Vec::new();
     {
-        let mut guard = state().lock().unwrap();
+        let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
         for lead in leads {
             let is_present = agent_ids.contains(&lead.id) || has_live_member(&lead.id, members, agent_ids);
             let result = track_first_miss(&mut guard.lead_first_miss_at, is_present, &lead.id, now, grace_ms);
@@ -322,7 +322,7 @@ fn compute_offline_leads(leads: &[LeadRecord], agent_ids: &HashSet<String>, now:
 // leads.json 데이터로 새로) 카드를 만들어 "그대로 있는 것처럼" 보여준다.
 fn build_grace_rows(leads: &[LeadRecord], agent_ids: &HashSet<String>, offline_leads: &[LeadRecord], members: &[MemberRecord]) -> Vec<SessionRow> {
     let offline_ids: HashSet<String> = offline_leads.iter().map(|l| l.id.clone()).collect();
-    let guard = state().lock().unwrap();
+    let guard = state().lock().unwrap_or_else(|e| e.into_inner());
     let mut rows = Vec::new();
     for lead in leads {
         if agent_ids.contains(&lead.id) || offline_ids.contains(&lead.id) {
@@ -422,7 +422,7 @@ pub(crate) fn reconcile_member_ids_in(dir: &std::path::Path, agents: &[AgentEntr
             );
             let _ = fs::remove_file(dir.join(format!("{}.json", m.member_id)));
             {
-                let mut guard = state().lock().unwrap();
+                let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
                 if let Some(v) = guard.member_first_miss_at.remove(&m.member_id) {
                     guard.member_first_miss_at.insert(matched_id.to_string(), v);
                 }
@@ -460,7 +460,7 @@ pub fn cleanup_stale_members(members: &[MemberRecord], agent_id_set: &HashSet<St
 
 pub(crate) fn cleanup_stale_members_in(dir: &std::path::Path, members: &[MemberRecord], agent_id_set: &HashSet<String>, now: i64) {
     let current_member_ids: HashSet<String> = members.iter().map(|m| m.member_id.clone()).collect();
-    let mut guard = state().lock().unwrap();
+    let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
     for m in members {
         if now - m.created_at < MEMBER_CLEANUP_GRACE_MS {
             continue;
@@ -599,7 +599,7 @@ async fn get_live_session_rows_inner_impl() -> Vec<SessionRow> {
     // liveRows.filter(isLead).forEach(...)와 동일 — 다음 폴링에서 이 팀장이 그레이스 구간에
     // 들어가면 이 스냅숏을 그대로 재사용한다.
     {
-        let mut guard = state().lock().unwrap();
+        let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
         for row in live_rows.iter().filter(|r| r.is_lead) {
             if let Some(id) = &row.agent.id {
                 guard.last_known_live_lead_row.insert(id.clone(), row.clone());
@@ -654,7 +654,7 @@ async fn get_live_session_rows_inner_impl() -> Vec<SessionRow> {
     // 확정되게 한다(main.ts 주석 참고 — 안 그러면 앱을 껐다 켰을 때 이미 죽어있던 팀장이 유예가
     // 끝날 때까지 작업 탭에도 히스토리 탭에도 안 보이는 공백이 생긴다).
     let grace_ms = {
-        let mut guard = state().lock().unwrap();
+        let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
         let ms = if guard.has_completed_first_poll { LEAD_OFFLINE_GRACE_MS } else { 0 };
         guard.has_completed_first_poll = true;
         ms
@@ -665,7 +665,7 @@ async fn get_live_session_rows_inner_impl() -> Vec<SessionRow> {
     let grace_rows = build_grace_rows(&leads, &agent_id_set, &offline_leads, &members);
 
     {
-        let mut guard = state().lock().unwrap();
+        let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
         let lead_current_ids: HashSet<String> = leads.iter().map(|l| l.id.clone()).collect();
         prune_missing_keys(&mut guard.last_known_live_lead_row, &lead_current_ids);
     }
@@ -717,6 +717,12 @@ pub(crate) fn record_failed_launch_dir(dir: &str) {
 }
 
 pub(crate) fn compute_unapproved_dirs(leads: &[LeadRecord]) -> Vec<UnapprovedDir> {
+    compute_unapproved_dirs_with(leads, &check_directory_claude_ready)
+}
+
+/// 승인 여부를 판단하는 함수를 바꿔 끼울 수 있는 버전 — 시험이 이 PC의 ~/.claude.json 내용에 기대지 않게 하려는 것이다
+/// (그 파일이 없으면 check_directory_claude_ready는 "준비됨"으로 판단한다 — 실패해도 막지 않는 설계).
+pub(crate) fn compute_unapproved_dirs_with(leads: &[LeadRecord], check: &dyn Fn(&str) -> crate::claude_readiness::Readiness) -> Vec<UnapprovedDir> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut dirs: Vec<String> = Vec::new();
     let remembered: Vec<String> = failed_launch_dirs().lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -737,7 +743,7 @@ pub(crate) fn compute_unapproved_dirs(leads: &[LeadRecord]) -> Vec<UnapprovedDir
     }
     dirs.into_iter()
         .filter_map(|dir| {
-            let readiness = check_directory_claude_ready(&dir);
+            let readiness = check(&dir);
             if readiness.ready {
                 failed_launch_dirs().lock().unwrap_or_else(|e| e.into_inner()).retain(|d| d != &dir);
                 failed_launch_at().lock().unwrap_or_else(|e| e.into_inner()).remove(&dir);
@@ -788,6 +794,7 @@ mod tests {
     // 반환되는지 확인한다(락을 잡은 채로 반환을 깜빡해 다음 호출이 영구히 멈추는 회귀를 잡는다).
     #[tokio::test]
     async fn async_command_wrapper_delegates_through_the_global_lock() {
+        let _g = crate::board_state::test_global_lock();
         let first = get_live_session_rows().await;
         let second = get_live_session_rows().await;
         assert_eq!(first.len(), second.len(), "연속 호출 모두 정상적으로 반환돼야 한다(락이 안 풀리는 회귀 방지)");
@@ -797,6 +804,7 @@ mod tests {
     // 기준으로 검증한다(1d285d20=팀장, 846ee1cb=바로 이 세션인 팀원).
     #[tokio::test]
     async fn builds_rows_for_this_running_lead_and_member() {
+        let _g = crate::board_state::test_global_lock();
         let rows = get_live_session_rows_inner().await;
         let member_row = rows.iter().find(|r| r.agent.id.as_deref() == Some("846ee1cb"));
         if let Some(row) = member_row {
@@ -896,6 +904,7 @@ mod tests {
     // memberFirstMissAt/lastMemberStatus도 옛 키에서 새 키로 같이 옮겨져야 한다.
     #[test]
     fn reconcile_member_ids_renames_when_found_under_new_id_via_session_id() {
+        let _g = crate::board_state::test_global_lock();
         let dir = temp_members_dir("rename");
         let old = fake_member("old-member-id", "lead-1", Some("shared-session"), 1_000);
         register_member_in(&dir, &old);
@@ -903,7 +912,7 @@ mod tests {
         struct Cleanup;
         impl Drop for Cleanup {
             fn drop(&mut self) {
-                let mut guard = state().lock().unwrap();
+                let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
                 guard.member_first_miss_at.remove("old-member-id");
                 guard.member_first_miss_at.remove("new-member-id");
                 guard.last_member_status.remove("old-member-id");
@@ -912,7 +921,7 @@ mod tests {
         }
         let _cleanup = Cleanup;
         {
-            let mut guard = state().lock().unwrap();
+            let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
             guard.member_first_miss_at.insert("old-member-id".to_string(), 500);
             guard.last_member_status.insert("old-member-id".to_string(), "busy".to_string());
         }
@@ -924,7 +933,7 @@ mod tests {
         assert!(!dir.join("old-member-id.json").exists(), "옛 파일은 지워져야 한다");
         assert!(dir.join("new-member-id.json").exists(), "새 파일로 옮겨 써야 한다");
         {
-            let guard = state().lock().unwrap();
+            let guard = state().lock().unwrap_or_else(|e| e.into_inner());
             assert!(guard.member_first_miss_at.get("old-member-id").is_none());
             assert_eq!(guard.member_first_miss_at.get("new-member-id"), Some(&500));
             assert_eq!(guard.last_member_status.get("new-member-id").map(String::as_str), Some("busy"));
@@ -948,6 +957,7 @@ mod tests {
     // 안 지우고, 오래전에 등록됐고 처음 못 잡힌 시각 이후 MEMBER_MISS_GRACE_MS가 지난 것만 지운다.
     #[test]
     fn cleanup_stale_members_removes_only_expired_absentees() {
+        let _g = crate::board_state::test_global_lock();
         let dir = temp_members_dir("cleanup");
         let now = 10_000_000i64;
 
@@ -965,13 +975,13 @@ mod tests {
         struct Cleanup;
         impl Drop for Cleanup {
             fn drop(&mut self) {
-                state().lock().unwrap().member_first_miss_at.remove("expired-member");
+                state().lock().unwrap_or_else(|e| e.into_inner()).member_first_miss_at.remove("expired-member");
             }
         }
         let _cleanup = Cleanup;
         // 이 팀원의 first-miss가 이미 유예 시간보다 훨씬 전에 기록돼있었다고 미리 세팅 — 실제로는
         // 이전 폴링에서 track_first_miss가 채워뒀을 값이다.
-        state().lock().unwrap().member_first_miss_at.insert("expired-member".to_string(), now - MEMBER_MISS_GRACE_MS - 1);
+        state().lock().unwrap_or_else(|e| e.into_inner()).member_first_miss_at.insert("expired-member".to_string(), now - MEMBER_MISS_GRACE_MS - 1);
 
         cleanup_stale_members_in(&dir, &members, &agent_id_set, now);
 
@@ -979,7 +989,7 @@ mod tests {
         assert!(dir.join("fresh-member.json").exists(), "방금 생성된 팀원은 부재해도 유예 안이라 안 지워져야 한다");
         assert!(!dir.join("expired-member.json").exists(), "유예가 지난 오래된 팀원은 지워져야 한다");
         assert!(
-            state().lock().unwrap().member_first_miss_at.get("expired-member").is_none(),
+            state().lock().unwrap_or_else(|e| e.into_inner()).member_first_miss_at.get("expired-member").is_none(),
             "지워진 팀원의 first-miss 기록도 즉시 같이 지워져야 한다"
         );
         let _ = fs::remove_dir_all(&dir);
@@ -1007,6 +1017,7 @@ mod tests {
     // 건드리므로 이 테스트만 쓰는 고유 id를 써서 다른 테스트와 안 겹치게 한다.
     #[test]
     fn offline_grace_transition_with_synthetic_lead() {
+        let _g = crate::board_state::test_global_lock();
         let lead_id = "test-fake-lead-offline-grace-xyz";
         let lead = fake_lead(lead_id);
         let leads = vec![lead.clone()];
@@ -1017,14 +1028,14 @@ mod tests {
         struct Cleanup(&'static str);
         impl Drop for Cleanup {
             fn drop(&mut self) {
-                let mut guard = state().lock().unwrap();
+                let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
                 guard.lead_first_miss_at.remove(self.0);
                 guard.last_known_live_lead_row.remove(self.0);
             }
         }
         let _cleanup = Cleanup(lead_id);
         {
-            let mut guard = state().lock().unwrap();
+            let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
             guard.lead_first_miss_at.remove(lead_id);
             guard.last_known_live_lead_row.remove(lead_id);
         }
@@ -1058,6 +1069,7 @@ mod tests {
     // 돌려줘야 대화창이 순간적으로 사라지지 않는다(main.ts 주석 참고).
     #[test]
     fn grace_rows_reuse_last_known_live_snapshot() {
+        let _g = crate::board_state::test_global_lock();
         let lead_id = "test-fake-lead-grace-cache-xyz";
         let lead = fake_lead(lead_id);
         let leads = vec![lead.clone()];
@@ -1067,7 +1079,7 @@ mod tests {
         struct Cleanup(&'static str);
         impl Drop for Cleanup {
             fn drop(&mut self) {
-                let mut guard = state().lock().unwrap();
+                let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
                 guard.lead_first_miss_at.remove(self.0);
                 guard.last_known_live_lead_row.remove(self.0);
             }
@@ -1076,7 +1088,7 @@ mod tests {
 
         let cached_row = build_lead_record_row(&lead, false);
         {
-            let mut guard = state().lock().unwrap();
+            let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
             guard.last_known_live_lead_row.insert(lead_id.to_string(), cached_row.clone());
         }
 
@@ -1091,8 +1103,16 @@ mod tests {
     // compute_unapproved_dirs와 failed_launch_dirs()는 프로세스 전체가 같이 쓰는 전역 상태다. 시험들이 병렬로 돌면서 서로의 전역 항목을 보고
     // 결과가 달라지던 간헐 실패(시험 격리 결함 — 실제 앱 동작의 결함은 아니다)를 막으려고, 이 전역을 건드리거나 전체 결과를 단정하는 시험은 이 잠금으로 한 번에 하나씩 돈다.
     fn global_state_lock() -> std::sync::MutexGuard<'static, ()> {
-        static L: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        L.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+        crate::board_state::test_global_lock()
+    }
+
+    /// 시험용 판단 함수: "xyz"가 들어간 가짜 경로는 승인이 안 된 것으로, 나머지는 승인된 것으로 본다(실제 ~/.claude.json과 무관).
+    fn fake_not_ready(dir: &str) -> crate::claude_readiness::Readiness {
+        if dir.contains("xyz") {
+            crate::claude_readiness::Readiness { ready: false, reason: Some("시험: 승인 안 됨".to_string()) }
+        } else {
+            crate::claude_readiness::Readiness { ready: true, reason: None }
+        }
     }
 
     // compute_unapproved_dirs — claude 최초 실행 승인이 안 된(실제로 ~/.claude.json에 등록됐을 리
@@ -1106,7 +1126,7 @@ mod tests {
         lead.approved_members = vec!["C:\\definitely-not-trusted-dir-xyz".to_string(), "C:\\another-untrusted-dir-xyz".to_string()];
         let leads = vec![lead];
 
-        let result = compute_unapproved_dirs(&leads);
+        let result = compute_unapproved_dirs_with(&leads, &fake_not_ready);
         // 전역에 다른 곳이 기억해 둔 폴더가 섞여 있어도 이 시험이 보는 두 폴더만 센다: 각각 정확히 한 번(중복 없음)이어야 한다
         for d in ["C:\\definitely-not-trusted-dir-xyz", "C:\\another-untrusted-dir-xyz"] {
             assert_eq!(result.iter().filter(|r| r.dir == d).count(), 1, "{d}는 중복 없이 한 번만 잡혀야 한다: {result:?}");
@@ -1123,7 +1143,7 @@ mod tests {
         let _g = global_state_lock();
         let dir = "C:\\failed-launch-untrusted-dir-xyz";
         record_failed_launch_dir(dir);
-        let result = compute_unapproved_dirs(&[]);
+        let result = compute_unapproved_dirs_with(&[], &fake_not_ready);
         failed_launch_dirs().lock().unwrap_or_else(|e| e.into_inner()).retain(|d| d != dir);
         assert!(result.iter().any(|r| r.dir == dir), "{result:?}");
     }
@@ -1133,7 +1153,7 @@ mod tests {
         let _g = global_state_lock();
         // 팀장이 없으면 결과는 "실패한 시작으로 전역에 기억된 폴더"에서만 나올 수 있다 — 그 밖의 폴더가 나오면 안 된다
         let remembered: Vec<String> = failed_launch_dirs().lock().unwrap_or_else(|e| e.into_inner()).clone();
-        let result = compute_unapproved_dirs(&[]);
+        let result = compute_unapproved_dirs_with(&[], &fake_not_ready);
         assert!(result.iter().all(|r| remembered.contains(&r.dir)), "{result:?} / 기억된 폴더 {remembered:?}");
     }
 
@@ -1142,6 +1162,7 @@ mod tests {
     // 함수들의 개별 테스트가 검증한다).
     #[tokio::test]
     async fn refresh_board_command_returns_without_hanging() {
+        let _g = crate::board_state::test_global_lock();
         let result = refresh_board_command().await;
         let _ = (result.rows.len(), result.requests.len(), result.unapproved_dirs.len(), result.stall_alerts.len());
     }

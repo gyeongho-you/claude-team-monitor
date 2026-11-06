@@ -5,17 +5,40 @@
 
 use crate::paths::app_log_path;
 use std::io::Write;
+use std::path::Path;
+
+/// app.log가 이 크기를 넘으면 app.log.1로 넘기고 새로 시작한다(이전 .1은 덮어쓴다 — 로그가 끝없이 커지지 않게, 최대 약 2배까지만 쓴다).
+const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
+
+pub(crate) fn rotate_if_large(path: &Path, max_bytes: u64) {
+    let too_big = std::fs::metadata(path).map(|m| m.len() > max_bytes).unwrap_or(false);
+    if !too_big {
+        return;
+    }
+    let mut rotated = path.as_os_str().to_owned();
+    rotated.push(".1");
+    let rotated = std::path::PathBuf::from(rotated);
+    let _ = std::fs::remove_file(&rotated);
+    // 옮기지 못해도(다른 프로세스가 잡고 있는 등) 로그 기록 자체는 계속한다
+    let _ = std::fs::rename(path, &rotated);
+}
 
 pub fn log_critical(message: &str) {
     eprintln!("{message}");
+    log_critical_to(&app_log_path(), message);
+}
+
+/// 경로를 받는 버전 — 시험이 사용자의 실제 app.log를 건드리지 않고 임시 파일에 쓰게 하려고 나눴다.
+pub(crate) fn log_critical_to(path: &Path, message: &str) {
     let line = format!("[{}] {message}\n", chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"));
-    let path = app_log_path();
+    let path = path.to_path_buf();
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             eprintln!("[log_critical] app.log 디렉토리를 만들지 못했습니다: {e}");
             return;
         }
     }
+    rotate_if_large(&path, MAX_LOG_BYTES);
     let result = std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut f| f.write_all(line.as_bytes()));
     // 로그 자체가 실패해도(디스크 문제 등) 앱 동작에는 지장이 없어야 한다 — main.ts의 try/catch와
     // 동일한 fail-open.
@@ -28,17 +51,42 @@ pub fn log_critical(message: &str) {
 mod tests {
     use super::*;
 
+    fn temp_log(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ctm_log_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
     #[test]
-    fn appends_timestamped_line_to_app_log() {
-        let path = app_log_path();
-        let before = std::fs::read_to_string(&path).unwrap_or_default();
-        log_critical("[log_critical test] 유일한 마커 문자열 abc123");
-        let after = std::fs::read_to_string(&path).unwrap_or_default();
-        assert!(after.len() > before.len(), "app.log가 새 줄만큼 늘어나야 한다");
+    fn appends_timestamped_line_to_the_log_file() {
+        // 사용자의 실제 app.log가 아니라 임시 파일에 쓴다
+        let path = temp_log("app.log");
+        log_critical_to(&path, "[log_critical test] 유일한 마커 문자열 abc123");
+        let after = std::fs::read_to_string(&path).unwrap();
         assert!(after.contains("abc123"));
         // "[2026-09-21T..." 형태의 ISO8601 타임스탬프 프리픽스가 붙어있어야 한다.
-        let new_part = &after[before.len()..];
-        assert!(new_part.starts_with('['), "타임스탬프 대괄호로 시작해야 한다: {new_part}");
-        assert!(new_part.contains('T') && new_part.contains('Z'), "ISO8601 UTC 타임스탬프 형식이어야 한다: {new_part}");
+        assert!(after.starts_with('['), "타임스탬프 대괄호로 시작해야 한다: {after}");
+        assert!(after.contains('T') && after.contains('Z'), "ISO8601 UTC 타임스탬프 형식이어야 한다: {after}");
+        log_critical_to(&path, "둘째 줄");
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2, "이어서 쓴다");
+    }
+
+    #[test]
+    fn a_large_log_is_rotated_to_dot_1_and_the_old_dot_1_is_replaced() {
+        let path = temp_log("app.log");
+        let rotated = std::path::PathBuf::from(format!("{}.1", path.display()));
+        std::fs::write(&path, "A".repeat(100)).unwrap();
+        rotate_if_large(&path, 1000); // 작으면 그대로
+        assert!(path.exists() && !rotated.exists());
+        rotate_if_large(&path, 50); // 크면 .1로
+        assert!(!path.exists() && std::fs::read_to_string(&rotated).unwrap() == "A".repeat(100));
+        std::fs::write(&path, "B".repeat(100)).unwrap();
+        rotate_if_large(&path, 50); // 한 번 더 — 이전 .1을 덮어쓴다(.2, .3이 쌓이지 않는다)
+        assert_eq!(std::fs::read_to_string(&rotated).unwrap(), "B".repeat(100));
+        // 회전 뒤 기록은 새 파일로 이어진다
+        log_critical_to(&path, "새 파일 첫 줄");
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+        // 파일이 아예 없어도 조용히 지나간다
+        rotate_if_large(&temp_log("none.log"), 10);
     }
 }

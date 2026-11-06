@@ -395,7 +395,7 @@ async fn resume_retry_from_with_ports(
     start_attempt: i64,
 ) -> Option<String> {
     let result = resume_retry_from_inner_with_ports(ports, internal_id, current, message, start_attempt).await;
-    let mut guard = state().lock().unwrap();
+    let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
     guard.resume_retry_status.remove(internal_id);
     result
 }
@@ -409,7 +409,7 @@ async fn resume_retry_from_inner_with_ports(
 ) -> Option<String> {
     for attempt in start_attempt..=MAX_RESUME_ATTEMPTS {
         {
-            let mut guard = state().lock().unwrap();
+            let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
             guard
                 .resume_retry_status
                 .insert(internal_id.to_string(), ResumeRetryStatus { attempt: attempt as i32, max: MAX_RESUME_ATTEMPTS as i32 });
@@ -856,6 +856,7 @@ mod tests {
     // ---- 시나리오 1: 정상 케이스(1회 성공) ----
     #[tokio::test(start_paused = true)]
     async fn resume_spawn_with_retry_succeeds_on_first_attempt_without_any_retry_gap() {
+        let _g = crate::board_state::test_global_lock();
         let call_count = Arc::new(AtomicI64::new(0));
         let call_count_clone = call_count.clone();
         let ports = ResumePorts {
@@ -878,6 +879,7 @@ mod tests {
     // ---- 시나리오 2: 1차 실패 후 재시도 성공 ----
     #[tokio::test(start_paused = true)]
     async fn resume_retries_after_first_attempt_fails_and_second_succeeds() {
+        let _g = crate::board_state::test_global_lock();
         let call_count = Arc::new(AtomicI64::new(0));
         let call_count_clone = call_count.clone();
         let ports = ResumePorts {
@@ -901,13 +903,14 @@ mod tests {
         assert_eq!(call_count.load(Ordering::SeqCst), 2, "1차 실패 + 2차 성공으로 정확히 두 번 호출돼야 한다");
 
         // 성공 후에는 resumeRetryStatus가 지워져 있어야 한다(재시도 완료 후 정리).
-        let guard = state().lock().unwrap();
+        let guard = state().lock().unwrap_or_else(|e| e.into_inner());
         assert!(!guard.resume_retry_status.contains_key("internal-2"));
     }
 
     // ---- 시나리오 3: 전부 실패 ----
     #[tokio::test(start_paused = true)]
     async fn resume_gives_up_after_max_attempts_all_fail() {
+        let _g = crate::board_state::test_global_lock();
         let call_count = Arc::new(AtomicI64::new(0));
         let call_count_clone = call_count.clone();
         let ports = ResumePorts {
@@ -924,13 +927,14 @@ mod tests {
         assert_eq!(result, None);
         assert_eq!(call_count.load(Ordering::SeqCst), MAX_RESUME_ATTEMPTS, "MAX_RESUME_ATTEMPTS(3)번 전부 시도하고 포기해야 한다");
 
-        let guard = state().lock().unwrap();
+        let guard = state().lock().unwrap_or_else(|e| e.into_inner());
         assert!(!guard.resume_retry_status.contains_key("internal-3"), "실패로 끝나도 재시도 상태는 정리돼야 한다");
     }
 
     // ---- 시나리오 4: 짧은 id 불일치로 감지되는 포크 ----
     #[tokio::test(start_paused = true)]
     async fn resume_once_detects_fork_by_id_mismatch_and_cleans_up() {
+        let _g = crate::board_state::test_global_lock();
         let cleanup_called_with: Arc<StdMutex<Option<String>>> = Arc::new(StdMutex::new(None));
         let cleanup_called_with_clone = cleanup_called_with.clone();
         let ports = ResumePorts {
@@ -938,14 +942,14 @@ mod tests {
             run_claude_bg: Arc::new(|_flags, _prompt, _cwd| Box::pin(async { Some("forked-copy-id".to_string()) })),
             agents_alive: Arc::new(|_id| Box::pin(async { Ok(true) })),
             cleanup_fork: Arc::new(move |id| {
-                *cleanup_called_with_clone.lock().unwrap() = Some(id);
+                *cleanup_called_with_clone.lock().unwrap_or_else(|e| e.into_inner()) = Some(id);
             }),
             schedule_healing: Arc::new(|_, _, _, _| panic!("포크로 감지되면 resumeOnce가 None을 반환하므로 healing이 예약되면 안 된다")),
         };
         let current = fake_lead("internal-4", "original-id", "session-4", "C:\\fake");
         let result = resume_once_with_ports(&ports, "internal-4", &current, "hi", 1).await;
         assert_eq!(result, None, "id가 다르면 성공으로 취급하면 안 된다");
-        assert_eq!(cleanup_called_with.lock().unwrap().as_deref(), Some("forked-copy-id"), "복사본 정리가 정확한 id로 호출돼야 한다");
+        assert_eq!(cleanup_called_with.lock().unwrap_or_else(|e| e.into_inner()).as_deref(), Some("forked-copy-id"), "복사본 정리가 정확한 id로 호출돼야 한다");
     }
 
     // resumeRetryFrom의 크래시 감지(A-3) — resumeOnce는 성공하지만(같은 id로 돌아옴)
@@ -953,6 +957,7 @@ mod tests {
     // 한다.
     #[tokio::test(start_paused = true)]
     async fn resume_retry_treats_post_settle_crash_as_failure_and_retries() {
+        let _g = crate::board_state::test_global_lock();
         let attempt_count = Arc::new(AtomicI64::new(0));
         let attempt_count_clone = attempt_count.clone();
         let ports = ResumePorts {
@@ -981,6 +986,7 @@ mod tests {
     // 메시지로 다시 띄우면 중지가 무효가 되므로(실제로 같은 메시지가 두 번 실행됐다) 재시도하지 말아야 한다.
     #[tokio::test(start_paused = true)]
     async fn resume_retry_does_not_relaunch_when_the_lead_was_just_emergency_stopped() {
+        let _g = crate::board_state::test_global_lock();
         let attempt_count = Arc::new(AtomicI64::new(0));
         let attempt_count_clone = attempt_count.clone();
         let ports = ResumePorts {
@@ -1003,6 +1009,7 @@ mod tests {
     // 한다(A-3 주석 그대로).
     #[tokio::test(start_paused = true)]
     async fn resume_retry_fails_closed_when_survival_check_itself_errors() {
+        let _g = crate::board_state::test_global_lock();
         let ports = ResumePorts {
             run_claude_bg: Arc::new(|_flags, _prompt, _cwd| Box::pin(async { Some("lead1".to_string()) })),
             agents_alive: Arc::new(|_id| Box::pin(async { Err("agents --json 조회 실패".to_string()) })),

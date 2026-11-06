@@ -469,7 +469,7 @@ pub async fn end_lead_work(internal_id: String) -> EndLeadWorkOutcome {
     // 카드가 "온라인"으로 잘못 남아있는 걸 확인해 추가함). 정지 자체가 실패했으면 아직 살아있을 수
     // 있으므로 건드리지 않고 평소 유예 판정을 그대로 둔다.
     if lead_stopped {
-        board_state().lock().unwrap().lead_first_miss_at.insert(current_lead_id, 0);
+        board_state().lock().unwrap_or_else(|e| e.into_inner()).lead_first_miss_at.insert(current_lead_id, 0);
     }
     EndLeadWorkOutcome { success: lead_stopped, member_failures }
 }
@@ -483,7 +483,7 @@ pub async fn emergency_stop_lead(internal_id: String) -> bool {
         stopped = stop_session(lead.id.clone()).await;
     }
     if stopped {
-        board_state().lock().unwrap().lead_first_miss_at.insert(lead.id.clone(), 0);
+        board_state().lock().unwrap_or_else(|e| e.into_inner()).lead_first_miss_at.insert(lead.id.clone(), 0);
         // 직전 resume의 생존 확인·백그라운드 복구가 이 중지를 크래시로 오판해 같은 메시지로 다시 띄우지 않게 표시해 둔다.
         crate::board_state::mark_emergency_stopped(&lead.id);
     } else {
@@ -553,7 +553,7 @@ pub async fn cleanup_leads_stuck_on_startup_dialog(live_lead_rows: &[SessionRow]
             "[cleanup_leads_stuck_on_startup_dialog] 팀장 {id}가 워크스페이스 신뢰 승인 다이얼로그에 멈춰있어 정리합니다 — 그 디렉토리에서 터미널로 claude를 한 번 실행해 승인해야 합니다."
         ));
         stop_session(id.clone()).await;
-        board_state().lock().unwrap().lead_first_miss_at.insert(id.clone(), 0);
+        board_state().lock().unwrap_or_else(|e| e.into_inner()).lead_first_miss_at.insert(id.clone(), 0);
     }
     let warning_for = |target_dir: &str| -> String {
         format!(

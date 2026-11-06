@@ -959,6 +959,40 @@ pub async fn fix_panel_script_command(script: String, problem: String, note: Str
     Ok(code)
 }
 
+/// "AI로 수정": 지금 스크립트와 사용자의 변경 요청을 모델에게 주고 수정본을 받아 온다. 저장은 사용자가 코드를 보고 직접 한다.
+#[tauri::command]
+pub async fn modify_panel_script_command(script: String, change: String, history: Option<Vec<String>>, last_run: Option<String>, interpreter: String, model: String, output_format: Option<String>, allow_js: Option<bool>) -> Result<String, String> {
+    let allow_js = allow_js.unwrap_or(false);
+    let output_format = output_format.unwrap_or_else(default_output_format);
+    if !crate::panel_script::OUTPUT_FORMATS.contains(&output_format.as_str()) {
+        return Err("출력 형식이 올바르지 않습니다.".to_string());
+    }
+    if script.trim().is_empty() || script.chars().count() > crate::panel_script::MAX_SCRIPT_CHARS {
+        return Err("수정할 스크립트가 비었거나 너무 깁니다. 비어 있으면 \"AI로 만들기\"를 쓰세요.".to_string());
+    }
+    let change = change.trim().to_string();
+    if change.is_empty() || change.chars().count() > 1000 {
+        return Err("바꾸고 싶은 내용을 1000자 이하로 적어 주세요.".to_string());
+    }
+    if !crate::panel_script::INTERPRETERS.contains(&interpreter.as_str()) || !AI_MODELS.contains(&model.as_str()) {
+        return Err("실행 환경 또는 모델이 올바르지 않습니다.".to_string());
+    }
+    // 이전 요청 이력은 최근 20개·각 1000자까지만, 시험 실행 결과는 4000자까지만 받는다(요청문이 끝없이 커지지 않게).
+    let history: Vec<String> = history.unwrap_or_default().into_iter().rev().take(20).collect::<Vec<_>>().into_iter().rev()
+        .map(|h| h.chars().take(1000).collect()).collect();
+    let last_run: String = last_run.unwrap_or_default().chars().take(4000).collect();
+    if AI_BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return Err("다른 AI 작업이 진행 중입니다. 잠시 후 다시 누르세요.".to_string());
+    }
+    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_modify_prompt(&script, &change, &history, &last_run, &interpreter, &output_format, allow_js))).await;
+    AI_BUSY.store(false, Ordering::SeqCst);
+    let code = crate::panel_script::extract_code_block(&result.map_err(|e| e.to_string())??);
+    if code.trim().is_empty() {
+        return Err("모델이 수정한 스크립트를 내놓지 못했습니다. 요청을 바꿔 다시 시도하세요.".to_string());
+    }
+    Ok(code)
+}
+
 #[tauri::command]
 pub fn get_panel_script_reference_command() -> String {
     crate::panel_script::reference_markdown()

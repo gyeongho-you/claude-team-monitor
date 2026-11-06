@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "claude-team-monitor",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "identifier": "net.g1project.claude-team-monitor",
   "build": {
     "frontendDist": "../renderer"
@@ -18,7 +18,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'self' http://ctmframe.localhost ctmframe:"
     }
   },
   "bundle": {

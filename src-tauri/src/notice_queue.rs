@@ -347,7 +347,7 @@ pub fn is_lead_too_busy_to_interrupt(agent: &AgentEntry) -> bool {
 
 pub(crate) fn compute_finished_member_notifications(live_rows: &[SessionRow], leads: &[LeadRecord]) -> Vec<(String, String)> {
     let mut to_notify: Vec<(String, String)> = Vec::new();
-    let mut guard = state().lock().unwrap();
+    let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
     for row in live_rows.iter().filter(|r| !r.is_lead) {
         let Some(id) = row.agent.id.clone() else { continue };
         let status = get_status(row.agent.status.as_deref(), row.agent.state.as_deref());
@@ -1128,15 +1128,16 @@ mod tests {
 
     #[test]
     fn compute_finished_member_notifications_fires_exactly_once_on_busy_to_idle_transition() {
+        let _g = crate::board_state::test_global_lock();
         let key = "test-notify-member-compute-xyz";
         struct Cleanup(&'static str);
         impl Drop for Cleanup {
             fn drop(&mut self) {
-                state().lock().unwrap().last_member_status.remove(self.0);
+                state().lock().unwrap_or_else(|e| e.into_inner()).last_member_status.remove(self.0);
             }
         }
         let _cleanup = Cleanup(key);
-        state().lock().unwrap().last_member_status.remove(key);
+        state().lock().unwrap_or_else(|e| e.into_inner()).last_member_status.remove(key);
 
         let leads = vec![fake_lead("internal-notify", "lead-notify")];
 
@@ -1158,12 +1159,13 @@ mod tests {
 
     #[tokio::test]
     async fn notify_leads_of_finished_members_with_queue_forwards_computed_notifications() {
+        let _g = crate::board_state::test_global_lock();
         let key = "test-notify-member-wiring-xyz";
-        state().lock().unwrap().last_member_status.insert(key.to_string(), "busy".to_string());
+        state().lock().unwrap_or_else(|e| e.into_inner()).last_member_status.insert(key.to_string(), "busy".to_string());
         struct Cleanup(&'static str);
         impl Drop for Cleanup {
             fn drop(&mut self) {
-                state().lock().unwrap().last_member_status.remove(self.0);
+                state().lock().unwrap_or_else(|e| e.into_inner()).last_member_status.remove(self.0);
             }
         }
         let _cleanup = Cleanup(key);
@@ -1176,13 +1178,13 @@ mod tests {
         notify_leads_of_finished_members_with_queue(&rows, &leads, move |internal_id, message| {
             let captured_inner = captured_clone.clone();
             async move {
-                captured_inner.lock().unwrap().push((internal_id.clone(), message));
+                captured_inner.lock().unwrap_or_else(|e| e.into_inner()).push((internal_id.clone(), message));
                 "fake-notice-id".to_string()
             }
         })
         .await;
 
-        let calls = captured.lock().unwrap();
+        let calls = captured.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "internal-wire");
     }

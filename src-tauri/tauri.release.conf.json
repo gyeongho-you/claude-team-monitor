@@ -1,0 +1,20 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "claude-team-monitor",
+    "shortDescription": "Claude Code 팀장/팀원 세션 모니터",
+    "longDescription": "여러 저장소에 걸친 작업을 헤드리스 Claude Code 세션(팀장 1개 + 팀원)으로 분담시키고 한 화면에서 모니터링·관리하는 데스크톱 앱.",
+    "resources": {
+      "../dist/teamMemberServer.js": "dist/teamMemberServer.js",
+      "../resources/skills/team-lead/SKILL.md": "resources/skills/team-lead/SKILL.md"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["Korean", "English"]
+      }
+    }
+  }
+}

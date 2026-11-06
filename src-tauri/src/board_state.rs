@@ -79,7 +79,7 @@ impl BoardState {
 pub const EMERGENCY_STOP_SUPPRESS_RETRY_MS: i64 = 30_000;
 
 pub fn mark_emergency_stopped(short_id: &str) {
-    state().lock().unwrap().emergency_stopped_at.insert(short_id.to_string(), crate::timing::now_ms());
+    state().lock().unwrap_or_else(|e| e.into_inner()).emergency_stopped_at.insert(short_id.to_string(), crate::timing::now_ms());
 }
 
 #[cfg(test)]
@@ -88,20 +88,30 @@ mod emergency_stop_tests {
 
     #[test]
     fn marker_is_scoped_to_the_stopped_lead_and_expires() {
+        let _g = crate::board_state::test_global_lock();
         assert!(!recently_emergency_stopped("never-stopped-lead", EMERGENCY_STOP_SUPPRESS_RETRY_MS));
         mark_emergency_stopped("stopped-lead-x");
         assert!(recently_emergency_stopped("stopped-lead-x", EMERGENCY_STOP_SUPPRESS_RETRY_MS));
         assert!(!recently_emergency_stopped("other-lead-y", EMERGENCY_STOP_SUPPRESS_RETRY_MS), "다른 팀장에게는 영향이 없다");
         // 오래전에 멈춘 것은 더 이상 억제하지 않는다
-        state().lock().unwrap().emergency_stopped_at.insert("old-stop-lead".to_string(), crate::timing::now_ms() - EMERGENCY_STOP_SUPPRESS_RETRY_MS - 1000);
+        state().lock().unwrap_or_else(|e| e.into_inner()).emergency_stopped_at.insert("old-stop-lead".to_string(), crate::timing::now_ms() - EMERGENCY_STOP_SUPPRESS_RETRY_MS - 1000);
         assert!(!recently_emergency_stopped("old-stop-lead", EMERGENCY_STOP_SUPPRESS_RETRY_MS));
     }
+}
+
+/// 시험 전용: 이 모듈의 전역 상태(state())와 그것을 간접적으로 바꾸는 실제 보드 갱신을 쓰는 시험들이 한 번에 하나씩만 돌게 하는 크레이트 공용 잠금.
+/// 시험이 병렬로 돌면서 한 시험이 넣어 둔 전역 값을 다른 시험(특히 실제 보드를 갱신하며 없어진 키를 정리하는 시험)이 지워 간헐적으로 실패하던 문제를 막는다
+/// (그 실패가 잠금 오염으로 번져 다른 시험까지 죽였고, Drop 안의 lock().unwrap()이 이중 패닉으로 프로세스를 abort시켜 원인을 가렸다).
+#[cfg(test)]
+pub(crate) fn test_global_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: OnceLock<Mutex<()>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub fn recently_emergency_stopped(short_id: &str, within_ms: i64) -> bool {
     state()
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .emergency_stopped_at
         .get(short_id)
         .map_or(false, |&at| crate::timing::now_ms() - at <= within_ms)
@@ -143,14 +153,14 @@ fn is_process_alive(_pid: i64) -> bool {
 /// spawn하면 다른 board_state 접근자가 그동안(짧지만) 기다려야 한다.
 pub fn is_attach_terminal_open_for(session_short_id: &str) -> bool {
     let pids = {
-        let guard = state().lock().unwrap();
+        let guard = state().lock().unwrap_or_else(|e| e.into_inner());
         match guard.attach_terminal_pids.get(session_short_id) {
             Some(p) if !p.is_empty() => p.clone(),
             _ => return false,
         }
     };
     let alive: Vec<i64> = pids.iter().copied().filter(|&pid| is_process_alive(pid)).collect();
-    let mut guard = state().lock().unwrap();
+    let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
     if alive.is_empty() {
         guard.attach_terminal_pids.remove(session_short_id);
         false
@@ -231,7 +241,7 @@ pub fn migrate_last_known_live_lead_row(old_id: &str, new_id: &str) {
     if old_id == new_id {
         return;
     }
-    let mut guard = state().lock().unwrap();
+    let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
     if let Some(mut row) = guard.last_known_live_lead_row.remove(old_id) {
         row.agent.id = Some(new_id.to_string());
         guard.last_known_live_lead_row.insert(new_id.to_string(), row);
@@ -246,6 +256,7 @@ mod tests {
     // 유예 지나면 만료, 만료돼도 기록은 안 지움)를 그대로 검증한다.
     #[test]
     fn tracks_first_miss_transitions() {
+        let _g = crate::board_state::test_global_lock();
         let mut map = HashMap::new();
 
         // 살아있으면 항상 Present, 기록 없음.
@@ -350,24 +361,25 @@ mod tests {
     // 보존).
     #[test]
     fn migrate_last_known_live_lead_row_moves_cache_entry_to_new_id() {
+        let _g = crate::board_state::test_global_lock();
         let old_id = "migrate-test-old-id";
         let new_id = "migrate-test-new-id";
 
         struct Cleanup(&'static str, &'static str);
         impl Drop for Cleanup {
             fn drop(&mut self) {
-                let mut guard = state().lock().unwrap();
+                let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
                 guard.last_known_live_lead_row.remove(self.0);
                 guard.last_known_live_lead_row.remove(self.1);
             }
         }
         let _cleanup = Cleanup(old_id, new_id);
 
-        state().lock().unwrap().last_known_live_lead_row.insert(old_id.to_string(), fake_row_for_migration_test(old_id, "migrate-test-internal"));
+        state().lock().unwrap_or_else(|e| e.into_inner()).last_known_live_lead_row.insert(old_id.to_string(), fake_row_for_migration_test(old_id, "migrate-test-internal"));
 
         migrate_last_known_live_lead_row(old_id, new_id);
 
-        let guard = state().lock().unwrap();
+        let guard = state().lock().unwrap_or_else(|e| e.into_inner());
         assert!(guard.last_known_live_lead_row.get(old_id).is_none(), "옛 id 밑 항목은 지워져야 한다");
         let migrated = guard.last_known_live_lead_row.get(new_id).expect("새 id 밑으로 옮겨져야 한다");
         assert_eq!(migrated.agent.id.as_deref(), Some(new_id), "옮긴 행의 내부 agent.id도 새 id로 갱신돼야 한다");
@@ -378,8 +390,9 @@ mod tests {
     // 한다 — 안전한 no-op.
     #[test]
     fn migrate_last_known_live_lead_row_is_noop_when_no_cache_entry_exists() {
+        let _g = crate::board_state::test_global_lock();
         migrate_last_known_live_lead_row("migrate-test-missing-old", "migrate-test-missing-new");
-        let guard = state().lock().unwrap();
+        let guard = state().lock().unwrap_or_else(|e| e.into_inner());
         assert!(guard.last_known_live_lead_row.get("migrate-test-missing-new").is_none());
     }
 
@@ -394,11 +407,12 @@ mod tests {
     // 읽고 쓰이는지 — β/δ가 채울 실제 로직은 없지만, 저장소 자체는 동작해야 한다.
     #[test]
     fn new_alpha_fields_are_reachable_through_the_shared_mutex() {
+        let _g = crate::board_state::test_global_lock();
         let key = "board-state-alpha-fields-test-key";
         struct Cleanup(&'static str);
         impl Drop for Cleanup {
             fn drop(&mut self) {
-                let mut guard = state().lock().unwrap();
+                let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
                 guard.resume_retry_status.remove(self.0);
                 guard.attach_terminal_pids.remove(self.0);
                 guard.member_first_miss_at.remove(self.0);
@@ -407,7 +421,7 @@ mod tests {
         let _cleanup = Cleanup(key);
 
         {
-            let mut guard = state().lock().unwrap();
+            let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
             guard.resume_retry_status.insert(key.to_string(), ResumeRetryStatus { attempt: 1, max: 3 });
             guard.attach_terminal_pids.insert(key.to_string(), vec![1234, 5678]);
             // member_first_miss_at는 lead_first_miss_at과 값 타입이 같으므로 같은 track_first_miss
@@ -416,7 +430,7 @@ mod tests {
             assert_eq!(result, FirstMissResult::FirstMiss);
         }
 
-        let guard = state().lock().unwrap();
+        let guard = state().lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(guard.resume_retry_status.get(key), Some(&ResumeRetryStatus { attempt: 1, max: 3 }));
         assert_eq!(guard.attach_terminal_pids.get(key), Some(&vec![1234, 5678]));
         assert_eq!(guard.member_first_miss_at.get(key), Some(&1_000));
@@ -426,11 +440,12 @@ mod tests {
     // false로 정리(맵에서 제거), 하나라도 살아있으면 true + 죽은 것만 걸러서 갱신.
     #[test]
     fn is_attach_terminal_open_for_reports_liveness_and_prunes_dead_pids() {
+        let _g = crate::board_state::test_global_lock();
         let key = "board-state-attach-terminal-test-key";
         struct Cleanup(&'static str);
         impl Drop for Cleanup {
             fn drop(&mut self) {
-                state().lock().unwrap().attach_terminal_pids.remove(self.0);
+                state().lock().unwrap_or_else(|e| e.into_inner()).attach_terminal_pids.remove(self.0);
             }
         }
         let _cleanup = Cleanup(key);
@@ -440,16 +455,16 @@ mod tests {
 
         // 절대 살아있을 수 없는 PID(0은 System Idle Process라 tasklist가 실제 프로세스로 안 잡음,
         // 아주 큰 값도 마찬가지)만 있으면 false로 정리되고, 맵에서도 지워져야 한다.
-        state().lock().unwrap().attach_terminal_pids.insert(key.to_string(), vec![999_999_999]);
+        state().lock().unwrap_or_else(|e| e.into_inner()).attach_terminal_pids.insert(key.to_string(), vec![999_999_999]);
         assert!(!is_attach_terminal_open_for(key));
-        assert!(state().lock().unwrap().attach_terminal_pids.get(key).is_none(), "죽은 PID만 있었으면 맵에서 지워져야 한다");
+        assert!(state().lock().unwrap_or_else(|e| e.into_inner()).attach_terminal_pids.get(key).is_none(), "죽은 PID만 있었으면 맵에서 지워져야 한다");
 
         // 지금 이 테스트 프로세스 자신의 PID는 항상 살아있다 — true를 반환해야 한다.
         let my_pid = std::process::id() as i64;
-        state().lock().unwrap().attach_terminal_pids.insert(key.to_string(), vec![my_pid, 999_999_999]);
+        state().lock().unwrap_or_else(|e| e.into_inner()).attach_terminal_pids.insert(key.to_string(), vec![my_pid, 999_999_999]);
         assert!(is_attach_terminal_open_for(key), "살아있는 PID가 하나라도 있으면 true여야 한다");
         assert_eq!(
-            state().lock().unwrap().attach_terminal_pids.get(key),
+            state().lock().unwrap_or_else(|e| e.into_inner()).attach_terminal_pids.get(key),
             Some(&vec![my_pid]),
             "죽은 PID는 걸러지고 살아있는 것만 남아야 한다"
         );

@@ -443,7 +443,7 @@ fn run_stall_watchdog(live_rows: &[SessionRow], leads: &[LeadRecord], members: &
         .collect();
 
     {
-        let mut guard = state().lock().unwrap();
+        let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
 
         let live_member_session_ids: HashSet<String> = member_rows_by_id.values().map(|r| r.agent.session_id.clone()).collect();
         for row in member_rows_by_id.values() {
@@ -477,7 +477,7 @@ fn run_stall_watchdog(live_rows: &[SessionRow], leads: &[LeadRecord], members: &
     let existing_alerts = load_stall_alerts();
     let mut candidates: Vec<Candidate> = Vec::new();
     {
-        let guard = state().lock().unwrap();
+        let guard = state().lock().unwrap_or_else(|e| e.into_inner());
         for m in members {
             let Some(&member_row) = member_rows_by_id.get(m.member_id.as_str()) else { continue };
             let Some(lead) = leads.iter().find(|l| l.id == m.lead_id) else { continue };
@@ -521,7 +521,7 @@ fn run_stall_watchdog(live_rows: &[SessionRow], leads: &[LeadRecord], members: &
 
         // 여기서부터는 실제로 Haiku를 호출한다 — 지금 마크해서 실패해도 쿨다운 동안 재시도 안 함.
         {
-            let mut guard = state().lock().unwrap();
+            let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
             guard.stall_last_checked_at.insert(member_row.agent.session_id.clone(), now_ms());
         }
 
@@ -535,7 +535,7 @@ fn run_stall_watchdog(live_rows: &[SessionRow], leads: &[LeadRecord], members: &
             }
         };
         let idle_since = {
-            let guard = state().lock().unwrap();
+            let guard = state().lock().unwrap_or_else(|e| e.into_inner());
             guard.member_idle_since.get(&member_row.agent.session_id).copied().unwrap_or_else(now_ms)
         };
         let idle_minutes = (((now_ms() - idle_since) as f64) / 60000.0).round().max(1.0) as i64;

@@ -46,6 +46,11 @@ fn packaged_root() -> Option<PathBuf> {
     std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf))
 }
 
+/// 이 경로가 실행 파일 옆(설치된 배치)에 있는지 — false면 개발용 폴백(빌드한 PC의 소스 폴더)을 쓰고 있다는 뜻이다.
+pub fn is_next_to_exe(p: &Path) -> bool {
+    packaged_root().map_or(false, |dir| p.starts_with(dir))
+}
+
 fn repo_root_dev() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
 }

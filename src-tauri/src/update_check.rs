@@ -130,6 +130,16 @@ pub fn get_app_version_command() -> String {
     current_version().to_string()
 }
 
+/// 이 실행 파일을 빌드한 시각(유닉스 초). 같은 버전 번호의 빌드끼리 구분하는 데 쓴다.
+pub(crate) fn build_unix_seconds() -> u64 {
+    option_env!("CTM_BUILD_UNIX").and_then(|s| s.parse().ok()).unwrap_or(0)
+}
+
+#[tauri::command]
+pub fn get_build_time_command() -> u64 {
+    build_unix_seconds()
+}
+
 #[tauri::command]
 pub async fn check_for_update_command() -> UpdateCheckResult {
     let current = current_version().to_string();

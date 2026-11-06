@@ -1193,9 +1193,14 @@ function updatePsJsUi() {
 }
 function psJsOn() { return psFormat.value === 'html' && psAllowJs.checked; }
 let psLastProblem = '';
-function clearPsTest() { psTestOut.hidden = true; psTestOut.textContent = ''; psTestPreview.hidden = true; psTestPreview.innerHTML = ''; psLastProblem = ''; }
+function clearPsTest() { psTestOut.hidden = true; psTestOut.textContent = ''; psTestPreview.hidden = true; psTestPreview.innerHTML = ''; psLastProblem = ''; psLastRunScript = ''; }
 let psEditingId = null;
+let psHistory = []; // 이번 편집에서 AI에게 한 요청들(오래된 순) — "AI로 수정"에 같이 보낸다
+let psPrev = null; // AI가 바꾸기 직전 상태 {script, history} — 되돌리기용
+let psLastRunScript = ''; // 마지막 시험 실행을 한 스크립트 본문(그 결과가 지금 스크립트의 것인지 가려내는 용도)
+let psFormGen = 0; // 폼이 다른 슬롯/새 슬롯으로 바뀔 때마다 올라간다 — AI 작업 중 폼이 바뀌면 늦게 온 결과를 버리기 위한 표시
 const PS_DEFAULT_TIMEOUT_MS = 10000;
+let psAiScript = ''; // AI가 마지막으로 채워 준 스크립트 — 사용자가 고치지 않고 저장하려 하면 확인을 한 번 더 묻는다
 const PS_MODEL_NAMES = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus', fable: 'Fable' };
 
 function updatePsFormVisibility() {
@@ -1230,7 +1235,7 @@ function renderPanelSettings() {
 }
 
 function resetPsForm() {
-  psEditingId = null;
+  psEditingId = null; psFormGen++; psResetAiState();
   psName.value = ''; psMode.value = 'auto'; psPreset.value = 'artifact-reports'; psScope.value = 'all';
   psLeadInstruction.value = ''; psAiInstruction.value = ''; psModel.value = 'sonnet'; psInclude.value = 'none'; psAutoUpdate.checked = false;
   psInterp.value = 'node'; psTimeout.value = PS_DEFAULT_TIMEOUT_MS; psScript.value = ''; psFormat.value = 'markdown'; psAllowJs.checked = false; updatePsJsUi(); clearPsTest();
@@ -1259,6 +1264,11 @@ psSaveBtn.addEventListener('click', async () => {
   try {
     const existing = psEditingId ? (panelConfig.slots || []).find(s => s.id === psEditingId) : null;
     const input = psInputFromForm(existing ? existing.enabled : true);
+    // AI가 만든(또는 고친) 코드를 한 글자도 안 바꾼 채 저장하려는 경우, 저장하면 이 PC에서 사용자 권한으로 몇 초마다 실행된다는 점을 한 번 더 확인한다
+    if (input.mode === 'script' && psAiScript && input.script === psAiScript) {
+      if (!confirm('AI가 만든 스크립트를 수정하지 않은 채 저장합니다.\n\n저장하면 이 PC에서 내 계정 권한으로 몇 초마다 자동 실행됩니다(파일 삭제·프로그램 실행·외부 전송도 가능한 권한입니다).\n코드를 끝까지 읽어 보셨나요?')) throw new Error('저장을 취소했습니다. 코드를 읽어 본 뒤 다시 저장하세요.');
+      psAiScript = '';
+    }
     // 음수·소수 같은 값은 백엔드가 영어 기술 메시지로 거부하므로 여기서 먼저 알기 쉽게 알려 준다
     if (input.mode === 'script' && !(Number.isInteger(input.timeoutMs) && input.timeoutMs >= 500 && input.timeoutMs <= 600000)) throw new Error('제한 시간은 500~600000ms 사이의 정수로 입력하세요.');
     panelConfig = await window.api.savePanelSlot(input);
@@ -1273,7 +1283,7 @@ panelSlotListEl.addEventListener('click', async e => {
   if (edit) {
     const s = (panelConfig.slots || []).find(x => x.id === edit.dataset.psEdit);
     if (!s) return;
-    psEditingId = s.id; psName.value = s.name; psMode.value = s.mode; psPreset.value = s.preset; psScope.value = s.scope;
+    psEditingId = s.id; psFormGen++; psResetAiState(); psName.value = s.name; psMode.value = s.mode; psPreset.value = s.preset; psScope.value = s.scope;
     psLeadInstruction.value = s.mode === 'lead' ? s.instruction : ''; psAiInstruction.value = s.mode === 'ai' ? s.instruction : '';
     psModel.value = s.aiModel; psInclude.value = s.aiInclude || 'none'; psAutoUpdate.checked = !!s.autoUpdate;
     psInterp.value = s.interpreter || 'node'; psTimeout.value = s.timeoutMs || PS_DEFAULT_TIMEOUT_MS; psScript.value = s.mode === 'script' ? s.script : ''; psFormat.value = s.outputFormat || 'markdown'; psAllowJs.checked = !!s.allowJs; updatePsJsUi(); clearPsTest();
@@ -1688,13 +1698,15 @@ psTestPreview.addEventListener('click', async e => {
   e.preventDefault();
   try { await window.api.openExternalUrl(a.dataset.url); } catch (err) { console.error('링크 열기 실패:', err); }
 });
-document.getElementById('ps-test-btn').addEventListener('click', async e => {
-  const btn = e.currentTarget;
+async function runPsTest() {
+  const btn = document.getElementById('ps-test-btn');
+  const ran = psScript.value;
   btn.disabled = true; clearPsTest(); psTestOut.hidden = false; psTestOut.textContent = '실행하는 중...';
-  try { showPsTestResult(await window.api.testPanelScript(psInterp.value, psScript.value, Number(psTimeout.value) || PS_DEFAULT_TIMEOUT_MS, selectedLeadId, psFormat.value, psJsOn())); }
+  try { showPsTestResult(await window.api.testPanelScript(psInterp.value, ran, Number(psTimeout.value) || PS_DEFAULT_TIMEOUT_MS, selectedLeadId, psFormat.value, psJsOn())); }
   catch (err) { psTestOut.hidden = false; psTestOut.textContent = errMsg(err); psLastProblem = errMsg(err); }
-  finally { btn.disabled = false; if (document.getElementById('ps-errors').open) loadPsErrors(); }
-});
+  finally { psLastRunScript = ran; btn.disabled = false; if (document.getElementById('ps-errors').open) loadPsErrors(); }
+}
+document.getElementById('ps-test-btn').addEventListener('click', () => { runPsTest(); });
 // 최근 에러 보기 — 화면에서 사라진 스크립트 오류를 다시 볼 수 있게 백엔드가 파일에 남긴 기록을 보여 준다.
 const PS_ERR_KIND = { spawn: '실행 실패', timeout: '시간 초과', overflow: '출력이 너무 커서 중단', exit: '비정상 종료', stderr: '오류 출력(정상 종료)' };
 async function loadPsErrors() {
@@ -1719,11 +1731,18 @@ document.getElementById('ps-fix-btn').addEventListener('click', async e => {
   if (!psScript.value.trim()) { psStatus.textContent = '고칠 스크립트가 없습니다.'; return; }
   if (!psLastProblem.trim()) { psStatus.textContent = '먼저 "▶ 시험 실행"으로 문제가 나오는 결과를 만든 뒤 눌러 주세요.'; return; }
   btn.disabled = true; psStatus.textContent = 'AI가 시험 실행 결과를 보고 스크립트를 고치는 중입니다(최대 2분)...';
+  const busyDone = aiBusyStart('AI가 스크립트를 고치는 중입니다');
+  const gen = psFormGen;
   try {
-    psScript.value = await window.api.fixPanelScript(psScript.value, psLastProblem, document.getElementById('ps-gen-request').value, psInterp.value, document.getElementById('ps-gen-model').value, psFormat.value, psJsOn());
+    const fixed = await window.api.fixPanelScript(psScript.value, psLastProblem, document.getElementById('ps-gen-request').value, psInterp.value, document.getElementById('ps-gen-model').value, psFormat.value, psJsOn());
+    if (gen !== psFormGen) { psStatus.textContent = 'AI가 고치는 동안 다른 슬롯으로 옮겨서 그 결과는 버렸습니다.'; return; }
+    psRememberBeforeAi();
+    psScript.value = psAiScript = fixed;
+    psRenderAiMeta(psPrev ? psPrev.script : '', fixed);
+    if (psAutoTestOn()) { busyDone(); await runPsTest(); }
     psStatus.textContent = '고쳤습니다. 코드를 읽어 보고 다시 "▶ 시험 실행"으로 확인하세요(아직 저장되지 않았습니다).';
   } catch (err) { psStatus.textContent = errMsg(err); }
-  finally { btn.disabled = false; }
+  finally { busyDone(); btn.disabled = false; }
 });
 document.getElementById('ps-gen-btn').addEventListener('click', async e => {
   const btn = e.currentTarget;
@@ -1731,12 +1750,99 @@ document.getElementById('ps-gen-btn').addEventListener('click', async e => {
   if (!request) { psStatus.textContent = '만들고 싶은 내용을 먼저 적어 주세요.'; return; }
   if (psScript.value.trim() && !confirm('입력해 둔 스크립트가 AI가 만든 것으로 바뀝니다. 계속할까요?')) return;
   btn.disabled = true; psStatus.textContent = 'AI가 스크립트를 만드는 중입니다(최대 2분)...';
+  const busyDone = aiBusyStart('AI가 스크립트를 만드는 중입니다');
+  const gen = psFormGen;
   try {
-    psScript.value = await window.api.generatePanelScript(request, psInterp.value, document.getElementById('ps-gen-model').value, psFormat.value, psJsOn());
+    const generated = await window.api.generatePanelScript(request, psInterp.value, document.getElementById('ps-gen-model').value, psFormat.value, psJsOn());
+    if (gen !== psFormGen) { psStatus.textContent = 'AI가 만드는 동안 다른 슬롯으로 옮겨서 그 결과는 버렸습니다.'; return; }
+    psRememberBeforeAi();
+    psScript.value = psAiScript = generated;
+    psHistory = [request];
+    psRenderAiMeta(psPrev ? psPrev.script : '', generated);
     psStatus.textContent = '만들었습니다. 코드를 읽어 보고, 시험 실행으로 확인한 뒤 저장하세요(아직 저장되지 않았습니다).';
     if (!psName.value.trim()) psName.value = request.slice(0, 30);
   } catch (err) { psStatus.textContent = errMsg(err); }
-  finally { btn.disabled = false; }
+  finally { busyDone(); btn.disabled = false; }
+});
+// AI 작업 중 "스크립트 설정" 영역만 막는 표시: 경과 시간을 1초마다 올려 "돌아가는 중"임을 보여 준다. 반환값을 호출하면 닫힌다.
+// 요소는 사라지지 않으므로 다른 탭에 갔다 돌아와도 작업 중이면 그대로 보인다.
+function aiBusyStart(title) {
+  const box = document.getElementById('ai-busy');
+  const t0 = Date.now();
+  const timeEl = document.getElementById('ai-busy-time');
+  document.getElementById('ai-busy-title').textContent = title;
+  const tick = () => { timeEl.textContent = `${Math.floor((Date.now() - t0) / 1000)}초 경과 · 보통 10~60초, 최대 2분`; };
+  tick();
+  const timer = setInterval(tick, 1000);
+  box.hidden = false;
+  return () => { clearInterval(timer); box.hidden = true; };
+}
+// AI가 스크립트를 바꾸기 직전 내용(과 그때까지의 요청 이력)을 한 단계 보관해 되돌릴 수 있게 한다(만들기·수정·고치기 모두).
+const psUndoBtn = document.getElementById('ps-undo-btn');
+function psRememberBeforeAi() { psPrev = psScript.value.trim() ? { script: psScript.value, history: [...psHistory] } : null; psUndoBtn.hidden = psPrev === null; }
+function psResetAiState() {
+  psHistory = []; psPrev = null; psLastRunScript = '';
+  psUndoBtn.hidden = true;
+  document.getElementById('ps-history').hidden = true;
+  document.getElementById('ps-diff').hidden = true;
+}
+function psAutoTestOn() { return document.getElementById('ps-auto-test').checked; }
+{
+  const box = document.getElementById('ps-auto-test');
+  try { box.checked = localStorage.getItem('ctm.psAutoTest') === '1'; } catch { /* 저장 안 돼도 꺼진 채로 시작 */ }
+  box.addEventListener('change', () => { try { localStorage.setItem('ctm.psAutoTest', box.checked ? '1' : '0'); } catch { /* 이번 화면에서만 적용 */ } });
+}
+// 이번 편집에서 한 요청 목록과 "바뀐 부분 보기"(전후 차이)를 갱신한다. before가 비어 있으면(처음 만든 경우) 차이는 숨긴다.
+function psRenderAiMeta(before, after) {
+  const hist = document.getElementById('ps-history');
+  hist.hidden = psHistory.length === 0;
+  hist.textContent = psHistory.length
+    ? `이번 편집에서 AI에게 한 요청 ${psHistory.length}개 — 다음 "AI로 수정"에 함께 전달됩니다: ` + psHistory.map((h, i) => `${i + 1}) ${h.length > 40 ? h.slice(0, 40) + '…' : h}`).join(' · ')
+    : '';
+  const box = document.getElementById('ps-diff');
+  if (!String(before).trim() || before === after) { box.hidden = true; return; }
+  const lines = diffLines(before, after);
+  const { added, removed } = summarizeDiff(lines);
+  document.getElementById('ps-diff-sum').textContent = `바뀐 부분 보기 — +${added}줄 / −${removed}줄 (아직 저장되지 않았습니다)`;
+  const keep = lines.map(() => false);
+  lines.forEach((l, i) => { if (l.type !== 'same') for (let k = Math.max(0, i - 2); k <= Math.min(lines.length - 1, i + 2); k++) keep[k] = true; });
+  let out = '', gap = false;
+  lines.forEach((l, i) => {
+    if (!keep[i]) { if (!gap) { out += '<span class="ps-diff-gap">⋯</span>'; gap = true; } return; }
+    gap = false;
+    out += `<span class="ps-diff-${l.type}">${l.type === 'add' ? '+' : l.type === 'del' ? '−' : ' '} ${escapeHtml(l.text)}</span>`;
+  });
+  document.getElementById('ps-diff-body').innerHTML = out;
+  box.hidden = false; box.open = true;
+}
+psUndoBtn.addEventListener('click', () => {
+  if (!psPrev) return;
+  psScript.value = psPrev.script; psHistory = psPrev.history; psAiScript = ''; psPrev = null; psUndoBtn.hidden = true;
+  psRenderAiMeta('', '');
+  psStatus.textContent = 'AI가 바꾸기 전 스크립트로 되돌렸습니다(아직 저장되지 않았습니다).';
+});
+document.getElementById('ps-modify-btn').addEventListener('click', async e => {
+  const btn = e.currentTarget;
+  const change = document.getElementById('ps-gen-request').value.trim();
+  if (!psScript.value.trim()) { psStatus.textContent = '수정할 스크립트가 없습니다. 비어 있으면 "AI로 만들기"를 쓰세요.'; return; }
+  if (!change) { psStatus.textContent = '바꾸고 싶은 내용을 위 입력칸에 먼저 적어 주세요.'; return; }
+  btn.disabled = true; psStatus.textContent = 'AI가 지금 스크립트를 바탕으로 수정하는 중입니다(최대 2분)...';
+  const busyDone = aiBusyStart('AI가 스크립트를 수정하는 중입니다');
+  const gen = psFormGen;
+  try {
+    const before = psScript.value;
+    const lastRun = psLastRunScript === before ? psLastProblem : ''; // 지금 스크립트로 한 시험 실행일 때만 결과를 같이 보낸다
+    const code = await window.api.modifyPanelScript(before, change, psHistory, lastRun, psInterp.value, document.getElementById('ps-gen-model').value, psFormat.value, psJsOn());
+    if (gen !== psFormGen) { psStatus.textContent = 'AI가 수정하는 동안 다른 슬롯으로 옮겨서 그 결과는 버렸습니다.'; return; }
+    psPrev = { script: before, history: [...psHistory] }; psUndoBtn.hidden = false;
+    psHistory.push(change);
+    psScript.value = psAiScript = code;
+    psRenderAiMeta(before, code);
+    document.getElementById('ps-gen-request').value = ''; // 다음 변경을 바로 적을 수 있게 비운다(이번 요청은 이력에 남는다)
+    psStatus.textContent = '수정했습니다. 아래 "바뀐 부분 보기"와 코드를 읽어 보고 "▶ 시험 실행"으로 확인하세요(아직 저장되지 않았습니다. 마음에 안 들면 "↩ 되돌리기").';
+    if (psAutoTestOn()) { busyDone(); await runPsTest(); psStatus.textContent += ' — 자동 시험 실행을 했습니다.'; }
+  } catch (err) { psStatus.textContent = errMsg(err); }
+  finally { busyDone(); btn.disabled = false; }
 });
 document.querySelector('.tab-btn[data-tab="app-settings"]').addEventListener('click', loadPanelConfig);
 resetPsForm();
@@ -1932,6 +2038,32 @@ async function runUpdateCheck(manual) {
   }
 }
 
+// ---- 실행 환경 점검(claude·node·설치 파일) — 문제가 있을 때만 위쪽에 안내한다. 세션 동안 닫을 수 있고, "다시 확인"으로 고친 뒤 바로 확인할 수 있다 ----
+const envBannerEl = document.getElementById('env-banner');
+let envBannerDismissed = false;
+async function runEnvironmentCheck() {
+  let r;
+  try { r = await window.api.checkEnvironment(); } catch (err) { console.warn('환경 점검 실패:', err); return; }
+  const problems = [];
+  for (const [label, t] of [['claude CLI', r.claude], ['Node.js', r.node]]) {
+    if (t.problem) problems.push({ blocking: t.blocking, text: `${label}${t.version ? ` ${t.version}` : ''}: ${t.problem}` });
+  }
+  for (const res of r.resources || []) if (res.problem) problems.push({ blocking: true, text: res.problem });
+  if (!problems.length || envBannerDismissed && problems.every(p => !p.blocking)) { envBannerEl.innerHTML = ''; return; }
+  const blocking = problems.some(p => p.blocking);
+  envBannerEl.innerHTML = `<div class="env-card ${blocking ? 'error' : ''}">
+    <strong>${blocking ? '⚠ 이 PC에서 앱이 제대로 일하지 못합니다' : 'ℹ 참고'}</strong>
+    <ul>${problems.map(p => `<li>${escapeHtml(p.text)}</li>`).join('')}</ul>
+    <button class="env-recheck" data-env-recheck>다시 확인</button>
+    <button class="env-close" data-env-close title="닫기">✕</button>
+  </div>`;
+}
+envBannerEl.addEventListener('click', e => {
+  if (e.target.closest('[data-env-close]')) { envBannerDismissed = true; envBannerEl.innerHTML = ''; return; }
+  if (e.target.closest('[data-env-recheck]')) { envBannerDismissed = false; runEnvironmentCheck(); }
+});
+runEnvironmentCheck();
+
 aboutCheckBtn.addEventListener('click', () => runUpdateCheck(true));
 aboutOpenBtn.addEventListener('click', async () => {
   if (!lastReleaseUrl) return;
@@ -1964,8 +2096,14 @@ versionBtnEl.addEventListener('click', () => {
 (async () => {
   try {
     appVersion = await window.api.getAppVersion();
-    versionBtnEl.textContent = `v${appVersion}`;
-    aboutVersionEl.textContent = `v${appVersion}`;
+    // 같은 버전 번호로 여러 번 빌드해도 구분되도록 빌드 시각(내 PC 시간)을 같이 보인다. 못 읽으면 버전만.
+    let stamp = '';
+    try {
+      const secs = Number(await window.api.getBuildTime());
+      if (secs > 0) { const d = new Date(secs * 1000), p = n => String(n).padStart(2, '0'); stamp = `${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; }
+    } catch { /* 빌드 시각을 못 읽어도 버전은 보인다 */ }
+    versionBtnEl.textContent = stamp ? `v${appVersion} · 빌드 ${stamp}` : `v${appVersion}`;
+    aboutVersionEl.textContent = stamp ? `v${appVersion} (빌드 ${stamp})` : `v${appVersion}`;
   } catch { versionBtnEl.hidden = true; return; }
   if (autoUpdateCheckEnabled()) setTimeout(() => runUpdateCheck(false), 8000);
   setInterval(() => { if (autoUpdateCheckEnabled()) runUpdateCheck(false); }, 6 * 60 * 60 * 1000);

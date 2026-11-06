@@ -194,6 +194,33 @@ pub(crate) fn descendants_from_ps(ps_output: &str, root: u32) -> Vec<u32> {
     found
 }
 
+/// 보조 명령(taskkill·ps·kill)을 실행하고 최대 secs초만 기다린다 — 이런 명령이 어떤 이유로든 끝나지 않아도 스크립트 실행기 스레드가 영원히 멈추지 않게 한다.
+/// (실행기가 멈추면 같은 슬롯은 "실행 중"에 갇히고 중복 실행 방지 때문에 다시 돌지 못한다.)
+fn run_helper(program: &str, args: &[&str], secs: u64) -> Option<String> {
+    let mut cmd = Command::new(program);
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    let mut child = cmd.spawn().ok()?;
+    let mut out = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut b = Vec::new();
+        let _ = out.read_to_end(&mut b);
+        b
+    });
+    match child.wait_timeout(Duration::from_secs(secs)) {
+        Ok(Some(_)) => Some(String::from_utf8_lossy(&reader.join().unwrap_or_default()).to_string()),
+        _ => {
+            let _ = child.kill();
+            let _ = child.wait_timeout(Duration::from_secs(1));
+            None
+        }
+    }
+}
+
 /// 스크립트 프로세스와 그것이 띄운 모든 하위 프로세스를 종료한다. 스크립트가 일부러 분리(detached)해 띄운 자식도 부모와의 연결(PPID)은 남아 있으므로,
 /// 부모를 죽이기 *전에* 하위 목록을 만들어 함께 종료한다(시험으로 확인: 부모만 죽이면 분리된 자식이 제한 시간 뒤에도 살아 남았다).
 /// Windows: `taskkill /T`가 트리째 종료한다. macOS·Linux: `ps`로 하위 프로세스를 찾아 안쪽(손자)부터 종료한다.
@@ -201,20 +228,20 @@ fn kill_tree(child: &mut std::process::Child) {
     let pid = child.id();
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).creation_flags(0x0800_0000).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        let _ = run_helper("taskkill", &["/PID", &pid.to_string(), "/T", "/F"], 5);
     }
     #[cfg(not(windows))]
     {
-        if let Ok(out) = Command::new("ps").args(["-A", "-o", "pid=,ppid="]).stdin(Stdio::null()).stderr(Stdio::null()).output() {
-            let all = descendants_from_ps(&String::from_utf8_lossy(&out.stdout), pid);
+        if let Some(out) = run_helper("ps", &["-A", "-o", "pid=,ppid="], 5) {
+            let all = descendants_from_ps(&out, pid);
             for p in all.iter().rev() {
-                let _ = Command::new("kill").args(["-9", &p.to_string()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+                let _ = run_helper("kill", &["-9", &p.to_string()], 3);
             }
         }
     }
     let _ = child.kill();
-    let _ = child.wait();
+    // 종료를 확인하되 오래 기다리지 않는다(프로세스가 끝내 안 죽어도 실행기가 멈추면 안 된다)
+    let _ = child.wait_timeout(Duration::from_secs(3));
 }
 
 /// 읽은 만큼을 cap까지만 공유 버퍼에 담는 읽기 스레드. cap을 넘는 분은 버리되 계속 비운다(스크립트가 쓰다가 막히지 않게). 넘치면 overflow가 켜진다.
@@ -459,6 +486,7 @@ pub(crate) fn build_generate_prompt(request: &str, interpreter: &str, output_for
         규칙:\n\
         {rule}\
         - 아래 '앱 안내'에 적힌 것만 앱이 주는 정보다. 거기 없는 환경 변수·기능을 지어내서 쓰지 마라.\n\
+        - 이 스크립트는 주기적으로 다시 실행된다. 날짜·시간·브랜치·파일 목록처럼 바뀌는 값은 코드에 적어 넣지 말고 실행할 때마다 계산해서 출력해라.\n\
         - 설명 없이 코드 블록(```) 하나만 답한다.\n\n\
         ===== 앱 안내 =====\n{reference}\n===== 앱 안내 끝 =====\n\n\
         요구: {request}",
@@ -473,6 +501,27 @@ pub(crate) fn build_fix_prompt(script: &str, problem: &str, note: &str, interpre
     let note_line = if note.trim().is_empty() { String::new() } else { format!("\n사용자가 덧붙인 말: {}\n", note.trim()) };
     format!(
         "{base}\n\n===== 지금 스크립트 =====\n{script}\n===== 지금 스크립트 끝 =====\n\n===== 시험 실행에서 나온 결과(오류 포함) =====\n{problem}\n===== 결과 끝 =====\n{note_line}\n위 결과에서 보이는 문제의 원인을 찾아 고친 **전체 스크립트**를 코드 블록 하나로만 답해라. 원래 하려던 일은 바꾸지 마라."
+    )
+}
+
+/// 이미 있는 스크립트를 사용자의 변경 요청대로 발전시키게 할 때 줄 요청문(오류 결과는 없다 — 고치기와 다른 점).
+/// history: 이번 편집에서 이미 반영한 이전 요청들(오래된 것부터), last_run: 지금 스크립트를 시험 실행한 결과(없으면 빈 문자열).
+pub(crate) fn build_modify_prompt(script: &str, change: &str, history: &[String], last_run: &str, interpreter: &str, output_format: &str, allow_js: bool) -> String {
+    let base = build_generate_prompt("(아래 스크립트를 요청대로 수정하는 일이다 — 새로 쓰지 말고 지금 스크립트를 바탕으로 바꿔라)", interpreter, output_format, allow_js);
+    let history_block = if history.is_empty() {
+        String::new()
+    } else {
+        let lines: Vec<String> = history.iter().enumerate().map(|(i, h)| format!("{}. {}", i + 1, h.trim())).collect();
+        format!("\n===== 지금까지 사용자가 한 요청(이미 지금 스크립트에 반영돼 있다 — 이번 변경 때문에 깨뜨리지 마라) =====\n{}\n===== 이전 요청 끝 =====\n", lines.join("\n"))
+    };
+    let run_block = if last_run.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n===== 지금 스크립트를 시험 실행한 결과(오류가 있으면 이번 변경과 함께 해결해라) =====\n{}\n===== 결과 끝 =====\n", last_run.trim())
+    };
+    format!(
+        "{base}\n\n===== 지금 스크립트 =====\n{script}\n===== 지금 스크립트 끝 =====\n{history_block}{run_block}\n사용자가 이번에 바라는 변경: {}\n\n지금 스크립트를 바탕으로 이번 변경을 반영한 **전체 스크립트**를 코드 블록 하나로만 답해라. 변경과 상관없는 동작·구조는 그대로 둬라.",
+        change.trim()
     )
 }
 
@@ -740,6 +789,25 @@ mod tests {
         clear_errors_at(&log);
         assert!(load_errors_from(&log).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn modify_prompt_carries_current_script_change_and_reference_but_no_optional_blocks_when_empty() {
+        let p = build_modify_prompt("console.log('a')", "정렬 추가", &[], "", "node", "html", true);
+        assert!(p.contains("console.log('a')") && p.contains("정렬 추가") && p.contains(&reference_markdown()));
+        assert!(p.contains("CTM_OUTPUT_FORMAT=html"));
+        assert!(!p.contains("지금까지 사용자가 한 요청") && !p.contains("시험 실행한 결과"));
+    }
+
+    #[test]
+    fn modify_prompt_includes_previous_requests_in_order_and_the_last_run_result() {
+        let hist = vec!["표로 보여줘".to_string(), "  날짜순 정렬  ".to_string()];
+        let p = build_modify_prompt("let a", "색 추가", &hist, "TypeError: x is not defined", "node", "markdown", false);
+        let first = p.find("1. 표로 보여줘").expect("첫 요청");
+        let second = p.find("2. 날짜순 정렬").expect("둘째 요청(앞뒤 공백 제거)");
+        let current = p.find("이번에 바라는 변경: 색 추가").expect("이번 요청");
+        assert!(first < second && second < current, "이전 요청은 순서대로, 이번 요청은 맨 뒤");
+        assert!(p.contains("TypeError: x is not defined") && p.contains("시험 실행한 결과"));
     }
 
     #[test]

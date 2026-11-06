@@ -225,7 +225,7 @@ pub fn track_attach_terminal(session_short_id: String) {
         // is_attach_terminal_open_for가 항상 false)으로 남으므로 best-effort로 둔다(main.ts와
         // 동일한 판단).
         if !pids.is_empty() {
-            crate::board_state::state().lock().unwrap().attach_terminal_pids.insert(session_short_id, pids);
+            crate::board_state::state().lock().unwrap_or_else(|e| e.into_inner()).attach_terminal_pids.insert(session_short_id, pids);
         }
     });
 }
@@ -349,7 +349,7 @@ mod tests {
         let probe_id = format!("manualtest{}", crate::timing::now_ms());
         open_in_terminal_command(probe_id.clone()).await;
         tokio::time::sleep(Duration::from_millis(TRACK_ATTACH_TERMINAL_DELAY_MS as u64 + 1500)).await;
-        let recorded = crate::board_state::state().lock().unwrap().attach_terminal_pids.get(&probe_id).cloned();
+        let recorded = crate::board_state::state().lock().unwrap_or_else(|e| e.into_inner()).attach_terminal_pids.get(&probe_id).cloned();
         assert!(recorded.is_some(), "새 콘솔 창의 PID가 attach_terminal_pids에 기록돼야 한다");
         println!(
             "[manual test] 세션 id {probe_id}로 콘솔 창을 띄우고 PID {recorded:?}를 기록했습니다 — 이 창은 실제 claude 세션이 없어 'attach' 자체는 에러로 끝나지만, 창은 열려 있으니 확인 후 직접 닫으세요."

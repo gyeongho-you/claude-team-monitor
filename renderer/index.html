@@ -24,6 +24,7 @@
 
   <div id="stall-alerts-list"></div>
   <div id="unapproved-dir-list"></div>
+  <div id="env-banner"></div>
   <div id="update-banner"></div>
 
   <main>
@@ -350,6 +351,14 @@
             </select>
           </div>
           <div class="ps-group" data-mode="script">
+            <div id="ai-busy" class="ai-busy" role="status" aria-live="polite" hidden>
+              <div class="ai-busy-card">
+                <div class="ai-busy-spinner" aria-hidden="true"></div>
+                <div id="ai-busy-title" class="ai-busy-title">AI가 작업 중입니다</div>
+                <div id="ai-busy-time" class="ai-busy-time">0초 경과</div>
+                <div class="ai-busy-hint">이 스크립트 설정만 잠깁니다. 다른 화면·다른 설정은 그대로 쓸 수 있고, 끝나면 여기에 결과가 채워집니다.</div>
+              </div>
+            </div>
             <div class="ps-warn ps-danger">
               <strong>⚠ 스크립트 모드 — 이런 일을 할 수 있고, 그래서 주의가 필요합니다</strong>
               <ul>
@@ -403,9 +412,14 @@
                 <option value="opus">Opus</option>
                 <option value="fable">Fable</option>
               </select>
-              <button type="button" id="ps-gen-btn">AI로 만들기</button>
+              <button type="button" id="ps-gen-btn" title="위 칸의 스크립트와 상관없이 처음부터 새로 만듭니다(위 칸은 덮어씁니다)">AI로 만들기</button>
+              <button type="button" id="ps-modify-btn" title="위 칸에 있는 스크립트를 바탕으로, 여기 적은 변경만 반영해 수정합니다 — 추가 토큰이 듭니다">✏️ AI로 수정</button>
+              <button type="button" id="ps-undo-btn" title="AI가 바꾸기 직전의 스크립트로 되돌립니다" hidden>↩ 되돌리기</button>
             </div>
-            <p class="form-hint">"AI로 만들기"와 "AI로 고치기"는 모델을 한 번 호출하므로 <strong>추가 토큰이 듭니다</strong>(스크립트를 만들거나 고칠 때만, 이후 실행은 무료). 결과는 위 칸에 채워지기만 하고 저장되지 않으니 코드를 읽어 보고 저장하세요. "고치기"는 시험 실행 결과(오류)를 보고 고치며, 위 입력칸에 적은 말은 추가 요청으로 같이 전달됩니다.</p>
+            <p class="form-hint">"AI로 수정"은 위 칸의 <strong>지금 스크립트를 바탕으로</strong> 적은 변경만 반영하고(이번 편집에서 이미 한 요청과, 같은 스크립트로 시험 실행한 결과가 있으면 함께 전달), "AI로 만들기"는 처음부터 새로 씁니다. "AI로 만들기"·"AI로 수정"·"AI로 고치기"는 모델을 한 번 호출하므로 <strong>추가 토큰이 듭니다</strong>(스크립트를 만들거나 고칠 때만, 이후 실행은 무료). 결과는 위 칸에 채워지기만 하고 저장되지 않으니 코드를 읽어 보고 저장하세요. "고치기"는 시험 실행 결과(오류)를 보고 고치며, 위 입력칸에 적은 말은 추가 요청으로 같이 전달됩니다.</p>
+            <label class="settings-check" id="ps-auto-test-row"><input type="checkbox" id="ps-auto-test" /> "AI로 수정"·"AI로 고치기" 직후 자동으로 시험 실행 — <strong>AI가 쓴 코드를 읽기 전에 바로 실행됩니다</strong>(내 계정 권한으로). 믿을 수 있는 요청일 때만 켜세요</label>
+            <div id="ps-history" class="form-hint ps-history" hidden></div>
+            <details id="ps-diff" class="ps-ref" hidden><summary id="ps-diff-sum"></summary><pre id="ps-diff-body" class="ps-diff"></pre></details>
             <div id="ps-test-preview" class="ps-test-preview sp-body md" hidden></div>
             <pre id="ps-test-out" class="ps-test-out" hidden></pre>
             <details id="ps-errors" class="ps-ref">
@@ -570,6 +584,7 @@
   <button id="sp-expand-btn" class="sp-expand" hidden title="패널 열기">◂ 패널</button>
 
   <script src="lib/markdown.js"></script>
+  <script src="lib/lineDiff.js"></script>
   <script src="lib/status.js"></script>
   <script src="lib/cleanupGrouping.js"></script>
   <script src="lib/chatDelivery.js"></script>
