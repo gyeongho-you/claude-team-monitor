@@ -1062,11 +1062,22 @@ window.addEventListener('message', async e => {
   }
   try {
     if (d.t === 'size') { const h = Number(d.h); if (h > 0) frame.style.height = `${Math.min(4000, Math.max(40, Math.ceil(h) + 4))}px`; }
-    else if (d.t === 'open-url') { if (/^https?:\/\//i.test(String(d.url))) await window.api.openExternalUrl(String(d.url)); }
+    else if (d.t === 'open-url') {
+      // 그래픽(스크립트가 만든 화면)이 사용자 조작 없이도 보낼 수 있는 요청이라, 주소 뒤에 데이터를 실어 밖으로 내보내는 데 쓰일 수 있다 — 전체 주소를 보여 주고 사용자가 허락할 때만 연다.
+      const url = String(d.url);
+      if (/^https?:\/\//i.test(url) && !frameUrlConfirming) {
+        frameUrlConfirming = true;
+        try { if (confirm(`그래픽이 이 주소를 브라우저로 열려고 합니다. 주소에 내 정보가 들어 있지 않은지 확인하세요.
+
+${url.length > 600 ? url.slice(0, 600) + '…(길어서 잘림)' : url}`)) await window.api.openExternalUrl(url); }
+        finally { frameUrlConfirming = false; }
+      }
+    }
     else if (d.t === 'reveal') await window.api.revealPanelPath(String(d.path || ''), leadId);
     else if (d.t === 'editor') await window.api.openPanelPathInEditor(String(d.path || ''), Number.isFinite(d.line) ? d.line : null, leadId);
   } catch (err) { report(errMsg(err)); }
 });
+let frameUrlConfirming = false;
 function renderPanelBody(slot, c) {
   const auto = slot.mode === 'auto' && Array.isArray(c.items);
   spFilterEl.hidden = !auto;

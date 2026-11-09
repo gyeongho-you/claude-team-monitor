@@ -89,7 +89,14 @@ pub(crate) fn lock_file_for_with(path: &Path, wait: std::time::Duration, stale_a
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 let stale = std::fs::metadata(&lock_path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).map_or(false, |age| age > stale_after);
                 if stale {
-                    let _ = std::fs::remove_file(&lock_path);
+                    // 두 대기자가 같은 낡은 잠금을 동시에 지우고, 한쪽이 그 사이에 새로 만든 잠금까지 지우는 일을 막는다 —
+                    // 고유한 이름으로 바꾸기(rename)에 성공한 한 쪽만 지운다(다른 쪽은 NotFound로 실패해 다시 시도).
+                    let mut grave = lock_path.clone().into_os_string();
+                    grave.push(format!(".stale-{}-{}", std::process::id(), started.elapsed().as_nanos()));
+                    let grave = PathBuf::from(grave);
+                    if std::fs::rename(&lock_path, &grave).is_ok() {
+                        let _ = std::fs::remove_file(&grave);
+                    }
                     continue;
                 }
             }

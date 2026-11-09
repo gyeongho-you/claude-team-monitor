@@ -167,11 +167,18 @@ pub(crate) fn approvals_shadow_path_for(leads: &Path) -> std::path::PathBuf {
     }
 }
 
-/// 사본을 읽는다 — 파일이 없으면 None(아직 만든 적 없음), 읽었는데 해석하지 못하면 빈 사본(= 아무 승인도 인정하지 않음).
+/// 사본을 읽는다 — 파일이 없거나 해석하지 못하면 None(없는 것으로 본다). 해석하지 못한 사본을 "빈 사본"으로 보면 사용자의 모든 승인이 무시되고
+/// 그 상태가 다음 저장 때 leads.json에 영구히 기록되므로, 원본을 `.corrupt-…`로 보관하고 없는 것처럼 다룬다(지금 파일 내용으로 다시 만든다).
 pub(crate) fn read_approvals_shadow(leads: &Path) -> Option<HashMap<String, Vec<String>>> {
     let p = approvals_shadow_path_for(leads);
     let raw = crate::json_file::read_json_text_guarded(&p)?;
-    Some(serde_json::from_str(&raw).unwrap_or_default())
+    match serde_json::from_str(&raw) {
+        Ok(map) => Some(map),
+        Err(_) => {
+            crate::json_file::backup_corrupt_json(&p, &raw);
+            None
+        }
+    }
 }
 
 fn write_approvals_shadow(leads_file: &Path, leads: &[LeadRecord]) {
@@ -189,6 +196,10 @@ fn write_approvals_shadow(leads_file: &Path, leads: &[LeadRecord]) {
 fn apply_approvals_shadow(path: &Path, leads: &mut [LeadRecord]) {
     let Some(shadow) = read_approvals_shadow(path) else {
         if path.exists() {
+            // 사본이 없거나 못 읽는 경우 — 업데이트 직후나 손상 복구이므로 지금 내용을 인정한다. 승인이 이미 있는 팀장이 있는데 사본이 사라진 거라면 알린다(사본을 지워 우회하는 시도일 수 있다).
+            if leads.iter().any(|l| !l.approved_members.is_empty()) {
+                crate::logging::log_critical("[approvals] 승인 사본이 없거나 읽히지 않아 지금 leads.json의 승인 목록을 그대로 인정하고 사본을 다시 만듭니다.");
+            }
             write_approvals_shadow(path, leads);
         }
         return;
@@ -539,6 +550,20 @@ mod approval_shadow_tests {
         l[0].approved_members.push("C:/new".into());
         save_leads_to(&path, &l);
         assert_eq!(load_leads_from(&path)[0].approved_members, vec!["C:/ok", "C:/new"]);
+    }
+
+    #[test]
+    fn an_unparseable_shadow_never_wipes_the_users_approvals() {
+        let dir = std::env::temp_dir().join(format!("ctm_shadow_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("leads.json");
+        save_leads_to(&path, &[lead("a", &["C:/ok"])]);
+        fs::write(approvals_shadow_path_for(&path), b"{ not json").unwrap();
+        let loaded = load_leads_from(&path);
+        assert_eq!(loaded[0].approved_members, vec!["C:/ok"], "사본이 깨져도 사용자의 승인이 사라지면 안 된다");
+        assert!(read_approvals_shadow(&path).is_some(), "사본이 다시 만들어진다");
+        let backups = fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".corrupt-")).count();
+        assert_eq!(backups, 1);
     }
 
     #[test]

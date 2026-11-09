@@ -644,13 +644,24 @@ pub(crate) fn build_ai_prompt_with(instruction: &str, current: &str, material: &
 
 /// 도구·설정·스킬·세션 저장 없이 최소 맥락으로 한 번만 묻는다(프롬프트는 stdin으로 — 길어도 명령줄 길이 제한에 안 걸린다).
 /// 사용자가 "AI 작업 취소"를 눌렀음을 알리는 표시 — 실행 중인 한 번짜리 모델 호출이 이걸 보고 멈춘다.
-static AI_CANCEL: AtomicBool = AtomicBool::new(false);
+static AI_CANCEL_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 모델 호출을 자식 프로세스까지 포함해 종료한다(claude가 만든 하위 프로세스가 파이프를 쥔 채 남는 것을 막는다).
+fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill").args(["/PID", &child.id().to_string(), "/T", "/F"]).creation_flags(0x0800_0000).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
 
 /// 지금 진행 중인 AI 작업(스크립트 만들기·수정·고치기)을 멈춘다. 진행 중인 게 없으면 아무 일도 없다.
 #[tauri::command]
 pub fn cancel_ai_command() -> bool {
     if AI_BUSY.load(Ordering::SeqCst) {
-        AI_CANCEL.store(true, Ordering::SeqCst);
+        AI_CANCEL_GEN.fetch_add(1, Ordering::SeqCst);
         true
     } else {
         false
@@ -660,7 +671,8 @@ pub fn cancel_ai_command() -> bool {
 /// limit이 None이면 시간 제한 없이 끝날 때까지(또는 사용자가 취소할 때까지) 기다린다 — 사용자가 화면에서 기다리는 작업용.
 /// 백그라운드 자동 갱신은 멈춰 있어도 다른 작업을 영영 막지 않도록 제한을 준다.
 fn run_claude_oneshot(model: &str, prompt: &str, limit: Option<Duration>) -> Result<String, String> {
-    AI_CANCEL.store(false, Ordering::SeqCst);
+    // 취소는 "세대 번호가 시작할 때와 달라졌는가"로 알아본다 — 표시를 지우는 방식이면 막 시작하는 순간에 누른 취소가 사라진다.
+    let my_gen = AI_CANCEL_GEN.load(Ordering::SeqCst);
     let mut cmd = Command::new("claude");
     cmd.args(["-p", "--model", model, "--output-format", "json", "--tools", "", "--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"]);
     cmd.current_dir(std::env::temp_dir());
@@ -694,9 +706,8 @@ fn run_claude_oneshot(model: &str, prompt: &str, limit: Option<Duration>) -> Res
         match child.wait_timeout(Duration::from_millis(250)) {
             Ok(Some(status)) => break Ok(Some(status)),
             Ok(None) => {
-                if AI_CANCEL.swap(false, Ordering::SeqCst) {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                if AI_CANCEL_GEN.load(Ordering::SeqCst) != my_gen {
+                    kill_process_tree(&mut child);
                     return Err("사용자가 취소했습니다.".to_string());
                 }
                 if let Some(l) = limit {
@@ -719,8 +730,7 @@ fn run_claude_oneshot(model: &str, prompt: &str, limit: Option<Duration>) -> Res
             envelope.get("result").and_then(|r| r.as_str()).map(str::to_string).ok_or_else(|| "모델 응답에 결과가 없습니다".to_string())
         }
         _ => {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_process_tree(&mut child);
             Err("모델이 시간 안에 답하지 않아 중단했습니다".to_string())
         }
     }
