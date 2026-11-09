@@ -1,0 +1,257 @@
+{
+  "설명": "renderer/renderer.js의 HTML 조각 안 ${…} 중 escapeHtml 등 이스케이프 표시가 없는 것들의 검토 목록(2026-11-09, 사람이 위험한 것을 직접 읽어 확인하고 나머지는 이름과 출처로 분류). 새로 생기면 tests/htmlInterpolationGuard.test.js가 실패한다 — 값이 외부(대화·파일 이름·네트워크)에서 올 수 있다면 escapeHtml로 감싸고, 정말 안전하면 이유와 함께 여기에 추가할 것.",
+  "items": [
+    {
+      "expr": "JS_FRAME_BRIDGE",
+      "basis": "격리 프레임 문서 조립(프레임 CSP·sandbox 안, 앱 화면 DOM에 넣지 않음)"
+    },
+    {
+      "expr": "actionBtnHtml",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "age",
+      "basis": "숫자·시간 계산 결과"
+    },
+    {
+      "expr": "answerClass",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "attempt",
+      "basis": "숫자·시간 계산 결과"
+    },
+    {
+      "expr": "base",
+      "basis": "격리 프레임 문서 조립(프레임 CSP·sandbox 안, 앱 화면 DOM에 넣지 않음)"
+    },
+    {
+      "expr": "blocked ? 'status-blocked' : 'status-busy'",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "blocked ? '⚠ 권한 확인 대기' : '● 작업 중'",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "blocking ? 'error' : ''",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "blocking ? '⚠ 이 PC에서 앱이 제대로 일하지 못합니다' : 'ℹ 참고'",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "cardStatusClass",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "csp",
+      "basis": "격리 프레임 문서 조립(프레임 CSP·sandbox 안, 앱 화면 DOM에 넣지 않음)"
+    },
+    {
+      "expr": "days",
+      "basis": "숫자·시간 계산 결과"
+    },
+    {
+      "expr": "e.count > 1 ? `${e.count",
+      "basis": "숫자(반복 횟수)"
+    },
+    {
+      "expr": "e.kind === 'stderr' ? 'warn' : ''",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "e.source === 'test' ? '시험 실행' : '패널'",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "extraBadge",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "failedBtns",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "fragment",
+      "basis": "격리 프레임 문서 조립(프레임 CSP·sandbox 안, 앱 화면 DOM에 넣지 않음)"
+    },
+    {
+      "expr": "hint",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "hours",
+      "basis": "숫자·시간 계산 결과"
+    },
+    {
+      "expr": "html",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "i",
+      "basis": "숫자·시간 계산 결과"
+    },
+    {
+      "expr": "indented ? ' cleanup-item-indented' : ''",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "isStop ? '⏹ ' : ''",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "kind",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "l.type",
+      "basis": "내부 값(add/del/same) — 앱이 직접 계산한 diff 줄 종류"
+    },
+    {
+      "expr": "l.type === 'add' ? '+' : l.type === 'del' ? '−' : ' '",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "label",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "max",
+      "basis": "숫자·시간 계산 결과"
+    },
+    {
+      "expr": "mins",
+      "basis": "숫자·시간 계산 결과"
+    },
+    {
+      "expr": "new Date(a.createdAt).toLocaleTimeString('ko-KR')",
+      "basis": "숫자·시간 계산 결과"
+    },
+    {
+      "expr": "new Date(req.createdAt).toLocaleTimeString('ko-KR')",
+      "basis": "숫자·시간 계산 결과"
+    },
+    {
+      "expr": "panelThemeCss()",
+      "basis": "격리 프레임 문서 조립(프레임 CSP·sandbox 안, 앱 화면 DOM에 넣지 않음)"
+    },
+    {
+      "expr": "pill",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "placeholder",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "preview",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "relativeAge(row.startedAt)",
+      "basis": "숫자·시간 계산 결과"
+    },
+    {
+      "expr": "relativeAge(s.startedAt)",
+      "basis": "숫자·시간 계산 결과"
+    },
+    {
+      "expr": "renderDiffLines(diff)",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "row.backgroundOnly.count",
+      "basis": "숫자·시간 계산 결과"
+    },
+    {
+      "expr": "row.offline ? '<div class=\"offline-hint\">메시지를 보내면 다시 이어집니다</div>' : ''",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "row.preview ? `<div class=\"history-preview\">${formatPreview(row.preview, 80, 160)",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "s.enabled ? '' : 'disabled'",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "s.enabled ? '' : 'off'",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "s.enabled ? 'checked' : ''",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "s.global ? 'checked' : ''",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "s.id === panelActiveId ? 'active' : ''",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "sanitizeHtmlFragment(fragment)",
+      "basis": "격리 프레임 문서 조립(프레임 CSP·sandbox 안, 앱 화면 DOM에 넣지 않음)"
+    },
+    {
+      "expr": "sec",
+      "basis": "숫자·시간 계산 결과"
+    },
+    {
+      "expr": "selected",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "statusClass(row)",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "statusClass(s)",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "statusText",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "t.approved ? 'approved' : ''",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "t.approved ? 'checked' : ''",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "tagLabel(s)",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "terminalBtnHtml",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "terminalOnly ? `<div class=\"pending-choice-options\">${terminalBtnHtml",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "title",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "value",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    },
+    {
+      "expr": "value === model ? 'selected' : ''",
+      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
+    },
+    {
+      "expr": "when",
+      "basis": "이스케이프를 마친 조각이거나 고정 문구(만드는 곳에서 이스케이프 확인)"
+    }
+  ]
+}

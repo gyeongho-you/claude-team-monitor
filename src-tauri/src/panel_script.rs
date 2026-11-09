@@ -709,7 +709,16 @@ mod tests {
         }
         #[cfg(not(windows))]
         {
-            Command::new("kill").args(["-0", &pid.to_string()]).status().map(|s| s.success()).unwrap_or(false)
+            // `kill -0`은 이미 죽었지만 아직 부모(또는 init)가 수거하지 않은 좀비도 "있다"고 답한다 — 좀비는 실행 중이 아니므로 죽은 것으로 본다.
+            // (좀비를 바로 수거하지 않는 환경 — 예: 컨테이너의 PID 1이 init이 아닌 경우 — 에서 시험이 헛되이 실패하던 문제)
+            Command::new("ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .map(|o| {
+                    let stat = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    o.status.success() && !stat.is_empty() && !stat.starts_with('Z')
+                })
+                .unwrap_or(false)
         }
     }
 

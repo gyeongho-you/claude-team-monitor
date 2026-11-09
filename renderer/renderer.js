@@ -571,7 +571,7 @@ function renderActivityBody(data) {
   } else {
     const label = { user: '▸ 지시/사용자', assistant: '응답', message: '📨 보고·전달·지시', tool: '🔧 도구' };
     const itemHtml = it => `
-      <div class="activity-item activity-${it.kind}">
+      <div class="activity-item activity-${escapeHtml(it.kind)}">
         <div class="activity-meta">${escapeHtml(label[it.kind] || it.kind)}<span>${escapeHtml(it.time || '')}</span></div>
         <div class="activity-text">${escapeHtml(it.text)}</div>
       </div>`;
@@ -2866,7 +2866,7 @@ function renderAttachments() {
   const paths = (selectedLeadId && attachmentsByLead.get(selectedLeadId)) || [];
   chatAttachmentsEl.innerHTML = paths.map((p, i) => `
     <span class="chat-attach-chip" title="${escapeHtml(p)}">
-      ${attachmentThumbs.has(p) ? `<img class="chip-thumb" src="${attachmentThumbs.get(p)}" alt="" />` : ''}
+      ${attachmentThumbs.has(p) ? `<img class="chip-thumb" src="${escapeHtml(attachmentThumbs.get(p))}" alt="" />` : ''}
       <span class="chip-name">${escapeHtml(attachmentLabel(p))}</span>
       <button data-remove-attachment="${i}" title="첨부 취소">✕</button>
     </span>`).join('');

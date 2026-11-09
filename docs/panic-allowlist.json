@@ -1,0 +1,95 @@
+{
+  "설명": "시험 코드(#[cfg(test)] 뒤)를 뺀 실행 코드에서 패닉할 수 있는 호출(.unwrap(), .expect(, panic! 등)의 검토 목록. 새 호출이 생기면 tests/rustPanicGuard.test.js가 실패한다 — 안전한지 확인하고 이유와 함께 여기에 추가할 것.",
+  "sites": [
+    {
+      "file": "agents_json.rs",
+      "code": "let mut stdout = child.stdout.take().expect(\"stdout piped\");",
+      "why": "Stdio::piped()로 자식 프로세스를 만든 직전 줄에서 가져오는 핸들 — 항상 Some"
+    },
+    {
+      "file": "agents_json.rs",
+      "code": "let mut stderr = child.stderr.take().expect(\"stderr piped\");",
+      "why": "Stdio::piped()로 자식 프로세스를 만든 직전 줄에서 가져오는 핸들 — 항상 Some"
+    },
+    {
+      "file": "claude_bg_output.rs",
+      "code": "PATTERN.get_or_init(|| Regex::new(r\"\\x1b\\[[0-9;]*[a-zA-Z]\").expect(\"고정 패턴\"))",
+      "why": "고정 정규식 — 소스에 박힌 값이라 컴파일 타임에 정해지고, 이 정규식을 쓰는 시험들이 실제로 매칭해 유효성을 확인한다"
+    },
+    {
+      "file": "claude_bg_output.rs",
+      "code": "PATTERN.get_or_init(|| Regex::new(r\"(?i)backgrounded\\s*[·:]\\s*([a-f0-9]+)\").expect(\"고정 패턴\"))",
+      "why": "고정 정규식 — 소스에 박힌 값이라 컴파일 타임에 정해지고, 이 정규식을 쓰는 시험들이 실제로 매칭해 유효성을 확인한다"
+    },
+    {
+      "file": "claude_bg_output.rs",
+      "code": "PATTERN.get_or_init(|| Regex::new(r\"(?i)started a copy as\\s*([a-f0-9]+)\").expect(\"고정 패턴\"))",
+      "why": "고정 정규식 — 소스에 박힌 값이라 컴파일 타임에 정해지고, 이 정규식을 쓰는 시험들이 실제로 매칭해 유효성을 확인한다"
+    },
+    {
+      "file": "concurrency.rs",
+      "code": "tx.send(job).expect(\"lead operation actor channel closed unexpectedly\");",
+      "why": "팀장별 작업 처리 스레드는 앱 수명 동안 종료되지 않는 불변식(위 주석) — 깨지면 앱 버그이므로 조용히 넘기지 않는다"
+    },
+    {
+      "file": "concurrency.rs",
+      "code": ".expect(\"lead operation panicked before producing a result\")",
+      "why": "팀장별 작업 처리 스레드는 앱 수명 동안 종료되지 않는 불변식(위 주석) — 깨지면 앱 버그이므로 조용히 넘기지 않는다"
+    },
+    {
+      "file": "lib.rs",
+      "code": ".expect(\"error while running tauri application\");",
+      "why": "Tauri 실행 진입점 — 여기서 실패하면 앱이 시작될 수 없는 상황(창·런타임 초기화 실패)"
+    },
+    {
+      "file": "long_prompt_guard.rs",
+      "code": "PATTERN.get_or_init(|| regex::Regex::new(r\"^(/\\S+)\\s\").expect(\"고정 패턴\"))",
+      "why": "고정 정규식 — 소스에 박힌 값이라 컴파일 타임에 정해지고, 이 정규식을 쓰는 시험들이 실제로 매칭해 유효성을 확인한다"
+    },
+    {
+      "file": "resume.rs",
+      "code": "let mut stdout = child.stdout.take().expect(\"stdout piped\");",
+      "why": "Stdio::piped()로 자식 프로세스를 만든 직전 줄에서 가져오는 핸들 — 항상 Some"
+    },
+    {
+      "file": "resume.rs",
+      "code": "let mut stderr = child.stderr.take().expect(\"stderr piped\");",
+      "why": "Stdio::piped()로 자식 프로세스를 만든 직전 줄에서 가져오는 핸들 — 항상 Some"
+    },
+    {
+      "file": "session_registry.rs",
+      "code": "let id = a.id.clone().unwrap();",
+      "why": "바로 위 filter(a.id.is_some())로 보호된 항목"
+    },
+    {
+      "file": "side_panel.rs",
+      "code": "RE.get_or_init(|| Regex::new(r\"^Published (.+?) at (https://claude\\.ai/(?:code/)?artifact/[A-Za-z0-9_-]+)(?: \\(Version (\\d+))?\").unwrap())",
+      "why": "고정 정규식 — 소스에 박힌 값이라 컴파일 타임에 정해지고, 이 정규식을 쓰는 시험들이 실제로 매칭해 유효성을 확인한다"
+    },
+    {
+      "file": "side_panel.rs",
+      "code": "RE.get_or_init(|| Regex::new(r\"https://github\\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/(\\d+)\").unwrap())",
+      "why": "고정 정규식 — 소스에 박힌 값이라 컴파일 타임에 정해지고, 이 정규식을 쓰는 시험들이 실제로 매칭해 유효성을 확인한다"
+    },
+    {
+      "file": "side_panel.rs",
+      "code": "RE.get_or_init(|| Regex::new(r\"\\bgh\\s+pr\\s+create\\b\").unwrap())",
+      "why": "고정 정규식 — 소스에 박힌 값이라 컴파일 타임에 정해지고, 이 정규식을 쓰는 시험들이 실제로 매칭해 유효성을 확인한다"
+    },
+    {
+      "file": "stall_watchdog.rs",
+      "code": ".expect(\"APPROVAL_PATTERN 정규식은 컴파일 타임에 고정된 값이라 항상 유효해야 한다\")",
+      "why": "고정 정규식 — 소스에 박힌 값이라 컴파일 타임에 정해지고, 이 정규식을 쓰는 시험들이 실제로 매칭해 유효성을 확인한다"
+    },
+    {
+      "file": "stall_watchdog.rs",
+      "code": "PATTERN.get_or_init(|| Regex::new(r\"(?s)```(?:json)?\\s*(.*?)```\").expect(\"고정 패턴\"))",
+      "why": "고정 정규식 — 소스에 박힌 값이라 컴파일 타임에 정해지고, 이 정규식을 쓰는 시험들이 실제로 매칭해 유효성을 확인한다"
+    },
+    {
+      "file": "transcript.rs",
+      "code": "let parts = text_blocks(content_val.unwrap());",
+      "why": "바로 위에서 content_val이 Some인 배열 분기에 들어온 경우만 도달"
+    }
+  ]
+}

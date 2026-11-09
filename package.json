@@ -16,6 +16,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.js",
+    "test:e2e": "node tests/e2e/smoke.js",
     "build:mcp": "esbuild src/mcp/teamMemberServer.ts --bundle --platform=node --outfile=dist/teamMemberServer.js",
     "build": "npm run typecheck && npm run build:mcp",
     "build:electron": "npm run typecheck && esbuild src/main.ts src/preload.ts --bundle --platform=node --external:electron --outdir=dist && npm run build:mcp",

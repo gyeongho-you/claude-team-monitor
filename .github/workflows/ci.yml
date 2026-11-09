@@ -36,6 +36,10 @@ jobs:
       - name: JS 시험
         run: npm test
 
+      # 앱에 실제로 들어가는(운영) 의존성에 알려진 취약점이 있으면 실패한다. 개발 도구(devDependencies)는 빌드 환경에만 쓰이므로 제외한다.
+      - name: 운영 의존성 취약점 검사
+        run: npm audit --omit=dev --audit-level=low
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
@@ -77,6 +81,16 @@ jobs:
         run: |
           ls -la src-tauri/target/release/bundle/nsis/
           test -n "$(ls src-tauri/target/release/bundle/nsis/*-setup.exe 2>/dev/null)"
+
+      # 방금 빌드한 실제 앱을 띄워 화면을 점검한다(tests/e2e/smoke.js — 탭·접근성·도움말·스크립트 슬롯 관문·격리 프레임·진단·단일 실행 보호).
+      # 참고용: 로컬에서는 12/12 통과했지만 CI 러너(WebView2 환경)에서는 이번이 처음이라, 결과가 안정적임을 확인할 때까지 실패해도 CI 전체를 막지 않는다.
+      - name: 화면 E2E 시험
+        continue-on-error: true
+        shell: bash
+        env:
+          CTM_EXE: src-tauri/target/release/Claude Team Monitor.exe
+          CTM_E2E_SINGLE_INSTANCE: "1"
+        run: npm run test:e2e
 
       - uses: actions/upload-artifact@v4
         with:
@@ -143,3 +157,20 @@ jobs:
       - name: Rust 시험
         working-directory: src-tauri
         run: cargo test --lib
+
+  audit-rust:
+    # 참고용: Rust 의존성(RustSec 데이터베이스)에 알려진 취약점이 있는지 본다. Tauri의 간접 의존성에서 "더 이상 관리되지 않음" 경고가 자주 나와서 막지는 않는다.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo-audit 설치
+        run: cargo install cargo-audit --locked
+
+      - name: Rust 의존성 취약점 검사
+        working-directory: src-tauri
+        run: cargo audit
