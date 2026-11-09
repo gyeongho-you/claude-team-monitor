@@ -1,10 +1,16 @@
 name: Release
 
 # 태그(vX.Y.Z)를 올리면 설치 파일을 만들어 GitHub 릴리스에 붙인다. 절차는 docs/RELEASING.md 참고.
-# 주의: 이 워크플로는 아직 한 번도 실제 태그로 돌려 보지 않았다(CI의 installer 잡이 같은 빌드를 매번 시험한다).
+#
+# 연습 실행(dry run): 이 파일 자체를 고쳐서 푸시하거나 Actions에서 직접 실행하면, 태그 없이 같은 빌드·시험·파일 모으기까지만 하고
+# 릴리스는 만들지 않는다(결과 파일은 Actions의 artifact로 남는다). 그래서 실제 태그를 올리기 전에도 파이프라인을 시험할 수 있다.
+# 아직 한 번도 실제 태그로 돌려 보지 않았다 — 릴리스 생성 단계("릴리스 만들고 파일 붙이기")만 연습 실행에서는 건너뛴다.
 on:
   push:
     tags: ["v*"]
+    branches: [main]
+    paths: [".github/workflows/release.yml", "scripts/collect-release-files.ps1"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -21,6 +27,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: 태그와 버전 확인
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
         shell: bash
         run: |
           tag="${GITHUB_REF_NAME#v}"
@@ -83,11 +90,21 @@ jobs:
 
       - name: 배포 파일 모으기(설치 파일, 압축본, 체크섬)
         shell: pwsh
-        run: ./scripts/collect-release-files.ps1 -Version "${{ github.ref_name }}"
+        run: ./scripts/collect-release-files.ps1 -Version "${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('dryrun-{0}', github.run_number) }}"
 
       - name: 릴리스 만들고 파일 붙이기
+        if: ${{ startsWith(github.ref, 'refs/tags/') }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" dist-release/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+
+      # 연습 실행(태그 없음)일 때는 만든 파일을 artifact로 남겨 내용을 확인할 수 있게 한다.
+      - name: 연습 실행 결과 보관
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dryrun
+          path: dist-release/*
+          if-no-files-found: error

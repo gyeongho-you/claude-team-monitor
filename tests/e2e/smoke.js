@@ -6,6 +6,7 @@
 //
 // 안전: 앱 데이터(APPDATA)와 WebView 프로필을 임시 폴더로 돌리고 CTM_ALLOW_MULTI=1로 띄우므로 이미 실행 중인 앱과 부딪히지 않는다.
 //       단 ~/.claude(팀장 기록)는 읽기만 하며, 이 시험은 팀장을 만들거나 지우지 않는다. claude CLI가 없어도 통과하도록 썼다.
+// 알려진 제약: USERPROFILE을 임시 폴더로 바꾼 셸에서는 WebView2의 원격 디버그 포트가 열리지 않는다(앱은 뜨지만 이 시험이 연결하지 못함). APPDATA만 바꾸는 것은 괜찮다.
 // 프레임워크 없이 node만으로 돈다(Node 22의 내장 WebSocket 사용).
 const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -50,7 +51,8 @@ async function connect(port, timeoutMs = 90000, child = null) {
   }
   if (!ver) {
     const state = !child ? '' : child.spawnError_ ? ` — 앱 실행 실패: ${child.spawnError_}` : child.exitCode_ !== null ? ` — 앱 프로세스가 종료 코드 ${child.exitCode_}로 끝났습니다(뜨자마자 죽음)` : ' — 앱 프로세스는 살아 있는데 포트가 안 열렸습니다(WebView2 초기화 실패 가능)';
-    throw new Error('앱의 디버그 포트가 열리지 않았습니다' + state);
+    const homeNote = process.env.USERPROFILE && os.homedir() !== process.env.USERPROFILE ? ' (참고: USERPROFILE이 바뀐 셸에서는 WebView2 디버그 포트가 열리지 않을 수 있습니다 — 원래 셸에서 다시 실행해 보세요)' : '';
+    throw new Error('앱의 디버그 포트가 열리지 않았습니다' + state + homeNote);
   }
   const ws = new WebSocket(ver.webSocketDebuggerUrl);
   await new Promise((res, rej) => { ws.addEventListener('open', res, { once: true }); ws.addEventListener('error', rej, { once: true }); });

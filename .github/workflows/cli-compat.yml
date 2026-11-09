@@ -3,11 +3,14 @@ name: CLI compat
 # 이 앱은 claude CLI의 공개 보장이 없는 동작(--bg, agents --json, attach 등)에 의존한다. 일주일에 한 번 최신 claude CLI를 설치해서,
 # 앱이 쓰는 플래그·하위 명령이 아직 `claude --help`에 있는지 확인한다(로그인 없이 가능). 실패하면 CLI가 바뀐 것이니 앱을 맞춰야 한다.
 # 손으로 돌릴 수도 있다(Actions → CLI compat → Run workflow).
-# 주의: 이 워크플로는 아직 한 번도 돌려 보지 않았다. 같은 시험(real_claude_cli_exposes_the_features_the_app_uses)은 로컬에서 claude 2.1.319로 통과했다.
+# 이 파일을 고쳐 푸시해도 실행된다(고치자마자 실제로 도는지 확인할 수 있게). 같은 시험(real_claude_cli_exposes_the_features_the_app_uses)은 로컬에서 claude 2.1.319로 통과했다.
 on:
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [".github/workflows/cli-compat.yml"]
 
 permissions:
   contents: read
