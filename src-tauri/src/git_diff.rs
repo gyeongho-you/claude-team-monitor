@@ -100,14 +100,33 @@ pub async fn get_changed_files_command(cwd: String) -> Vec<ChangedFile> {
 // 섞여 있으면 cwd 밖의 임의 파일을 가리킬 수 있어서, 실제로 합친 절대경로가 cwd 하위인지 확인해서
 // 벗어나면 거부한다.
 fn resolve_within_cwd(cwd: &Path, file: &str) -> Option<PathBuf> {
-    let resolved_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
-    let candidate = resolved_cwd.join(file);
+    let resolved_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| normalize_lexically(cwd));
+    // 먼저 `.`/`..`를 글자 수준에서 정리한다 — 대상이 없는 파일이면 canonicalize가 실패해서 `..`가 그대로 남고, 그 경로는 구성요소 비교(starts_with)로는
+    // 여전히 cwd 아래처럼 보여 cwd 밖을 가리키는 경로가 통과하던 결함이 있었다(Linux·macOS CI의 시험이 잡았다).
+    let candidate = normalize_lexically(&resolved_cwd.join(file));
+    // 있는 파일이면 심볼릭 링크까지 풀어서 다시 확인한다(cwd 안의 링크가 밖을 가리키면 거부).
     let resolved_file = std::fs::canonicalize(&candidate).unwrap_or(candidate);
     if resolved_file == resolved_cwd || resolved_file.starts_with(&resolved_cwd) {
         Some(resolved_file)
     } else {
         None
     }
+}
+
+/// 디스크를 보지 않고 `.`와 `..`를 정리한다(존재하지 않는 경로도 처리). 루트 위로는 올라가지 않는다.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,10 +176,39 @@ pub async fn get_file_diff_command(cwd: String, file: String) -> FileDiff {
 mod tests {
     use super::*;
 
+    fn scratch_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("ctm-gitdiff-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::canonicalize(&d).unwrap()
+    }
+
     #[test]
-    fn resolve_within_cwd_rejects_path_traversal_outside_cwd() {
-        let cwd = std::env::temp_dir();
-        assert!(resolve_within_cwd(&cwd, "../../../../etc/passwd").is_none() || resolve_within_cwd(&cwd, "../../../../etc/passwd").unwrap().starts_with(&cwd));
+    fn resolve_within_cwd_rejects_path_traversal_outside_cwd_even_when_the_target_does_not_exist() {
+        let cwd = scratch_dir("reject");
+        // 없는 파일(canonicalize 실패)이어도, 있는 상위 폴더(..)여도 cwd 밖이면 거부해야 한다
+        for escape in ["../../../../etc/passwd", "../nope.txt", "..", "sub/../../x", "./../y"] {
+            assert!(resolve_within_cwd(&cwd, escape).is_none(), "탈출 경로를 통과시켰다: {escape}");
+        }
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn resolve_within_cwd_accepts_paths_that_stay_inside_even_with_dot_segments() {
+        let cwd = scratch_dir("accept");
+        std::fs::write(cwd.join("a.txt"), "x").unwrap();
+        for ok in ["a.txt", "./a.txt", "sub/../a.txt", "sub/new-file-that-does-not-exist.txt", "."] {
+            let r = resolve_within_cwd(&cwd, ok);
+            assert!(r.as_ref().map(|p| p.starts_with(&cwd)).unwrap_or(false), "안쪽 경로를 거부했다: {ok} -> {r:?}");
+            assert!(!r.unwrap().components().any(|c| c == std::path::Component::ParentDir), "정리되지 않은 .. 가 남았다: {ok}");
+        }
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn normalize_lexically_collapses_dots_without_touching_the_disk() {
+        assert_eq!(normalize_lexically(Path::new("a/b/../c/./d")), PathBuf::from("a/c/d"));
+        assert_eq!(normalize_lexically(Path::new("a/../../b")), PathBuf::from("b"), "상대 경로의 맨 앞을 넘는 ..는 버린다");
+        assert_eq!(normalize_lexically(Path::new("")), PathBuf::new());
     }
 
     #[test]
