@@ -42,7 +42,7 @@ jobs:
           node-version: 22
           cache: npm
 
-      - run: npm ci
+      - run: npm ci || (sleep 15 && npm ci) || (sleep 30 && npm ci)
 
       - run: npm run typecheck
 
