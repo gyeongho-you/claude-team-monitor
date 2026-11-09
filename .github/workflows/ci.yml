@@ -81,8 +81,7 @@ jobs:
           code=${PIPESTATUS[0]}
           if [ "$code" -ne 0 ]; then
             # 로그는 인증 없이 못 읽으므로 실패 원인(오류 줄과 끝부분)을 주석으로 남긴다.
-            msg=$( (grep -n -i -E "^error|error\[|error:|failed|panicked" build.log | head -8; echo ---; tail -n 14 build.log) | cut -c1-300 | tr '
-' '|' | sed 's/%/%25/g' )
+            msg=$( (grep -n -i -E "^error|error\[|error:|failed|panicked" build.log | head -8; echo ---; tail -n 14 build.log) | cut -c1-300 | tr -d '' | paste -sd '|' - | sed 's/%/%25/g' )
             echo "::error title=installer-build::$msg"
           fi
           exit $code
