@@ -77,8 +77,14 @@ jobs:
         shell: bash
         run: |
           set +e
-          npm run tauri:build:release 2>&1 | tee build.log
-          code=${PIPESTATUS[0]}
+          # NSIS 도구를 GitHub에서 내려받는 단계가 가끔 5xx로 실패한다(코드 문제가 아님) — 최대 3번 시도한다.
+          for attempt in 1 2 3; do
+            npm run tauri:build:release 2>&1 | tee build.log
+            code=${PIPESTATUS[0]}
+            [ "$code" -eq 0 ] && break
+            grep -q -E "http status: 5[0-9][0-9]" build.log || break
+            echo "다운로드 5xx — 20초 뒤 재시도($attempt/3)"; sleep 20
+          done
           if [ "$code" -ne 0 ]; then
             # 로그는 인증 없이 못 읽으므로 실패 원인(오류 줄과 끝부분)을 주석으로 남긴다.
             msg=$( (grep -n -i -E "^error|error\[|error:|failed|panicked" build.log | head -8; echo ---; tail -n 14 build.log) | cut -c1-300 | paste -sd '|' - | sed 's/%/%25/g' )
