@@ -84,7 +84,7 @@ npm run tauri:build:release     # 설치 파일(NSIS): src-tauri/target/release/
 |---|---|
 | `npm test` | JS 단위 시험 + 가드 시험(패닉 후보·HTML 이스케이프·표준 입력) |
 | `cd src-tauri && cargo test --lib` | Rust 시험(처음에는 컴파일에 몇 분 걸립니다) |
-| `npm run tauri:build && npm run test:e2e` | 빌드한 앱을 별도 프로필로 띄워 화면을 점검(Windows, claude 없이도 통과) |
+| `npm run tauri:build && npm run test:e2e` | 빌드한 앱을 별도 프로필로 띄워 화면을 점검(Windows, claude 없이도 통과). **로컬 전용** — 화면이 없는 CI 러너에서는 WebView2 창이 초기화되지 않아 돌리지 않습니다. `USERPROFILE`을 바꾼 셸에서는 디버그 포트가 열리지 않습니다 |
 | `npm run test:e2e:real` | **실제 claude 팀장 세션**으로 팀원 생성·등록까지 점검(claude 로그인 필요, 이 PC의 팀장 기록을 잠깐 쓰고 끝나면 지움) |
 
 ### 처음 실행할 때

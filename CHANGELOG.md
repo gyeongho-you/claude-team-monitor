@@ -18,7 +18,7 @@
 - **실제 앱 화면 E2E 시험**(`npm run test:e2e`, 12개): 빌드한 exe를 별도 프로필로 띄워 탭·접근성·도움말·스크립트 슬롯 관문·격리 프레임·진단·단일 실행 보호를 점검합니다.
 - **실제 claude 세션 E2E**(`npm run test:e2e:real`, 선택 실행): 진짜 `claude --bg` 팀장이 앱의 MCP 서버로 `register_as_lead` → `spawn_team_member`를 호출해 팀원이 실제로 뜨고 등록되는지 확인합니다(Haiku, 끝나면 만든 세션·기록만 정리). 이 시험이 **팀원 시작이 항상 실패하던 결함**(MCP 서버의 표준 입력을 자식 claude가 물려받음)을 잡아 고쳤고, 재발 방지 가드(`tests/spawnStdinGuard.test.js`)와 실패 원인을 `app.log`에 남기는 로그를 추가했습니다.
 - **가드 시험**: Rust 실행 코드의 패닉 후보(`unwrap`/`expect` 등)는 검토된 18곳뿐이고 새로 생기면 실패합니다(`docs/panic-allowlist.json`). 화면 코드의 이스케이프 없는 HTML 보간도 검토된 목록(`docs/html-interpolation-review.json`)과 어긋나면 실패합니다. 이 점검에서 `activity-${kind}` 클래스와 첨부 썸네일 주소에 이스케이프를 추가했습니다.
-- CI: 운영 의존성 취약점 검사(`npm audit`)와 Rust 의존성 검사(`cargo audit`, 참고용), 화면 E2E(참고용).
+- CI: 운영 의존성 취약점 검사(`npm audit`), Rust 의존성 검사(`cargo audit`, 참고용), Linux·macOS 자동 시험, 릴리스 파일 수집 점검, 릴리스 연습 실행, 주간 CLI 호환성 점검(모두 GitHub에서 실제로 실행되어 통과). 화면 E2E는 CI 러너에서 WebView2 창이 초기화되지 않아 로컬에서만 돌립니다.
 - 보안·개인정보 문서(`SECURITY.md`), 릴리스 절차 문서(`docs/RELEASING.md`), 태그를 올리면 설치 파일을 만드는 릴리스 워크플로.
 
 ### 수정(보안)

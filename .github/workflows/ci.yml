@@ -87,44 +87,8 @@ jobs:
         shell: pwsh
         run: ./scripts/collect-release-files.ps1 -Version "ci-${{ github.sha }}"
 
-      # 화면 E2E는 WebView2 런타임이 있어야 앱이 뜬다. 러너에 없으면 설치하고, 어느 쪽이었는지 주석으로 남긴다.
-      - name: WebView2 런타임 확인
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          $k = 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
-          $v = (Get-ItemProperty $k -ErrorAction SilentlyContinue).pv
-          if ($v) {
-            Write-Host "::notice title=WebView2::러너에 WebView2 런타임 $v 이(가) 있습니다"
-          } else {
-            Write-Host "::notice title=WebView2::러너에 WebView2 런타임이 없어 설치합니다"
-            Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile "$env:RUNNER_TEMP/wv2setup.exe"
-            Start-Process "$env:RUNNER_TEMP/wv2setup.exe" -ArgumentList '/silent', '/install' -Wait
-            $v2 = (Get-ItemProperty $k -ErrorAction SilentlyContinue).pv
-            Write-Host "::notice title=WebView2::설치 뒤 버전: $v2"
-          }
-
-      # 방금 빌드한 실제 앱을 띄워 화면을 점검한다(tests/e2e/smoke.js — 탭·접근성·도움말·스크립트 슬롯 관문·격리 프레임·진단·단일 실행 보호).
-      # 참고용: 로컬에서는 12/12 통과했지만 CI 러너(WebView2 환경)에서는 이번이 처음이라, 결과가 안정적임을 확인할 때까지 실패해도 CI 전체를 막지 않는다.
-      - name: 화면 E2E 시험
-        continue-on-error: true
-        shell: bash
-        env:
-          CTM_EXE: src-tauri/target/release/Claude Team Monitor.exe
-          CTM_E2E_SINGLE_INSTANCE: "1"
-        run: |
-          set +e
-          npm run test:e2e 2>&1 | tee e2e.log
-          code=${PIPESTATUS[0]}
-          if [ "$code" -ne 0 ]; then
-            # 실패한 점검 이름과 이유를 워크플로 주석으로 남긴다(continue-on-error라 단계는 초록으로 보이므로, 실패가 묻히지 않게)
-            summary="$(grep -E '✗|^      |E2E 중단|앱 exe를 찾지|통과' e2e.log | head -30)"
-            summary="${summary//'%'/'%25'}"
-            summary="${summary//$'\r'/'%0D'}"
-            summary="${summary//$'\n'/'%0A'}"
-            echo "::warning title=화면 E2E 실패(참고용)::${summary}"
-          fi
-          exit $code
+      # 화면 E2E(npm run test:e2e)는 CI에서 돌리지 않는다: 데스크톱 화면이 없는 GitHub 러너에서는 앱 프로세스는 뜨지만 WebView2 창이 초기화되지 않아
+      # 원격 디버그 포트가 열리지 않는다(러너에 WebView2 런타임 156은 있었음 — 실제로 시도해 확인). 로컬 Windows에서 12개 모두 통과한다 — README "시험" 참고.
 
       - uses: actions/upload-artifact@v4
         with:
