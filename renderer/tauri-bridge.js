@@ -151,6 +151,7 @@
 
   async function getPanelConfig() { return invoke('get_panel_config_command'); }
   async function setPanelEnabled(enabled) { return invoke('set_panel_enabled_command', { enabled }); }
+  async function cancelAi() { return invoke('cancel_ai_command'); }
   async function setScriptsEnabled(enabled) { return invoke('set_scripts_enabled_command', { enabled }); }
   async function savePanelSlot(input) { return invoke('save_panel_slot_command', { input }); }
   async function deletePanelSlot(id) { return invoke('delete_panel_slot_command', { id }); }
@@ -379,6 +380,7 @@
     getPanelConfig,
     setPanelEnabled,
     setScriptsEnabled,
+    cancelAi,
     savePanelSlot,
     deletePanelSlot,
     getPanelContent,

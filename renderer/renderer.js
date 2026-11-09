@@ -1694,7 +1694,7 @@ document.getElementById('ps-fix-btn').addEventListener('click', async e => {
   const btn = e.currentTarget;
   if (!psScript.value.trim()) { psStatus.textContent = '고칠 스크립트가 없습니다.'; return; }
   if (!psLastProblem.trim()) { psStatus.textContent = '먼저 "▶ 시험 실행"으로 문제가 나오는 결과를 만든 뒤 눌러 주세요.'; return; }
-  btn.disabled = true; psStatus.textContent = 'AI가 시험 실행 결과를 보고 스크립트를 고치는 중입니다(최대 2분)...';
+  btn.disabled = true; psStatus.textContent = 'AI가 시험 실행 결과를 보고 스크립트를 고치는 중입니다(Esc로 취소)...';
   const busyDone = aiBusyStart('AI가 스크립트를 고치는 중입니다');
   const gen = psFormGen;
   try {
@@ -1713,7 +1713,7 @@ document.getElementById('ps-gen-btn').addEventListener('click', async e => {
   const request = document.getElementById('ps-gen-request').value.trim();
   if (!request) { psStatus.textContent = '만들고 싶은 내용을 먼저 적어 주세요.'; return; }
   if (psScript.value.trim() && !confirm('입력해 둔 스크립트가 AI가 만든 것으로 바뀝니다. 계속할까요?')) return;
-  btn.disabled = true; psStatus.textContent = 'AI가 스크립트를 만드는 중입니다(최대 2분)...';
+  btn.disabled = true; psStatus.textContent = 'AI가 스크립트를 만드는 중입니다(Esc로 취소)...';
   const busyDone = aiBusyStart('AI가 스크립트를 만드는 중입니다');
   const gen = psFormGen;
   try {
@@ -1735,12 +1735,22 @@ function aiBusyStart(title) {
   const t0 = Date.now();
   const timeEl = document.getElementById('ai-busy-time');
   document.getElementById('ai-busy-title').textContent = title;
-  const tick = () => { timeEl.textContent = `${Math.floor((Date.now() - t0) / 1000)}초 경과 · 보통 10~60초, 최대 2분`; };
+  const tick = () => { timeEl.textContent = `${Math.floor((Date.now() - t0) / 1000)}초 경과 · 보통 10~60초 (시간 제한 없음)`; };
   tick();
   const timer = setInterval(tick, 1000);
   box.hidden = false;
   return () => { clearInterval(timer); box.hidden = true; };
 }
+// 작업 중 취소: 버튼 또는 Esc. 모델 호출 프로세스를 멈추고, 호출한 쪽은 "사용자가 취소했습니다" 오류로 정리된다.
+async function cancelAiWork() {
+  const box = document.getElementById('ai-busy');
+  if (box.hidden) return;
+  try { await window.api.cancelAi(); } catch (err) { console.error('AI 작업 취소 실패:', err); }
+}
+document.getElementById('ai-busy-cancel').addEventListener('click', cancelAiWork);
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !e.defaultPrevented && !document.getElementById('ai-busy').hidden) { e.preventDefault(); cancelAiWork(); }
+});
 // AI가 스크립트를 바꾸기 직전 내용(과 그때까지의 요청 이력)을 한 단계 보관해 되돌릴 수 있게 한다(만들기·수정·고치기 모두).
 const psUndoBtn = document.getElementById('ps-undo-btn');
 function psRememberBeforeAi() { psPrev = psScript.value.trim() ? { script: psScript.value, history: [...psHistory] } : null; psUndoBtn.hidden = psPrev === null; }
@@ -1790,7 +1800,7 @@ document.getElementById('ps-modify-btn').addEventListener('click', async e => {
   const change = document.getElementById('ps-gen-request').value.trim();
   if (!psScript.value.trim()) { psStatus.textContent = '수정할 스크립트가 없습니다. 비어 있으면 "AI로 만들기"를 쓰세요.'; return; }
   if (!change) { psStatus.textContent = '바꾸고 싶은 내용을 위 입력칸에 먼저 적어 주세요.'; return; }
-  btn.disabled = true; psStatus.textContent = 'AI가 지금 스크립트를 바탕으로 수정하는 중입니다(최대 2분)...';
+  btn.disabled = true; psStatus.textContent = 'AI가 지금 스크립트를 바탕으로 수정하는 중입니다(Esc로 취소)...';
   const busyDone = aiBusyStart('AI가 스크립트를 수정하는 중입니다');
   const gen = psFormGen;
   try {

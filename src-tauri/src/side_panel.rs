@@ -643,7 +643,24 @@ pub(crate) fn build_ai_prompt_with(instruction: &str, current: &str, material: &
 }
 
 /// 도구·설정·스킬·세션 저장 없이 최소 맥락으로 한 번만 묻는다(프롬프트는 stdin으로 — 길어도 명령줄 길이 제한에 안 걸린다).
-fn run_claude_oneshot(model: &str, prompt: &str) -> Result<String, String> {
+/// 사용자가 "AI 작업 취소"를 눌렀음을 알리는 표시 — 실행 중인 한 번짜리 모델 호출이 이걸 보고 멈춘다.
+static AI_CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// 지금 진행 중인 AI 작업(스크립트 만들기·수정·고치기)을 멈춘다. 진행 중인 게 없으면 아무 일도 없다.
+#[tauri::command]
+pub fn cancel_ai_command() -> bool {
+    if AI_BUSY.load(Ordering::SeqCst) {
+        AI_CANCEL.store(true, Ordering::SeqCst);
+        true
+    } else {
+        false
+    }
+}
+
+/// limit이 None이면 시간 제한 없이 끝날 때까지(또는 사용자가 취소할 때까지) 기다린다 — 사용자가 화면에서 기다리는 작업용.
+/// 백그라운드 자동 갱신은 멈춰 있어도 다른 작업을 영영 막지 않도록 제한을 준다.
+fn run_claude_oneshot(model: &str, prompt: &str, limit: Option<Duration>) -> Result<String, String> {
+    AI_CANCEL.store(false, Ordering::SeqCst);
     let mut cmd = Command::new("claude");
     cmd.args(["-p", "--model", model, "--output-format", "json", "--tools", "", "--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"]);
     cmd.current_dir(std::env::temp_dir());
@@ -672,7 +689,26 @@ fn run_claude_oneshot(model: &str, prompt: &str) -> Result<String, String> {
         let _ = stderr.read_to_end(&mut b);
         b
     });
-    match child.wait_timeout(AI_TIMEOUT) {
+    let started = std::time::Instant::now();
+    let waited = loop {
+        match child.wait_timeout(Duration::from_millis(250)) {
+            Ok(Some(status)) => break Ok(Some(status)),
+            Ok(None) => {
+                if AI_CANCEL.swap(false, Ordering::SeqCst) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("사용자가 취소했습니다.".to_string());
+                }
+                if let Some(l) = limit {
+                    if started.elapsed() >= l {
+                        break Ok(None);
+                    }
+                }
+            }
+            Err(e) => break Err(e),
+        }
+    };
+    match waited {
         Ok(Some(status)) => {
             let out = out_reader.join().unwrap_or_default();
             let err = err_reader.join().unwrap_or_default();
@@ -806,7 +842,7 @@ fn update_ai_slot(slot: &PanelSlot, material: &str) -> Result<String, String> {
     let dir = panel_dir();
     let (current, _) = read_content(&dir, &slot.id);
     let collected = if slot.ai_include == "none" { String::new() } else { render_items_markdown(&slot.ai_include, &collect_items(&slot.ai_include, &load_leads(), None)) };
-    let raw = run_claude_oneshot(&slot.ai_model, &build_ai_prompt_with(&slot.instruction, &current, material, &collected))?;
+    let raw = run_claude_oneshot(&slot.ai_model, &build_ai_prompt_with(&slot.instruction, &current, material, &collected), Some(AI_TIMEOUT))?;
     let Some(text) = sanitize_ai_output(&raw) else { return Ok(current) };
     write_content(&dir, &slot.id, &text)?;
     Ok(text)
@@ -1020,7 +1056,7 @@ pub async fn fix_panel_script_command(script: String, problem: String, note: Str
     if AI_BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
         return Err("다른 AI 작업이 진행 중입니다. 잠시 후 다시 누르세요.".to_string());
     }
-    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_fix_prompt(&script, &problem, &note, &interpreter, &output_format, allow_js))).await;
+    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_fix_prompt(&script, &problem, &note, &interpreter, &output_format, allow_js), None)).await;
     AI_BUSY.store(false, Ordering::SeqCst);
     let code = crate::panel_script::extract_code_block(&result.map_err(|e| e.to_string())??);
     if code.trim().is_empty() {
@@ -1054,7 +1090,7 @@ pub async fn modify_panel_script_command(script: String, change: String, history
     if AI_BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
         return Err("다른 AI 작업이 진행 중입니다. 잠시 후 다시 누르세요.".to_string());
     }
-    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_modify_prompt(&script, &change, &history, &last_run, &interpreter, &output_format, allow_js))).await;
+    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_modify_prompt(&script, &change, &history, &last_run, &interpreter, &output_format, allow_js), None)).await;
     AI_BUSY.store(false, Ordering::SeqCst);
     let code = crate::panel_script::extract_code_block(&result.map_err(|e| e.to_string())??);
     if code.trim().is_empty() {
@@ -1086,7 +1122,7 @@ pub async fn generate_panel_script_command(request: String, interpreter: String,
     if AI_BUSY.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
         return Err("다른 AI 작업이 진행 중입니다. 잠시 후 다시 누르세요.".to_string());
     }
-    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_generate_prompt(&request, &interpreter, &output_format, allow_js))).await;
+    let result = tokio::task::spawn_blocking(move || run_claude_oneshot(&model, &crate::panel_script::build_generate_prompt(&request, &interpreter, &output_format, allow_js), None)).await;
     AI_BUSY.store(false, Ordering::SeqCst);
     let text = result.map_err(|e| e.to_string())??;
     let code = crate::panel_script::extract_code_block(&text);

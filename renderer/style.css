@@ -1003,6 +1003,7 @@ body.sp-resizing { user-select: none; cursor: col-resize; }
 .ps-group[data-mode="script"] { position: relative; }
 .ai-busy { position: absolute; inset: 0; z-index: 50; background: var(--overlay); border-radius: 6px; }
 .ai-busy[hidden] { display: none; }
+.ai-busy-cancel { margin-top: 12px; padding: 6px 16px; border: 1px solid var(--border-2); background: transparent; color: var(--text); border-radius: 6px; cursor: pointer; }
 .ai-busy-card { position: sticky; top: 30vh; margin: 0 auto; width: fit-content; background: var(--surface); color: var(--text); border: 1px solid var(--border-2); border-radius: 10px; padding: 20px 28px; text-align: center; max-width: 340px; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5); }
 .ai-busy-title { font-size: 15px; font-weight: 600; margin: 12px 0 6px; color: var(--text-bright); }
 .ai-busy-time { font-size: 13px; color: var(--accent-2); font-variant-numeric: tabular-nums; }
