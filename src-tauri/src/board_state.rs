@@ -144,8 +144,17 @@ fn is_process_alive(pid: i64) -> bool {
     }
 }
 #[cfg(not(windows))]
-fn is_process_alive(_pid: i64) -> bool {
-    false
+fn is_process_alive(pid: i64) -> bool {
+    // macOS·Linux: `ps -p <pid>`는 그 프로세스가 있으면 성공하고 pid를 찍는다(POSIX 공통). 예전에는 여기서 항상 false를 돌려줘서
+    // 이 두 OS에서는 "열려 있는 터미널"을 한 번도 감지하지 못했다.
+    if pid <= 0 {
+        return false;
+    }
+    std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "pid="])
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
 }
 
 /// isAttachTerminalOpenFor(main.ts:2908)와 동일. 맵 접근은 state()의 Mutex로 짧게 잠그고,

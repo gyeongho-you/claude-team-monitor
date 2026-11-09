@@ -9,23 +9,23 @@
 <body>
   <header>
     <h1>Claude Team Monitor</h1>
-    <nav class="tabs">
-      <button class="tab-btn active" data-tab="work">작업</button>
-      <button class="tab-btn" data-tab="history">히스토리</button>
-      <button class="tab-btn" data-tab="settings">팀장/팀원 셋팅</button>
-      <button class="tab-btn" data-tab="cleanup">세션 정리</button>
-      <button class="tab-btn" data-tab="app-settings">앱 설정</button>
+    <nav class="tabs" role="tablist" aria-label="화면 선택">
+      <button class="tab-btn active" role="tab" aria-selected="true" data-tab="work">작업</button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-tab="history">히스토리</button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-tab="settings">팀장/팀원 셋팅</button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-tab="cleanup">세션 정리</button>
+      <button class="tab-btn" role="tab" aria-selected="false" data-tab="app-settings">앱 설정</button>
     </nav>
-    <button id="help-btn" title="도움말 — 화면별 기능 안내">?</button>
-    <button id="theme-toggle-btn" title="다크/라이트 모드 전환">🌙</button>
+    <button id="help-btn" title="도움말 — 화면별 기능 안내" aria-label="도움말">?</button>
+    <button id="theme-toggle-btn" title="다크/라이트 모드 전환" aria-label="다크/라이트 모드 전환">🌙</button>
     <button id="version-btn" class="version-text" title="앱 버전 — 누르면 앱 설정 탭에서 새 버전을 확인합니다"></button>
     <span id="last-updated"></span>
   </header>
 
-  <div id="stall-alerts-list"></div>
-  <div id="unapproved-dir-list"></div>
-  <div id="env-banner"></div>
-  <div id="update-banner"></div>
+  <div id="stall-alerts-list" role="alert" aria-live="assertive"></div>
+  <div id="unapproved-dir-list" role="alert" aria-live="assertive"></div>
+  <div id="env-banner" role="alert" aria-live="assertive"></div>
+  <div id="update-banner" role="status" aria-live="polite"></div>
 
   <main>
     <!-- 작업 탭: 팀장(대화 포함) / 팀원 모니터링·관리 만 -->
@@ -67,7 +67,7 @@
             <div id="chat-attachments"></div>
             <span id="chat-attach-hint">첨부한 파일의 경로가 메시지와 함께 전달됩니다 (끌어다 놓기·이미지 Ctrl+V 가능)</span>
           </div>
-          <div id="restart-lead-panel" class="modal-panel" hidden>
+          <div id="restart-lead-panel" class="modal-panel" role="dialog" aria-modal="true" aria-label="팀장 다시 시작" hidden>
             <p class="form-hint">지금 대화 맥락을 이어받지 않고, 같은 디렉토리에서 완전히 새 세션을 시작합니다. 이 팀장 카드(이름표)는 그대로 유지되고 내용만 새로워집니다 — 예전 대화가 필요하면 다시 못 부릅니다.</p>
             <div id="restart-pending-warning" class="pending-warning" hidden></div>
             <textarea id="restart-instruction" placeholder="새 작업 지시 (비우면 기본 지시로 시작)"></textarea>
@@ -75,14 +75,14 @@
             <button id="restart-cancel-btn">취소</button>
             <div id="restart-status"></div>
           </div>
-          <div id="end-work-panel" class="modal-panel" hidden>
+          <div id="end-work-panel" class="modal-panel" role="dialog" aria-modal="true" aria-label="작업 마치기" hidden>
             <p class="form-hint">이 팀장이 띄운 팀원을 먼저 전부 종료한 뒤, 팀장 자신도 종료합니다. 세션 자체는 지워지지 않고 "히스토리" 탭에서 나중에 다시 이어할 수 있습니다.</p>
             <div id="end-work-pending-warning" class="pending-warning" hidden></div>
             <button id="end-work-confirm-btn">종료</button>
             <button id="end-work-cancel-btn">취소</button>
             <div id="end-work-status"></div>
           </div>
-          <div id="activity-panel" class="modal-panel" hidden>
+          <div id="activity-panel" class="modal-panel" role="dialog" aria-modal="true" aria-label="활동 보기" hidden>
             <div class="activity-head">
               <strong id="activity-title"></strong>
               <span id="activity-sub"></span>
@@ -92,7 +92,7 @@
             </div>
             <div id="activity-body"></div>
           </div>
-          <div id="model-change-panel" class="modal-panel" hidden>
+          <div id="model-change-panel" class="modal-panel" role="dialog" aria-modal="true" aria-label="모델 변경" hidden>
             <p class="form-hint" id="model-change-target"></p>
             <select id="model-change-select">
               <option value="default">기본 모델 (claude CLI 기본값)</option>
@@ -106,7 +106,7 @@
             <button id="model-change-no-btn">취소</button>
             <div id="model-change-status"></div>
           </div>
-          <div id="emergency-stop-panel" class="modal-panel" hidden>
+          <div id="emergency-stop-panel" class="modal-panel" role="dialog" aria-modal="true" aria-label="긴급 중지 확인" hidden>
             <p class="form-hint emergency-stop-warning">⚠ 이 팀장이 지금 하던 작업을 그 자리에서 중단합니다(진행 중이던 응답은 잘릴 수 있음). 대화 내용은 그대로 남고, 메시지를 보내면 다시 이어집니다. 긴급 중지할까요?</p>
             <button id="emergency-stop-yes-btn" class="stop-btn">예</button>
             <button id="emergency-stop-no-btn">아니요</button>
@@ -330,6 +330,7 @@
         <h2>오른쪽 패널</h2>
         <p class="form-hint">작업 탭 오른쪽에 내가 정한 내용을 띄웁니다(정적인 글만 표시). 슬롯마다 채우는 방법을 고릅니다 — 자동 수집은 앱이 대화 기록에서 모으고, 팀장이 채움은 내가 적은 지침을 모든 팀장이 따르고, AI가 정리는 팀장이 일을 마칠 때마다 선택한 모델이 내가 적은 요청대로 갱신합니다.</p>
         <label class="settings-check"><input type="checkbox" id="panel-enabled-input" /> 오른쪽 패널 표시</label>
+        <label class="settings-check" id="panel-scripts-row"><input type="checkbox" id="panel-scripts-input" /> 스크립트 슬롯 사용 허용 <span class="ps-risk">⚠ 이 PC에서 내 계정 권한으로 코드를 실행합니다 — 꺼 두면 스크립트 슬롯을 만들거나 실행할 수 없습니다</span></label>
         <div id="panel-slot-list"></div>
         <div class="skill-form" id="panel-form">
           <input id="ps-name" type="text" maxlength="30" placeholder="슬롯 이름 (예: 보고서)" />
@@ -449,7 +450,7 @@
             <button id="ps-save-btn">슬롯 추가</button>
             <button id="ps-cancel-btn" hidden>수정 취소</button>
           </div>
-          <div id="ps-status" class="form-hint"></div>
+          <div id="ps-status" class="form-hint" role="status" aria-live="polite"></div>
         </div>
       </div>
 
@@ -465,6 +466,13 @@
         </div>
         <div id="about-update-status" class="form-hint"></div>
         <label class="settings-check"><input type="checkbox" id="auto-update-check-input" checked /> 앱을 켤 때와 6시간마다 새 버전을 자동으로 확인</label>
+        <h3 class="settings-sub">문제가 생겼을 때</h3>
+        <p class="form-hint">"진단 정보 복사"는 버전·환경 점검 결과·설정 요약·최근 로그를 한 덩어리 글로 복사합니다(팀장 지시문·스크립트 내용·대화는 넣지 않고, 홈 폴더 경로는 ~로 가립니다). 앱이 알아서 어딘가로 보내지는 않습니다 — 문제를 알릴 때 직접 붙여 넣으세요.</p>
+        <div class="settings-actions">
+          <button id="diag-copy-btn">진단 정보 복사</button>
+          <button id="open-log-folder-btn">로그 폴더 열기</button>
+        </div>
+        <div id="diag-status" class="form-hint" role="status" aria-live="polite"></div>
       </div>
 
       <div class="settings-card" data-section="dismissed">
@@ -478,21 +486,21 @@
 
   <div id="modal-backdrop" hidden></div>
 
-  <div id="cleanup-stop-panel" class="modal-panel" hidden>
+  <div id="cleanup-stop-panel" class="modal-panel" role="dialog" aria-modal="true" aria-label="세션 종료 확인" hidden>
     <p class="form-hint">이 세션을 지금 종료합니다 — 대화 내용은 복구할 수 없고, 진행 중이던 작업이 있었다면 그대로 끊깁니다.</p>
     <div id="cleanup-stop-info" class="pending-warning"></div>
     <button id="cleanup-stop-confirm-btn">종료</button>
     <button id="cleanup-stop-cancel-btn">취소</button>
   </div>
 
-  <div id="history-delete-panel" class="modal-panel" hidden>
+  <div id="history-delete-panel" class="modal-panel" role="dialog" aria-modal="true" aria-label="히스토리 삭제 확인" hidden>
     <p class="form-hint">Team Monitor 히스토리에서 이 팀장 기록을 삭제합니다 — 실제 claude 세션·대화 파일(daily-journal 포함)은 전혀 안 건드리고, 이 앱이 추적하는 목록에서만 지웁니다. 되돌릴 수 없습니다.</p>
     <div id="history-delete-info" class="pending-warning"></div>
     <button id="history-delete-confirm-btn">삭제</button>
     <button id="history-delete-cancel-btn">취소</button>
   </div>
 
-  <div id="file-list-panel" class="modal-panel" hidden>
+  <div id="file-list-panel" class="modal-panel" role="dialog" aria-modal="true" aria-label="변경 파일 목록" hidden>
    <div class="modal-scroll-inner">
     <div class="section-header">
       <h2>커밋 대상 변경사항</h2>
@@ -503,7 +511,7 @@
    </div>
   </div>
 
-  <div id="help-panel" class="modal-panel" hidden>
+  <div id="help-panel" class="modal-panel" role="dialog" aria-modal="true" aria-label="도움말" hidden>
    <div class="modal-scroll-inner">
     <div class="help-sticky">
     <div class="section-header">
@@ -582,6 +590,7 @@
       </section>
       <section class="help-section" data-help="script" hidden>
         <h3>9. 스크립트 슬롯 — 내가 보고 싶은 것을 직접 만들기</h3>
+        <p><strong>먼저 허용부터</strong> — 스크립트 슬롯은 <strong>처음에는 꺼져 있습니다.</strong> 앱 설정 → 오른쪽 패널의 <strong>"스크립트 슬롯 사용 허용"</strong>을 켜고 확인창에 동의해야 만들거나 실행할 수 있습니다(꺼 두면 이미 만든 슬롯도 실행되지 않습니다. 예전부터 스크립트 슬롯을 쓰던 분은 켜진 채로 이어집니다).</p>
         <p>프리셋으로 안 되는 "내가 보고 싶은 것"(브랜치·워크트리, 변경 파일, 커밋 그래프 등)을 작은 스크립트로 만들어 패널에 띄웁니다. 스크립트는 <strong>패널을 보는 동안 몇 초마다, 새로고침 때, 팀장을 바꿀 때</strong> 새로 실행되고, 그 표준 출력이 패널에 표시됩니다. 이 모드 자체는 토큰을 쓰지 않습니다.</p>
         <ul class="help-list">
           <li><strong>실행 환경</strong>: Node.js, Python, 셸(Windows는 PowerShell). <strong>출력 형식</strong>: 마크다운(글·표·링크·이미지) 또는 HTML(그래픽). <strong>제한 시간</strong>(기본 10초)을 넘으면 중단되고, 출력은 일정 길이까지만 보입니다. 너무 많이 쏟아내거나 끝나지 않는 자식 프로세스는 함께 정리됩니다.</li>
@@ -626,9 +635,11 @@
       <section class="help-section" data-help="about" hidden>
         <h3>12. 버전·업데이트·환경 점검</h3>
         <ul class="help-list">
-          <li><strong>버전 표시</strong> — 화면 위쪽에 <code>v0.1.2 · 빌드 11/06 17:37</code>처럼 보입니다. 같은 버전 번호로 여러 번 빌드해도 빌드 시각으로 어느 빌드인지 구분할 수 있습니다. 누르면 앱 설정의 업데이트 확인으로 이동합니다.</li>
+          <li><strong>버전 표시</strong> — 화면 위쪽에 <code>v0.2.0 · 빌드 11/09 10:20</code>처럼 보입니다. 같은 버전 번호로 여러 번 빌드해도 빌드 시각으로 어느 빌드인지 구분할 수 있습니다. 누르면 앱 설정의 업데이트 확인으로 이동합니다.</li>
           <li><strong>업데이트 확인</strong> — 앱을 켤 때와 6시간마다 새 버전이 있는지 확인합니다(설정에서 끌 수 있음). 새 버전이 있으면 알림이 뜨고 릴리스 페이지를 열 수 있습니다.</li>
-          <li><strong>시작 시 환경 점검</strong> — 앱이 일하려면 <code>claude</code> CLI와 Node.js(18 이상)가 필요합니다. 없거나 너무 오래됐거나 필수 파일이 빠져 있으면 <strong>문제가 있을 때만</strong> 화면 위에 안내 카드가 뜹니다("다시 확인"으로 재점검, ✕로 닫기). 빨간 카드는 앱이 제대로 일하지 못하는 문제, 파란 카드는 참고용입니다.</li>
+          <li><strong>시작 시 환경 점검</strong> — 앱이 일하려면 <code>claude</code> CLI가 필요합니다(Node.js는 필요 없고, 스크립트 슬롯이 Node.js를 쓸 때만 참고 안내가 뜹니다). claude가 없거나 너무 오래됐거나, 버전은 맞아도 앱이 쓰는 기능(<code>--bg</code>, <code>agents --json</code> 등)이 <code>claude --help</code>에서 사라졌거나, 앱 파일이 빠져 있으면 <strong>문제가 있을 때만</strong> 화면 위에 안내 카드가 뜹니다("다시 확인"으로 재점검, ✕로 닫기). 빨간 카드는 앱이 제대로 일하지 못하는 문제, 파란 카드는 참고용입니다.</li>
+          <li><strong>두 번 실행하면</strong> — 이미 떠 있는 창을 앞으로 가져오고 새 창은 뜨지 않습니다(같은 팀장 기록을 두 프로세스가 만지는 것을 막습니다).</li>
+          <li><strong>진단 정보 복사 · 로그 폴더 열기</strong> — 앱 설정 → 앱 정보 아래 "문제가 생겼을 때"에 있습니다. 복사한 글에는 버전·환경 점검 결과·설정 요약·최근 로그가 들어가고, 지시문·스크립트·대화는 들어가지 않으며 홈 폴더 경로는 <code>~</code>로 가려집니다. 앱이 어딘가로 보내지는 않으니 문제를 알릴 때 직접 붙여 넣으세요.</li>
           <li><strong>로그</strong> — 핵심 실패는 사용자 폴더의 <code>claude-team-monitor/app.log</code>에 남고, 5MB를 넘으면 <code>app.log.1</code>로 넘겨 끝없이 커지지 않게 합니다. 문제를 알려 줄 때 이 파일이 도움이 됩니다.</li>
         </ul>
       </section>
@@ -640,9 +651,9 @@
     <div id="sp-resize" class="sp-resize" title="끌어서 너비 조절 (더블클릭: 기본 너비)"></div>
     <div class="sp-head">
       <div id="sp-tabs" class="sp-tabs"></div>
-      <button id="sp-refresh-btn" class="sp-icon" title="새로고침">⟳</button>
-      <button id="sp-edit-btn" class="sp-icon" title="내용 고치기" hidden>✎</button>
-      <button id="sp-collapse-btn" class="sp-icon" title="패널 접기">▸</button>
+      <button id="sp-refresh-btn" class="sp-icon" title="새로고침" aria-label="패널 새로고침">⟳</button>
+      <button id="sp-edit-btn" class="sp-icon" title="내용 고치기" aria-label="패널 내용 고치기" hidden>✎</button>
+      <button id="sp-collapse-btn" class="sp-icon" title="패널 접기" aria-label="패널 접기">▸</button>
     </div>
     <div id="sp-meta" class="sp-meta"></div>
     <div id="sp-filter" class="sp-filter" hidden>

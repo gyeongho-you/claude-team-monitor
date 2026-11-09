@@ -70,19 +70,6 @@ pub fn skill_src_path() -> PathBuf {
     resources_root().join("skills").join("team-lead").join("SKILL.md")
 }
 
-// buildMemberSpawnCliArgs(main.ts)가 --mcp-config의 command/args로 넘기는 팀원 생성 MCP 서버
-// 스크립트 경로 — esbuild가 dist/teamMemberServer.js로 번들한다(package.json build 스크립트 참고).
-// resources_root()와 같은 이유로 실행 파일 옆 dist/를 먼저 보고, 없으면 리포 루트의 dist/로 폴백한다.
-pub fn team_member_server_js_path() -> PathBuf {
-    if let Some(dir) = packaged_root() {
-        let candidate = dir.join("dist").join("teamMemberServer.js");
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-    repo_root_dev().join("dist").join("teamMemberServer.js")
-}
-
 // approvedMemberBriefing(main.ts)이 읽는 MEMBER_TEMPLATES_PATH와 동일 — app_data_dir()(아래)
 // 밑에 둔다(Electron의 app.getPath('userData')와 같은 값).
 pub fn member_templates_path() -> PathBuf {

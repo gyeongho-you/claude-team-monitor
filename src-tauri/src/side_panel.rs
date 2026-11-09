@@ -119,6 +119,27 @@ pub struct PanelConfig {
     pub enabled: bool,
     #[serde(default)]
     pub slots: Vec<PanelSlot>,
+    /// 스크립트 슬롯 사용을 사용자가 명시적으로 켰는지(true)/껐는지(false). 없으면(이 항목이 생기기 전의 설정) 이미 스크립트 슬롯이 있는 사용자는 켜 둔 것으로 본다.
+    #[serde(default)]
+    pub scripts_enabled: Option<bool>,
+    /// 위 값과 기존 슬롯으로 계산한 실제 허용 여부. 저장된 값은 무시하고 읽을 때마다 다시 계산한다(화면과 실행 차단이 이 값을 쓴다).
+    #[serde(default, skip_deserializing)]
+    pub scripts_allowed: bool,
+}
+
+impl PanelConfig {
+    /// 스크립트 슬롯은 임의 코드를 이 PC에서 실행하므로 처음 쓰는 사용자에게는 꺼져 있다. 이미 스크립트 슬롯을 쓰던 사용자는 그대로 이어서 쓸 수 있고,
+    /// 사용자가 한 번이라도 직접 켜거나 끄면 그 선택이 항상 우선한다.
+    pub(crate) fn compute_scripts_allowed(&self) -> bool {
+        self.scripts_enabled.unwrap_or_else(|| self.slots.iter().any(|s| s.mode == "script"))
+    }
+}
+
+const SCRIPTS_OFF_MESSAGE: &str = "스크립트 슬롯이 꺼져 있습니다 — 앱 설정 → 오른쪽 패널에서 \"스크립트 슬롯 사용 허용\"을 켠 뒤 사용하세요.";
+
+/// 스크립트를 실행하거나 스크립트 슬롯을 저장하기 전에 거치는 관문.
+pub(crate) fn require_scripts_allowed(config: &PanelConfig) -> Result<(), String> {
+    if config.compute_scripts_allowed() { Ok(()) } else { Err(SCRIPTS_OFF_MESSAGE.to_string()) }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -224,11 +245,18 @@ pub(crate) fn slot_from_input(input: &PanelSlotInput, id: String, created_at: i6
 }
 
 fn load_config_from(path: &Path) -> PanelConfig {
-    std::fs::read_to_string(path).ok().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default()
+    let mut config: PanelConfig = std::fs::read_to_string(path).ok().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+    config.scripts_allowed = config.compute_scripts_allowed();
+    config
 }
 
 pub fn load_panel_config() -> PanelConfig {
     load_config_from(&side_panel_path())
+}
+
+/// Node.js 실행 환경을 고른(켜져 있는) 스크립트 슬롯의 이름들 — 환경 점검이 "node가 필요한가"를 판단하는 데 쓴다(env_check.rs).
+pub(crate) fn script_slot_names_using_node() -> Vec<String> {
+    load_panel_config().slots.into_iter().filter(|s| s.enabled && s.mode == "script" && s.interpreter == "node").map(|s| s.name).collect()
 }
 
 fn config_lock() -> &'static AsyncMutex<()> {
@@ -252,6 +280,7 @@ where
     let old = load_config_from(path);
     let mut new = old.clone();
     mutate(&mut new)?;
+    new.scripts_allowed = new.compute_scripts_allowed();
     write_json_file_atomic(path, &new).map_err(|e| format!("패널 설정을 저장하지 못했습니다: {e}"))?;
     Ok((old, new))
 }
@@ -787,9 +816,22 @@ pub async fn set_panel_enabled_command(enabled: bool) -> Result<PanelConfig, Str
     .await
 }
 
+/// 스크립트 슬롯 사용 허용을 켜거나 끈다. 끄면 이미 만든 스크립트 슬롯도 실행되지 않는다(내용은 지워지지 않는다).
+#[tauri::command]
+pub async fn set_scripts_enabled_command(enabled: bool) -> Result<PanelConfig, String> {
+    commit(move |c| {
+        c.scripts_enabled = Some(enabled);
+        Ok(())
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn save_panel_slot_command(input: PanelSlotInput) -> Result<PanelConfig, String> {
     commit(move |c| {
+        if input.mode == "script" {
+            require_scripts_allowed(c)?;
+        }
         match input.id.as_deref() {
             Some(id) => {
                 let Some(pos) = c.slots.iter().position(|s| s.id == id) else { return Err("그 슬롯을 찾지 못했습니다.".to_string()) };
@@ -890,6 +932,7 @@ pub struct ScriptTestResult {
 /// 설정 화면의 "시험 실행": 저장하지 않은 스크립트를 지금 돌려 결과를 보여 준다.
 #[tauri::command]
 pub async fn test_panel_script_command(interpreter: String, script: String, timeout_ms: u64, lead_id: Option<String>, output_format: Option<String>, allow_js: Option<bool>) -> Result<ScriptTestResult, String> {
+    require_scripts_allowed(&load_panel_config())?;
     if !crate::panel_script::INTERPRETERS.contains(&interpreter.as_str()) {
         return Err("스크립트 실행 환경이 올바르지 않습니다.".to_string());
     }
@@ -1045,6 +1088,9 @@ pub async fn get_panel_content_command(slot_id: String, lead_id: Option<String>,
         return Ok(PanelContent { markdown: md, updated_at: None, mode: slot.mode, note: "대화 기록에서 자동으로 모았습니다".to_string(), items, format: "markdown".to_string() });
     }
     if slot.mode == "script" {
+        if !load_panel_config().scripts_allowed {
+            return Ok(PanelContent { markdown: format!("⚠ {SCRIPTS_OFF_MESSAGE}"), updated_at: None, mode: slot.mode, note: "스크립트 슬롯이 꺼져 있어 실행하지 않았습니다".to_string(), items: Vec::new(), format: "markdown".to_string() });
+        }
         return script_content(slot, lead_id, force.unwrap_or(false)).await;
     }
     let (text, mtime) = read_content(&panel_dir(), &slot.id);
@@ -1303,11 +1349,59 @@ mod tests {
     }
 
     #[test]
+    fn scripts_are_off_for_a_fresh_config_but_stay_on_for_users_who_already_have_a_script_slot() {
+        let dir = std::env::temp_dir().join(format!("ctm-panel-gate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sidePanel.json");
+        // 설정 파일이 아직 없는 새 사용자
+        let fresh = load_config_from(&path);
+        assert!(!fresh.scripts_allowed, "처음 쓰는 사용자는 꺼져 있다");
+        assert!(require_scripts_allowed(&fresh).is_err());
+        // 이 항목이 생기기 전 설정(scriptsEnabled 없음) + 스크립트 슬롯 있음 → 기존 사용자는 그대로 켜짐
+        let script = slot_from_input(&PanelSlotInput { script: "console.log(1)".into(), ..input("script") }, "slot-1".into(), 1).unwrap();
+        let legacy = PanelConfig { enabled: true, slots: vec![script.clone()], ..Default::default() };
+        std::fs::write(&path, serde_json::to_string(&legacy).unwrap()).unwrap();
+        assert!(load_config_from(&path).scripts_allowed, "이미 스크립트 슬롯을 쓰던 사용자는 이어서 쓴다");
+        // 사용자가 명시적으로 끄면 슬롯이 있어도 꺼진다 (저장된 scriptsAllowed 값이 있어도 무시하고 다시 계산)
+        let off = PanelConfig { scripts_enabled: Some(false), scripts_allowed: true, ..legacy.clone() };
+        std::fs::write(&path, serde_json::to_string(&off).unwrap()).unwrap();
+        assert!(!load_config_from(&path).scripts_allowed);
+        // 명시적으로 켜면 슬롯이 없어도 켜진다
+        let on = PanelConfig { scripts_enabled: Some(true), ..Default::default() };
+        std::fs::write(&path, serde_json::to_string(&on).unwrap()).unwrap();
+        assert!(load_config_from(&path).scripts_allowed && require_scripts_allowed(&load_config_from(&path)).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saving_through_commit_core_recomputes_the_allowed_flag_and_keeps_the_choice() {
+        let dir = std::env::temp_dir().join(format!("ctm-panel-gate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sidePanel.json");
+        let (_, after_on) = commit_core(&path, |c| {
+            c.scripts_enabled = Some(true);
+            Ok(())
+        })
+        .unwrap();
+        assert!(after_on.scripts_allowed);
+        let (_, after_off) = commit_core(&path, |c| {
+            c.scripts_enabled = Some(false);
+            Ok(())
+        })
+        .unwrap();
+        assert!(!after_off.scripts_allowed);
+        assert_eq!(load_config_from(&path).scripts_enabled, Some(false), "선택이 파일에 남는다");
+        // 끈 상태에서 스크립트 슬롯 저장은 관문에서 막힌다
+        assert!(require_scripts_allowed(&load_config_from(&path)).unwrap_err().contains("꺼져 있습니다"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn lead_briefing_lists_only_enabled_lead_slots_and_only_when_the_panel_is_on() {
         let dir = std::env::temp_dir();
         let lead_slot = slot_from_input(&PanelSlotInput { instruction: "보고서를 만들면 날짜·제목·링크를 한 줄로 추가".into(), ..input("lead") }, "slot-9".into(), 1).unwrap();
         let manual = slot_from_input(&input("manual"), "slot-8".into(), 1).unwrap();
-        let mut cfg = PanelConfig { enabled: true, slots: vec![lead_slot.clone(), manual] };
+        let mut cfg = PanelConfig { enabled: true, slots: vec![lead_slot.clone(), manual], ..Default::default() };
         let text = build_panel_briefing(&cfg, &dir);
         assert!(text.contains("slot-9.md") && text.contains("날짜·제목·링크") && !text.contains("slot-8"), "{text}");
         cfg.slots[0].enabled = false;

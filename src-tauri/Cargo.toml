@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.1.2"
+version = "0.2.0"
 description = "Claude Code 팀장/팀원 세션을 한 화면에서 모니터링·관리하는 데스크톱 앱"
 authors = ["Julian"]
 license = "MIT"
@@ -42,6 +42,8 @@ uuid = { version = "1", features = ["v4"] }
 # 직접 dependency로 승격만 한다.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tauri-plugin-dialog = "2"
+# 앱을 두 번 켜면 leads.json·알림 배달이 서로 겹칠 수 있어 두 번째 실행은 첫 창을 앞으로 가져오고 끝낸다(CTM_ALLOW_MULTI=1이면 예외 — lib.rs 참고).
+tauri-plugin-single-instance = "2"
 # 붙여넣은 이미지(pasted_images.rs)를 base64로 받아 파일로 저장 — 이미 transitive dependency라 새 버전을 끌어오지 않는다.
 base64 = "0.22"
 

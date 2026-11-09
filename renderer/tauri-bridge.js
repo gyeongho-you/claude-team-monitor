@@ -146,6 +146,7 @@
 
   async function getPanelConfig() { return invoke('get_panel_config_command'); }
   async function setPanelEnabled(enabled) { return invoke('set_panel_enabled_command', { enabled }); }
+  async function setScriptsEnabled(enabled) { return invoke('set_scripts_enabled_command', { enabled }); }
   async function savePanelSlot(input) { return invoke('save_panel_slot_command', { input }); }
   async function deletePanelSlot(id) { return invoke('delete_panel_slot_command', { id }); }
   async function getPanelContent(slotId, leadId, force) { return invoke('get_panel_content_command', { slotId, leadId: leadId || null, force: !!force }); }
@@ -154,6 +155,8 @@
   async function modifyPanelScript(script, change, history, lastRun, interpreter, model, outputFormat, allowJs) { return invoke('modify_panel_script_command', { script, change, history: history || [], lastRun: lastRun || '', interpreter, model, outputFormat: outputFormat || 'markdown', allowJs: !!allowJs }); }
   async function fixPanelScript(script, problem, note, interpreter, model, outputFormat, allowJs) { return invoke('fix_panel_script_command', { script, problem, note, interpreter, model, outputFormat: outputFormat || 'markdown', allowJs: !!allowJs }); }
   async function checkEnvironment() { return invoke('check_environment_command'); }
+  async function getDiagnostics() { return invoke('get_diagnostics_command'); }
+  async function openLogFolder() { return invoke('open_log_folder_command'); }
   async function restartApp() { return invoke('restart_app_command'); }
   async function registerPanelFrame(html) { return invoke('register_panel_frame_command', { html }); }
   async function revealPanelPath(path, leadId) { return invoke('reveal_panel_path_command', { path, leadId: leadId || null }); }
@@ -370,6 +373,7 @@
     changeSessionModel,
     getPanelConfig,
     setPanelEnabled,
+    setScriptsEnabled,
     savePanelSlot,
     deletePanelSlot,
     getPanelContent,
@@ -398,6 +402,8 @@
     readUserSkill,
     getAppVersion,
     getBuildTime,
+    getDiagnostics,
+    openLogFolder,
     checkForUpdate,
     openReleasePage,
     endLeadWork,

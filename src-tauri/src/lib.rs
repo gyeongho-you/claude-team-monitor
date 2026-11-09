@@ -5,6 +5,7 @@ mod claude_bg_output;
 mod claude_readiness;
 mod concurrency;
 mod daemon_state;
+mod diagnostics;
 mod subagents;
 mod activity;
 mod app_skills;
@@ -14,6 +15,7 @@ mod retired_members;
 mod favorites;
 mod git_diff;
 mod json_file;
+pub mod mcp_server;
 mod lead_admin;
 mod lead_lifecycle;
 mod live_rows;
@@ -43,7 +45,21 @@ mod transcript;
 pub fn run() {
   // macOS에서 Dock/Finder로 연 앱은 터미널의 PATH를 못 물려받아 claude/node를 못 찾는다 — 시작할 때 보정한다(path_fix.rs 설명 참고).
   path_fix::fix_path_env();
-  tauri::Builder::default()
+  logging::install_panic_hook();
+  let mut builder = tauri::Builder::default();
+  // 앱을 두 번 켜면 같은 leads.json·알림 큐·팀장 제어를 두 프로세스가 동시에 만져 서로 겹칠 수 있다 — 두 번째 실행은 이미 떠 있는 창을 앞으로 가져오고 끝난다.
+  // (이 플러그인은 가장 먼저 등록해야 한다.) 시험처럼 일부러 여러 개를 띄워야 할 때만 CTM_ALLOW_MULTI=1로 끈다.
+  if std::env::var_os("CTM_ALLOW_MULTI").is_none() {
+    builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+      use tauri::Manager;
+      if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+      }
+    }));
+  }
+  builder
     // pick-directory(main.ts:2467, dialog.showOpenDialog)의 Tauri 대응 — 네이티브 폴더 선택
     // 다이얼로그는 tauri 코어가 아니라 공식 플러그인(tauri-plugin-dialog)으로 제공된다.
     .plugin(tauri_plugin_dialog::init())
@@ -104,9 +120,12 @@ pub fn run() {
       side_panel::generate_panel_script_command,
       side_panel::get_panel_script_reference_command,
       side_panel::fix_panel_script_command,
+      side_panel::set_scripts_enabled_command,
       side_panel::modify_panel_script_command,
       side_panel::get_panel_script_errors_command,
       env_check::check_environment_command,
+      diagnostics::get_diagnostics_command,
+      diagnostics::open_log_folder_command,
       panel_frames::register_panel_frame_command,
       panel_frames::restart_app_command,
       panel_actions::reveal_panel_path_command,

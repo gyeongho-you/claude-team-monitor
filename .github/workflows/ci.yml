@@ -1,7 +1,8 @@
 name: CI
 
-# 푸시와 PR마다 시험을 돌린다. 이 앱은 Windows에서 개발·검증했으므로 Windows 러너에서 돌린다.
-# (macOS·Linux 러너는 아직 넣지 않았다 — Tauri 크레이트 전체를 그쪽에서 빌드·시험해 본 적이 없다.)
+# 푸시와 PR마다 시험을 돌린다. 이 앱은 Windows에서 개발·검증했으므로 Windows가 기준(test, installer)이다.
+# Linux는 같은 시험을 필수로 돌린다(Debian 컨테이너에서 전체 통과를 확인했다). macOS는 아직 한 번도 돌려 보지 못해서
+# "참고용"(continue-on-error)으로만 돌린다 — 실패해도 CI 전체는 실패로 만들지 않고, 결과는 Actions 화면에서 볼 수 있다.
 on:
   push:
     branches: [main]
@@ -48,7 +49,7 @@ jobs:
         run: cargo test --lib
 
   installer:
-    # 설치 파일(NSIS)이 만들어지고, 앱이 실행 중에 읽는 파일(dist/teamMemberServer.js, resources/)이 들어 있는지 확인한다.
+    # 설치 파일(NSIS)이 만들어지고, 앱이 실행 중에 읽는 파일(resources/)이 들어 있는지 확인한다.
     needs: test
     runs-on: windows-latest
     timeout-minutes: 60
@@ -82,3 +83,63 @@ jobs:
           name: windows-installer
           path: src-tauri/target/release/bundle/nsis/*-setup.exe
           if-no-files-found: error
+
+  test-linux:
+    # 화면 없이 도는 자동 시험(Rust 전체 + JS)만 본다. 실제 화면은 Windows에서만 확인했다.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      - name: Tauri 빌드 의존 패키지(Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Rust 시험
+        working-directory: src-tauri
+        run: cargo test --lib
+
+  test-macos:
+    # 참고용: macOS는 아직 한 번도 검증하지 못했다. 실패해도 CI 전체를 막지 않는다.
+    runs-on: macos-latest
+    continue-on-error: true
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm test
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Rust 시험
+        working-directory: src-tauri
+        run: cargo test --lib

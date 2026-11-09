@@ -23,6 +23,19 @@ pub(crate) fn rotate_if_large(path: &Path, max_bytes: u64) {
     let _ = std::fs::rename(path, &rotated);
 }
 
+/// 앱(과 MCP 서버)이 panic으로 죽을 때 이유를 app.log에 남긴다. GUI 앱은 콘솔이 없어 기본 panic 메시지가 어디에도 보이지 않는다.
+/// 기본 동작(이전 훅)은 그대로 이어서 실행한다.
+pub fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_else(|| "알 수 없는 위치".to_string());
+        let payload = info.payload();
+        let message = payload.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| payload.downcast_ref::<String>().cloned()).unwrap_or_else(|| "(메시지 없음)".to_string());
+        log_critical(&format!("[panic] {location} — {message}"));
+        previous(info);
+    }));
+}
+
 pub fn log_critical(message: &str) {
     eprintln!("{message}");
     log_critical_to(&app_log_path(), message);

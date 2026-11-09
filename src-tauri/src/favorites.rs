@@ -237,12 +237,14 @@ mod tests {
     async fn update_favorite_name_falls_back_to_basename_when_empty() {
         let path = temp_favorites_path("rename");
         let lock = AsyncMutex::new(());
-        save_favorites_to(&path, &[Favorite { path: "C:\\proj\\sub".to_string(), name: "custom".to_string() }]);
+        // 경로 표기는 실행 중인 OS의 것을 쓴다(리눅스는 역슬래시를 구분자로 보지 않는다)
+        let dir = if cfg!(windows) { "C:\\proj\\sub" } else { "/proj/sub" };
+        save_favorites_to(&path, &[Favorite { path: dir.to_string(), name: "custom".to_string() }]);
 
         let after = with_favorites_lock_at(&path, &lock, |favs| {
-            let Some(f) = favs.iter_mut().find(|f| f.path == "C:\\proj\\sub") else { return (false, favs.clone()) };
+            let Some(f) = favs.iter_mut().find(|f| f.path == dir) else { return (false, favs.clone()) };
             let name = "";
-            f.name = if name.is_empty() { basename("C:\\proj\\sub") } else { name.to_string() };
+            f.name = if name.is_empty() { basename(dir) } else { name.to_string() };
             (true, favs.clone())
         })
         .await;

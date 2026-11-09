@@ -66,9 +66,10 @@ document.getElementById('theme-toggle-btn').addEventListener('click', () => {
 // --- 탭 전환 ---
 document.querySelectorAll('.tab-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => { b.classList.remove('active'); b.setAttribute('aria-selected', 'false'); });
     document.querySelectorAll('.tab-page').forEach(p => p.classList.remove('active'));
     btn.classList.add('active');
+    btn.setAttribute('aria-selected', 'true');
     document.getElementById(`${btn.dataset.tab}-tab`).classList.add('active');
   });
 });
@@ -793,7 +794,7 @@ const spExpandBtn = document.getElementById('sp-expand-btn');
 const spEditorEl = document.getElementById('sp-editor');
 const spEditorText = document.getElementById('sp-editor-text');
 const PANEL_COLLAPSED_KEY = 'ctm.panelCollapsed';
-let panelConfig = { enabled: false, slots: [] };
+let panelConfig = { enabled: false, slots: [], scriptsAllowed: false };
 let panelActiveId = null;
 let panelContent = null;
 let panelEditing = false;
@@ -1162,6 +1163,7 @@ setInterval(() => {
 
 // ---- 설정 화면(앱 설정 탭 > 오른쪽 패널) ----
 const panelEnabledEl = document.getElementById('panel-enabled-input');
+const panelScriptsEl = document.getElementById('panel-scripts-input');
 const panelSlotListEl = document.getElementById('panel-slot-list');
 const psName = document.getElementById('ps-name');
 const psMode = document.getElementById('ps-mode');
@@ -1222,6 +1224,14 @@ psAllowJs.addEventListener('change', updatePsJsUi);
 
 function renderPanelSettings() {
   panelEnabledEl.checked = !!panelConfig.enabled;
+  panelScriptsEl.checked = !!panelConfig.scriptsAllowed;
+  // 꺼져 있으면 "스크립트" 방식을 고를 수 없게 한다(백엔드도 저장·실행을 막는다)
+  const scriptOpt = psMode.querySelector('option[value="script"]');
+  if (scriptOpt) {
+    if (!scriptOpt.dataset.label) scriptOpt.dataset.label = scriptOpt.textContent;
+    scriptOpt.disabled = !panelConfig.scriptsAllowed;
+    scriptOpt.textContent = panelConfig.scriptsAllowed ? scriptOpt.dataset.label : `${scriptOpt.dataset.label} (먼저 위의 "스크립트 슬롯 사용 허용"을 켜세요)`;
+  }
   panelSlotListEl.innerHTML = (panelConfig.slots || []).map(s => {
     const extra = s.mode === 'ai' ? ` · ${PS_MODEL_NAMES[s.aiModel] || s.aiModel}${s.aiInclude === 'artifact-reports' ? ' · 보고서 목록 포함' : s.aiInclude === 'github-pr' ? ' · PR 목록 포함' : ''}${s.autoUpdate ? ' · 자동' : ''}` : s.mode === 'script' ? ` · ${{ node: 'Node.js', python: 'Python', shell: '셸' }[s.interpreter] || s.interpreter} · 제한 ${s.timeoutMs}ms · ${s.outputFormat === 'html' ? 'HTML 그래픽' : '마크다운'}${s.allowJs ? ' · JS 허용' : ''}` : s.mode === 'auto' ? ` · ${s.preset === 'github-pr' ? 'GitHub PR' : 'Artifact 보고서'}${s.scope === 'selected' ? ' · 선택한 팀장' : ''}` : '';
     return `<div class="skill-item ${s.enabled ? '' : 'off'}">
@@ -1255,6 +1265,12 @@ function psInputFromForm(enabled) {
   };
 }
 
+panelScriptsEl.addEventListener('change', async () => {
+  const want = panelScriptsEl.checked;
+  if (want && !confirm('스크립트 슬롯을 허용합니다.\n\n스크립트는 이 PC에서 내 계정 권한으로 실행되며, 파일을 지우거나 프로그램을 실행하거나 인터넷으로 보내는 것까지 가능합니다(앱이 가두지 않습니다). 모르는 사람에게 받은 코드나 읽어 보지 않은 AI 코드는 넣지 마세요.\n\n허용할까요?')) { panelScriptsEl.checked = false; return; }
+  try { panelConfig = await window.api.setScriptsEnabled(want); renderPanelChrome(); renderPanelSettings(); refreshPanelContent(true); psStatus.textContent = want ? '스크립트 슬롯을 허용했습니다.' : '스크립트 슬롯을 껐습니다 — 이미 만든 스크립트는 실행되지 않습니다.'; }
+  catch (err) { psStatus.textContent = errMsg(err); panelScriptsEl.checked = !want; }
+});
 panelEnabledEl.addEventListener('change', async () => {
   try { panelConfig = await window.api.setPanelEnabled(panelEnabledEl.checked); renderPanelChrome(); refreshPanelContent(true); psStatus.textContent = ''; }
   catch (err) { psStatus.textContent = errMsg(err); panelEnabledEl.checked = !panelEnabledEl.checked; }
@@ -1970,7 +1986,8 @@ async function runEnvironmentCheck() {
   let r;
   try { r = await window.api.checkEnvironment(); } catch (err) { console.warn('환경 점검 실패:', err); return; }
   const problems = [];
-  for (const [label, t] of [['claude CLI', r.claude], ['Node.js', r.node]]) {
+  for (const [label, t] of [['claude CLI', r.claude], ['claude 기능', r.claudeFeatures], ['Node.js', r.node]]) {
+    if (!t) continue;
     // 문제 문장이 이미 "claude CLI를…"처럼 이름으로 시작하면 "claude CLI: claude CLI를…"처럼 겹치지 않게 접두를 붙이지 않는다.
     if (t.problem) problems.push({ blocking: t.blocking, text: t.problem.startsWith(label) ? t.problem : `${label}${t.version ? ` ${t.version}` : ''}: ${t.problem}` });
   }
@@ -3597,9 +3614,19 @@ function renderBoard(rows) {
   if (!editingLabel) {
     // 오프라인 팀장은 여기서 빼고 "히스토리" 탭에 모아서 보여준다 — 작업 보드가 계속 안 쓰는
     // 예전 팀장으로 지저분해지는 걸 막는다.
+    // 팀장 기록이 하나도 없으면(처음 쓰는 사용자) 시작 안내를, 기록은 있는데 지금 떠 있는 팀장만 없으면 짧은 안내를 보여 준다.
+    const firstRunGuide = `<div class="empty-hint first-run">
+      <strong>처음이신가요?</strong>
+      <ol>
+        <li>위쪽 <b>+ 새 팀장</b>을 눌러 작업할 폴더(저장소)를 고르고, 시킬 일을 적어 시작하세요.</li>
+        <li>팀장이 여러 저장소에 팀원을 나눠 맡기면 아래 <b>팀원</b> 칸에서 진행 상황을 볼 수 있습니다.</li>
+        <li>팀원을 승인 안 된 폴더에 만들려고 하면 <b>승인 요청</b> 카드가 뜹니다 — 허용/거부를 누르면 됩니다.</li>
+      </ol>
+      <span>자세한 사용법은 오른쪽 위 <b>?</b>(도움말)에 있습니다. 앱이 쓰는 claude CLI에 문제가 있으면 화면 위쪽에 안내가 뜹니다.</span>
+    </div>`;
     leadRowEl.innerHTML = onlineLeads.length
       ? onlineLeads.map(renderLeadCard).join('')
-      : '<div class="empty-hint">지금 띄운 팀장이 없습니다. (예전 팀장은 히스토리 탭에서 이어할 수 있습니다)</div>';
+      : (leads.length === 0 ? firstRunGuide : '<div class="empty-hint">지금 띄운 팀장이 없습니다. (예전 팀장은 히스토리 탭에서 이어할 수 있습니다)</div>');
 
     leadRowEl.querySelectorAll('[data-lead]').forEach(el => {
       el.addEventListener('click', () => selectLead(el.dataset.lead));
@@ -4497,4 +4524,23 @@ document.getElementById('help-tabs').addEventListener('click', e => {
   let last = '';
   try { last = localStorage.getItem(HELP_TAB_KEY) || ''; } catch { /* 첫 탭으로 */ }
   showHelpTab(last);
+}
+
+// ---------------- 진단 정보 ----------------
+{
+  const diagStatus = document.getElementById('diag-status');
+  const say = text => { diagStatus.textContent = text; setTimeout(() => { if (diagStatus.textContent === text) diagStatus.textContent = ''; }, 6000); };
+  document.getElementById('diag-copy-btn').addEventListener('click', async e => {
+    const btn = e.currentTarget;
+    btn.disabled = true; diagStatus.textContent = '정보를 모으는 중입니다...';
+    try {
+      const text = await window.api.getDiagnostics();
+      try { await navigator.clipboard.writeText(text); say('진단 정보를 복사했습니다. 문제를 알릴 때 붙여 넣으세요.'); }
+      catch { diagStatus.textContent = ''; window.prompt('자동 복사가 막혀 있습니다. 아래 글을 직접 선택해 복사하세요(Ctrl+A, Ctrl+C).', text); }
+    } catch (err) { say(errMsg(err)); }
+    finally { btn.disabled = false; }
+  });
+  document.getElementById('open-log-folder-btn').addEventListener('click', async () => {
+    try { await window.api.openLogFolder(); } catch (err) { say(errMsg(err)); }
+  });
 }

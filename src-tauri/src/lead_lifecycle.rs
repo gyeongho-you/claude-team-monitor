@@ -27,7 +27,7 @@ use crate::live_rows::SessionRow;
 use std::collections::HashSet;
 use crate::logging::log_critical;
 use crate::long_prompt_guard::resolve_long_prompt;
-use crate::paths::{member_templates_path, members_dir, requests_dir, skill_dest_dir, skill_src_path, team_member_server_js_path};
+use crate::paths::{member_templates_path, members_dir, requests_dir, skill_dest_dir, skill_src_path};
 use crate::resume::{find_session_id_by_short_id_retrying, resume_lead, run_claude_bg, stop_session};
 use crate::session_registry::{load_leads, load_members, register_member, with_leads_lock, LeadRecord, MemberRecord};
 use crate::timing::{now_ms, RUN_CLAUDE_TIMEOUT_MS};
@@ -221,13 +221,19 @@ const MEMBER_LIST_LEADS_TOOL_NAME: &str = "mcp__team-monitor__list_leads";
 // process.ppid로 자기 자신을 identify하므로(teamMemberServer.ts의 resolveCallingLead 참고) 더
 // 이상 토큰도, leads.json 경로를 env로 넘겨줄 필요도 없다(MCP 서버가 lib/teamMemberPaths에서
 // 직접 계산한다 — paths.rs의 leads_path()와 정확히 같은 경로).
+/// 팀원 생성 MCP 서버를 실행할 명령 — 앱 실행 파일 자신(`<exe> --mcp-server`). 예전에는 `node dist/teamMemberServer.js`라서
+/// 사용자 PC에 Node.js가 있어야 했다(mcp_server.rs 설명 참고). 실행 파일 경로를 못 알아내는 일은 사실상 없지만, 그 경우에도 앱 이름으로 폴백한다.
+fn mcp_server_command() -> String {
+    std::env::current_exe().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "Claude Team Monitor".to_string())
+}
+
 /// buildMemberSpawnCliArgs(main.ts)와 동일.
 pub fn build_member_spawn_cli_args() -> Vec<String> {
     let config = serde_json::json!({
         "mcpServers": {
             MEMBER_SPAWN_MCP_SERVER_NAME: {
-                "command": "node",
-                "args": [team_member_server_js_path().to_string_lossy()],
+                "command": mcp_server_command(),
+                "args": [crate::mcp_server::MCP_SERVER_FLAG],
             }
         }
     });
@@ -868,6 +874,17 @@ mod tests {
         assert!(flags.contains(&"--mcp-config".to_string()));
         assert!(flags.contains(&"--allowedTools".to_string()));
         assert!(!flags.contains(&"--resume".to_string()), "resume_session_id를 안 붙였으면 --resume이 없어야 한다");
+    }
+
+    #[test]
+    fn mcp_config_runs_the_app_executable_itself_as_the_server_so_node_is_not_needed() {
+        let flags = FreshLaunchArgs::new().into_flags();
+        let pos = flags.iter().position(|f| f == "--mcp-config").expect("--mcp-config가 있어야 한다");
+        let config: serde_json::Value = serde_json::from_str(&flags[pos + 1]).expect("유효한 JSON");
+        let server = &config["mcpServers"]["team-monitor"];
+        assert_ne!(server["command"], "node", "더 이상 node를 쓰지 않는다");
+        assert_eq!(server["command"].as_str().unwrap(), std::env::current_exe().unwrap().to_string_lossy());
+        assert_eq!(server["args"], serde_json::json!(["--mcp-server"]));
     }
 
     #[test]

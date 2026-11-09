@@ -153,7 +153,7 @@ fn best_effort_stop(id: &str) {
     }
 }
 
-fn run_claude_bg_blocking(flags: &[String], prompt: &str, cwd: &str) -> Option<String> {
+pub(crate) fn run_claude_bg_blocking(flags: &[String], prompt: &str, cwd: &str) -> Option<String> {
     // I-1: `--`를 배열의 한 원소로 명시적으로 끼워 넣는다 — --allowedTools/--mcp-config 같은
     // 가변인자 플래그 바로 뒤에 구분자 없이 prompt를 붙이면 CLI가 prompt 전체를 "허용할 도구 이름
     // 하나 더"로 먹어버린다(실측 확인, 2026-09-18).

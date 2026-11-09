@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Claude Team Monitor",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "identifier": "net.g1project.claude-team-monitor",
   "build": {
     "frontendDist": "../renderer"
@@ -11,8 +11,10 @@
     "windows": [
       {
         "title": "Claude Team Monitor",
-        "width": 800,
-        "height": 600,
+        "width": 1280,
+        "height": 840,
+        "minWidth": 900,
+        "minHeight": 560,
         "resizable": true,
         "fullscreen": false
       }

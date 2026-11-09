@@ -1,0 +1,106 @@
+name: Release
+
+# 태그(vX.Y.Z)를 올리면 설치 파일을 만들어 GitHub 릴리스에 붙인다. 절차는 docs/RELEASING.md 참고.
+# 주의: 이 워크플로는 아직 한 번도 실제 태그로 돌려 보지 않았다(CI의 installer 잡이 같은 빌드를 매번 시험한다).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    # 서명 인증서(선택) — 단계의 if에서는 secrets를 직접 볼 수 없어서 job 수준 env로 한 번 받아 둔다.
+    env:
+      CERT_B64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+      CERT_PW: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 태그와 버전 확인
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          cargo_ver="$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/.*"\(.*\)"/\1/')"
+          conf_ver="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          echo "tag=$tag package.json=$pkg Cargo.toml=$cargo_ver tauri.conf.json=$conf_ver"
+          test "$tag" = "$pkg" && test "$tag" = "$cargo_ver" && test "$tag" = "$conf_ver" || { echo "::error::태그와 세 곳의 버전이 모두 같아야 합니다"; exit 1; }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Rust 시험
+        working-directory: src-tauri
+        run: cargo test --lib
+
+      # 코드 서명(선택): 인증서 secret이 둘 다 있을 때만 실행한다. 없으면 서명 없는 설치 파일을 만든다. (작성만 됨 — 실제 인증서로 시험하지 못했다)
+      - name: 서명 인증서 가져오기
+        id: sign
+        if: ${{ env.CERT_B64 != '' && env.CERT_PW != '' }}
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_B64))
+          $secure = ConvertTo-SecureString $env:CERT_PW -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $secure
+          Remove-Item $pfx
+          "thumbprint=$($cert.Thumbprint)" >> $env:GITHUB_OUTPUT
+
+      - name: 설치 파일 빌드(서명 없음)
+        if: ${{ steps.sign.outputs.thumbprint == '' }}
+        run: npm run tauri:build:release
+
+      - name: 설치 파일 빌드(서명)
+        if: ${{ steps.sign.outputs.thumbprint != '' }}
+        shell: pwsh
+        run: |
+          # --config를 두 번 쓰지 않고, 릴리스 설정에 서명 항목을 합친 설정 파일 하나를 만들어 쓴다.
+          $conf = Get-Content src-tauri/tauri.release.conf.json -Raw | ConvertFrom-Json
+          $conf.bundle | Add-Member -NotePropertyName windows -NotePropertyValue $conf.bundle.windows -Force
+          $conf.bundle.windows | Add-Member -NotePropertyName certificateThumbprint -NotePropertyValue "${{ steps.sign.outputs.thumbprint }}" -Force
+          $conf.bundle.windows | Add-Member -NotePropertyName digestAlgorithm -NotePropertyValue "sha256" -Force
+          $conf.bundle.windows | Add-Member -NotePropertyName timestampUrl -NotePropertyValue "http://timestamp.digicert.com" -Force
+          $conf | ConvertTo-Json -Depth 20 | Set-Content src-tauri/tauri.release.signed.conf.json -Encoding utf8
+          npx tauri build --config src-tauri/tauri.release.signed.conf.json
+
+      - name: 배포 파일 모으기(설치 파일, 압축본, 체크섬)
+        shell: pwsh
+        run: |
+          $ver = "${{ github.ref_name }}"
+          New-Item -ItemType Directory -Force dist-release | Out-Null
+          Copy-Item "src-tauri/target/release/bundle/nsis/*-setup.exe" dist-release/
+          # 압축본: exe + resources/ (exe만 따로 옮기면 팀장 스킬을 설치하지 못한다)
+          $stage = "stage/Claude-Team-Monitor-$ver-win"
+          New-Item -ItemType Directory -Force "$stage/resources/skills/team-lead" | Out-Null
+          Copy-Item "src-tauri/target/release/Claude Team Monitor.exe" $stage/
+          Copy-Item "resources/skills/team-lead/SKILL.md" "$stage/resources/skills/team-lead/"
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist-release/Claude-Team-Monitor-$ver-win.zip"
+          Push-Location dist-release
+          Get-ChildItem -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" } | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } | Set-Content -Encoding utf8 SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+          Pop-Location
+
+      - name: 릴리스 만들고 파일 붙이기
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist-release/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
