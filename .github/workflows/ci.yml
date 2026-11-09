@@ -95,7 +95,19 @@ jobs:
         env:
           CTM_EXE: src-tauri/target/release/Claude Team Monitor.exe
           CTM_E2E_SINGLE_INSTANCE: "1"
-        run: npm run test:e2e
+        run: |
+          set +e
+          npm run test:e2e 2>&1 | tee e2e.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            # 실패한 점검 이름과 이유를 워크플로 주석으로 남긴다(continue-on-error라 단계는 초록으로 보이므로, 실패가 묻히지 않게)
+            summary="$(grep -E '✗|^      |E2E 중단|앱 exe를 찾지|통과' e2e.log | head -30)"
+            summary="${summary//'%'/'%25'}"
+            summary="${summary//$'\r'/'%0D'}"
+            summary="${summary//$'\n'/'%0A'}"
+            echo "::warning title=화면 E2E 실패(참고용)::${summary}"
+          fi
+          exit $code
 
       - uses: actions/upload-artifact@v4
         with:
