@@ -82,6 +82,11 @@ jobs:
           ls -la src-tauri/target/release/bundle/nsis/
           test -n "$(ls src-tauri/target/release/bundle/nsis/*-setup.exe 2>/dev/null)"
 
+      # 릴리스 워크플로가 쓰는 "배포 파일 모으기"(압축본 구성·필수 파일 확인·체크섬)를 매 푸시마다 실행해, 태그를 올리기 전에도 이 단계를 시험한다.
+      - name: 배포 파일 모으기 점검(릴리스와 같은 스크립트)
+        shell: pwsh
+        run: ./scripts/collect-release-files.ps1 -Version "ci-${{ github.sha }}"
+
       # 방금 빌드한 실제 앱을 띄워 화면을 점검한다(tests/e2e/smoke.js — 탭·접근성·도움말·스크립트 슬롯 관문·격리 프레임·진단·단일 실행 보호).
       # 참고용: 로컬에서는 12/12 통과했지만 CI 러너(WebView2 환경)에서는 이번이 처음이라, 결과가 안정적임을 확인할 때까지 실패해도 CI 전체를 막지 않는다.
       - name: 화면 E2E 시험

@@ -79,6 +79,14 @@ npm run tauri:build:release     # 설치 파일(NSIS): src-tauri/target/release/
 
 개발 중 바로 띄워보고 싶다면 `npm run tauri:dev`.
 
+### 시험
+| 명령 | 내용 |
+|---|---|
+| `npm test` | JS 단위 시험 + 가드 시험(패닉 후보·HTML 이스케이프·표준 입력) |
+| `cd src-tauri && cargo test --lib` | Rust 시험(처음에는 컴파일에 몇 분 걸립니다) |
+| `npm run tauri:build && npm run test:e2e` | 빌드한 앱을 별도 프로필로 띄워 화면을 점검(Windows, claude 없이도 통과) |
+| `npm run test:e2e:real` | **실제 claude 팀장 세션**으로 팀원 생성·등록까지 점검(claude 로그인 필요, 이 PC의 팀장 기록을 잠깐 쓰고 끝나면 지움) |
+
 ### 처음 실행할 때
 - 팀장을 띄울 디렉토리에서 **한 번도 `claude`를 실행한 적이 없다면**, 그 디렉토리를 처음 쓸 때 워크스페이스 신뢰(trust) 승인이 필요할 수 있습니다. 앱이 이 상태를 감지하면 자동으로 정리하고 화면에 "터미널에서 먼저 승인하세요"라고 안내합니다 — 그 디렉토리에서 터미널로 `claude`를 한 번 실행해 승인창을 눌러준 뒤 다시 시도하세요.
 - 팀장/팀원 등록 정보는 `~/.claude/claude-team-monitor/`(leads.json, members/) 밑에, 즐겨찾기·설정 등은 OS별 앱 데이터 폴더(Windows는 `%APPDATA%\claude-team-monitor\`) 밑에 저장됩니다.

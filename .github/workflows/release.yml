@@ -83,20 +83,7 @@ jobs:
 
       - name: 배포 파일 모으기(설치 파일, 압축본, 체크섬)
         shell: pwsh
-        run: |
-          $ver = "${{ github.ref_name }}"
-          New-Item -ItemType Directory -Force dist-release | Out-Null
-          Copy-Item "src-tauri/target/release/bundle/nsis/*-setup.exe" dist-release/
-          # 압축본: exe + resources/ (exe만 따로 옮기면 팀장 스킬을 설치하지 못한다)
-          $stage = "stage/Claude-Team-Monitor-$ver-win"
-          New-Item -ItemType Directory -Force "$stage/resources/skills/team-lead" | Out-Null
-          Copy-Item "src-tauri/target/release/Claude Team Monitor.exe" $stage/
-          Copy-Item "resources/skills/team-lead/SKILL.md" "$stage/resources/skills/team-lead/"
-          Compress-Archive -Path "$stage/*" -DestinationPath "dist-release/Claude-Team-Monitor-$ver-win.zip"
-          Push-Location dist-release
-          Get-ChildItem -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" } | ForEach-Object { "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name } | Set-Content -Encoding utf8 SHA256SUMS.txt
-          Get-Content SHA256SUMS.txt
-          Pop-Location
+        run: ./scripts/collect-release-files.ps1 -Version "${{ github.ref_name }}"
 
       - name: 릴리스 만들고 파일 붙이기
         shell: bash

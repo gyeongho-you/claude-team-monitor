@@ -47,3 +47,14 @@ test('허용 목록의 모든 항목에 실제 이유가 적혀 있다', () => {
 test('허용 목록은 작게 유지된다(이 수가 늘어나려면 의식적으로 올려야 한다)', () => {
   assert.ok(allow.length <= 20, `허용된 패닉 후보가 ${allow.length}곳입니다 — 정말 필요한지 다시 보세요`);
 });
+
+test('unsafe 코드는 검토된 1곳(Windows에서 부모 프로세스 pid 조회)뿐이다', () => {
+  const sites = [];
+  for (const file of fs.readdirSync(SRC).filter(f => f.endsWith('.rs')).sort()) {
+    const text = fs.readFileSync(path.join(SRC, file), 'utf8').replace(/\r\n/g, '\n');
+    const cut = text.indexOf('#[cfg(test)]');
+    const code = cut < 0 ? text : text.slice(0, cut);
+    code.split('\n').forEach(line => { const t = line.trim(); if (!t.startsWith('//') && /\bunsafe\s*(\{|fn\b|impl\b)/.test(t)) sites.push(`${file}: ${t}`); });
+  }
+  assert.deepEqual(sites, ['mcp_server.rs: unsafe {'], 'unsafe 코드가 늘었습니다 — 꼭 필요한지, 안전한 이유를 SAFETY 주석과 SECURITY.md에 적었는지 확인하세요');
+});

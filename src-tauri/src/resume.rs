@@ -164,6 +164,8 @@ pub(crate) fn run_claude_bg_blocking(flags: &[String], prompt: &str, cwd: &str) 
     let mut cmd = Command::new("claude");
     cmd.args(&args);
     cmd.current_dir(cwd);
+    // 표준 입력은 비워 둔다 — 팀원 생성 MCP 서버(mcp_server.rs) 안에서는 이 프로세스의 표준 입력이 MCP 프로토콜 파이프라서, 물려받으면 자식이 그 입력을 읽거나 기다린다.
+    cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     hide_console_window(&mut cmd);
@@ -173,7 +175,7 @@ pub(crate) fn run_claude_bg_blocking(flags: &[String], prompt: &str, cwd: &str) 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[run_claude_bg] claude 프로세스를 실행하지 못했습니다: {e}");
+            log_critical(&format!("[run_claude_bg] claude 프로세스를 실행하지 못했습니다: {e}"));
             return None;
         }
     };
@@ -207,18 +209,18 @@ pub(crate) fn run_claude_bg_blocking(flags: &[String], prompt: &str, cwd: &str) 
             }
             let id = extract_backgrounded_id(&out);
             if id.is_none() {
-                eprintln!("[run_claude_bg] claude stdout에서 \"backgrounded\" 마커를 찾지 못했습니다. 원문: {out}");
+                log_critical(&format!("[run_claude_bg] claude stdout에서 \"backgrounded\" 마커를 찾지 못했습니다. 원문: {out}"));
             }
             id
         }
         Ok(None) => {
-            eprintln!("[run_claude_bg] claude 프로세스가 응답 없이 대기 중이라 강제 종료합니다. args={args:?} cwd={cwd}");
+            log_critical(&format!("[run_claude_bg] claude 프로세스가 응답 없이 대기 중이라 강제 종료합니다. cwd={cwd} 인자 수={}", args.len()));
             let _ = child.kill();
             let _ = child.wait();
             None
         }
         Err(e) => {
-            eprintln!("[run_claude_bg] claude 대기 실패: {e}");
+            log_critical(&format!("[run_claude_bg] claude 대기 실패: {e}"));
             None
         }
     }

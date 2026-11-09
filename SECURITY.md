@@ -40,6 +40,12 @@
 - 같은 앱을 두 번 켜면 두 번째 실행은 첫 창을 앞으로 가져오고 끝납니다(공유 파일 경합 방지).
 - 운영 의존성 취약점 검사(`npm audit --omit=dev`)는 0건입니다. 개발 도구 쪽 경고는 빌드 환경에만 해당합니다.
 
+## 메모리 안전
+
+- 앱은 Rust로 쓰였고, `unsafe` 코드는 **한 곳**뿐입니다: Windows에서 이 프로세스를 띄운 부모(claude 세션)의 pid를 알아내는 `NtQueryInformationProcess` 호출(`src-tauri/src/mcp_server.rs`, SAFETY 주석 참고). 새 `unsafe`가 생기면 `tests/rustPanicGuard.test.js`가 실패합니다.
+- 실행 코드의 패닉 후보(`unwrap`/`expect` 등)는 검토된 18곳(고정 정규식, 방금 만든 파이프 핸들 등)뿐이며 `docs/panic-allowlist.json`에 이유와 함께 적혀 있고, 새로 생기면 시험이 실패합니다.
+- 화면 코드의 HTML 조립에서 이스케이프 없이 값을 끼우는 곳은 검토된 목록(`docs/html-interpolation-review.json`)과 어긋나면 시험이 실패합니다.
+
 ## 알려진 한계
 
 - `claude` CLI의 공개 보장이 없는 동작(`--bg`, `agents --json`, `attach`)에 의존합니다. CLI가 바뀌면 앱이 시작할 때 기능 점검으로 알려 주지만, 그 사이 일부 기능이 동작하지 않을 수 있습니다.
