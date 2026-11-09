@@ -35,17 +35,23 @@ function launch({ exe, port, appdata, wv, allowMulti }) {
   const env = { ...process.env, APPDATA: appdata, WEBVIEW2_USER_DATA_FOLDER: wv, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${port}` };
   if (allowMulti) env.CTM_ALLOW_MULTI = '1'; else delete env.CTM_ALLOW_MULTI;
   const child = spawn(exe, [], { env, stdio: 'ignore', windowsHide: false });
+  child.exitCode_ = null; child.spawnError_ = null;
+  child.on('exit', c => { child.exitCode_ = c === null ? 'signal' : c; });
+  child.on('error', e => { child.spawnError_ = e.message; });
   children.push(child);
   return child;
 }
 
-async function connect(port, timeoutMs = 90000) {
+async function connect(port, timeoutMs = 90000, child = null) {
   const t0 = Date.now();
   let ver;
   while (Date.now() - t0 < timeoutMs) {
     try { ver = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json(); break; } catch { await sleep(500); }
   }
-  if (!ver) throw new Error('앱의 디버그 포트가 열리지 않았습니다(앱이 뜨지 않았거나 WebView2가 없습니다)');
+  if (!ver) {
+    const state = !child ? '' : child.spawnError_ ? ` — 앱 실행 실패: ${child.spawnError_}` : child.exitCode_ !== null ? ` — 앱 프로세스가 종료 코드 ${child.exitCode_}로 끝났습니다(뜨자마자 죽음)` : ' — 앱 프로세스는 살아 있는데 포트가 안 열렸습니다(WebView2 초기화 실패 가능)';
+    throw new Error('앱의 디버그 포트가 열리지 않았습니다' + state);
+  }
   const ws = new WebSocket(ver.webSocketDebuggerUrl);
   await new Promise((res, rej) => { ws.addEventListener('open', res, { once: true }); ws.addEventListener('error', rej, { once: true }); });
   let id = 0; const pending = new Map();
@@ -90,8 +96,8 @@ async function main() {
   if (!exe || !fs.existsSync(exe)) { console.error('앱 exe를 찾지 못했습니다. 먼저 `npm run tauri:build`를 하거나 CTM_EXE로 경로를 알려 주세요.'); return 2; }
   console.log(`앱: ${exe}\n`);
   const port = await freePort();
-  launch({ exe, port, appdata: tmp('ctm-e2e-appdata-'), wv: tmp('ctm-e2e-wv-'), allowMulti: true });
-  const app = await connect(port);
+  const first = launch({ exe, port, appdata: tmp('ctm-e2e-appdata-'), wv: tmp('ctm-e2e-wv-'), allowMulti: true });
+  const app = await connect(port, 90000, first);
   await sleep(1500);
 
   console.log('화면·보안');
@@ -204,8 +210,8 @@ async function main() {
     console.log('\n단일 실행 보호');
     await check('같은 앱을 두 번 켜면 두 번째는 바로 끝난다', async () => {
       const p1 = await freePort();
-      launch({ exe, port: p1, appdata: tmp('ctm-e2e-si1-'), wv: tmp('ctm-e2e-si1wv-'), allowMulti: false });
-      const a = await connect(p1); await sleep(1500); a.close();
+      const one = launch({ exe, port: p1, appdata: tmp('ctm-e2e-si1-'), wv: tmp('ctm-e2e-si1wv-'), allowMulti: false });
+      const a = await connect(p1, 90000, one); await sleep(1500); a.close();
       const second = launch({ exe, port: await freePort(), appdata: tmp('ctm-e2e-si2-'), wv: tmp('ctm-e2e-si2wv-'), allowMulti: false });
       const code = await new Promise(res => { const t = setTimeout(() => res('시간 초과(두 번째가 끝나지 않음)'), 20000); second.on('exit', c => { clearTimeout(t); res(c); }); });
       ok(code === 0, `두 번째 실행의 종료 코드: ${code}`);
