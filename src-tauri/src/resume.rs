@@ -245,6 +245,10 @@ pub async fn run_claude_bg(flags: Vec<String>, prompt: String, cwd: String) -> O
 // ---------------------------------------------------------------------------------------------
 
 fn stop_session_blocking(id: &str) -> bool {
+    if id.starts_with('-') || id.is_empty() {
+        eprintln!("[stop_session] 옵션처럼 보이는 id는 거부합니다: {id:?}");
+        return false;
+    }
     let mut cmd = Command::new("claude");
     cmd.args(["stop", id]);
     cmd.stdout(Stdio::piped());

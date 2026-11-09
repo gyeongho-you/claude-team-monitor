@@ -335,8 +335,10 @@ pub async fn restart_lead(internal_id: String, instruction: String) -> RestartLe
     // 떠있을 때만 stop을 호출한다(main.ts와 동일한 이유, 불필요한 stop 타임아웃 낭비 방지).
     let agents = fetch_agents_typed_async().await;
     let is_currently_live = agents.iter().any(|a| a.id.as_deref() == Some(current.id.as_str()));
-    if is_currently_live {
-        let _ = stop_session(current.id.clone()).await;
+    if is_currently_live && !stop_session(current.id.clone()).await {
+        // 못 멈춘 채로 새 세션을 띄우면 같은 팀장이 둘이 되어 서로의 작업을 덮어쓴다 — 여기서 중단하고 알린다.
+        log_critical(&format!("[restartLead] 팀장 {}의 기존 세션을 멈추지 못해 재시작을 중단합니다.", current.id));
+        return RestartLeadOutcome::Failure { error: "기존 세션을 멈추지 못해 재시작하지 않았습니다 — 잠시 후 다시 시도하거나 긴급 중지를 먼저 해 보세요.".to_string() };
     }
 
     install_team_lead_skill();
@@ -371,7 +373,14 @@ pub async fn restart_lead(internal_id: String, instruction: String) -> RestartLe
         rec.id = new_id_for_lock;
         rec.session_id = new_session_id_for_lock;
         rec.launched_at = now_ms();
-        rec.approved_members = approved_members_for_lock;
+        // 사용자가 이미 승인한 디렉토리는 그대로 두고 새로 계산한 것만 더한다(덮어쓰면 승인이 조용히 사라진다).
+        for d in approved_members_for_lock {
+            if !rec.approved_members.contains(&d) {
+                rec.approved_members.push(d);
+            }
+        }
+        // 새 세션이 정상적으로 떴으니 예전 시작 실패 경고는 더 이상 맞지 않는다.
+        rec.startup_warning = None;
         // 재시작은 완전히 새 세션(새 sessionId)이라 예전 대화 주제가 더 이상 안 맞는다 — 안 지우면
         // 히스토리 탭에 재시작 이전 대화의 주제가 그대로 남아 보인다.
         rec.ai_title = None;
@@ -454,9 +463,11 @@ pub async fn end_lead_work(internal_id: String) -> EndLeadWorkOutcome {
         };
         let stopped = stop_session(current.member_id.clone()).await;
         if !stopped {
+            // 못 멈춘 팀원은 아직 살아 있다 — 등록 파일까지 지우면 화면에서 사라져 아무도 관리하지 못하는 채로 계속 돈다. 등록을 남겨 다시 정리할 수 있게 한다.
             member_failures.push(current.member_id.clone());
+        } else {
+            let _ = std::fs::remove_file(members_dir().join(format!("{}.json", current.member_id)));
         }
-        let _ = std::fs::remove_file(members_dir().join(format!("{}.json", current.member_id)));
     }
 
     // 팀원 정리 루프가 도는 동안 팀장 자신의 짧은 id도 바뀌었을 수 있다 — internalId로 최신

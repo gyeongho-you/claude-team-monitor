@@ -47,8 +47,8 @@ async function main() {
   const dir = TRUSTED.replace(/\\/g, '\\\\');
   const prompt = [
     '다음을 순서대로 하고 각 결과를 한 줄씩 보고해라.',
-    `(1) register_as_lead 도구를 approvedMembers=["${dir}"]로 호출해라.`,
-    `(2) spawn_team_member 도구를 targetDir="${dir}", label="e2e-member", model="haiku", instruction="아무 도구도 쓰지 말고 OK 라고만 답해"로 호출해라.`,
+    `(1) register_as_lead 도구를 인자 없이 호출해라.`,
+    `(2) spawn_team_member 도구를 targetDir="${dir}", label="e2e-member", model="haiku", instruction="아무 도구도 쓰지 말고 OK 라고만 답해"로 호출해라. 승인되지 않았다는 이유로 거절되면 list_leads를 한 번 호출한 뒤 같은 인자로 다시 호출해라(승인은 사용자가 따로 처리 중이다). 최대 8번까지만 반복해라.`,
     '다 끝나면 E2E-DONE 이라고 쓰고 멈춰라. 다른 도구는 쓰지 마라.',
   ].join('\n');
   const tools = ['spawn_team_member', 'register_as_lead', 'list_leads'].map(t => 'mcp__team-monitor__' + t).join(',');
@@ -62,12 +62,23 @@ async function main() {
     leadId = m[1];
 
     let lead = null, memberFile = null;
+    let approvedAtRegister = null, approvedByUser = false;
     for (let i = 0; i < 75 && !(lead && memberFile); i++) {
       await sleep(2000);
       lead = lead || readJson(LEADS, []).find(l => l.id === leadId);
+      if (lead && !approvedByUser) {
+        // 승인은 사용자만 한다 — 등록 직후에는 목록이 비어 있어야 하고, 그 뒤 사용자가 승인한 것처럼 앱의 승인 흐름과 같은 필드를 채운다.
+        approvedAtRegister = (lead.approvedMembers || []).length;
+        const all = readJson(LEADS, []);
+        const rec = all.find(l => l.id === leadId);
+        rec.approvedMembers = [TRUSTED];
+        fs.writeFileSync(LEADS + '.e2e.tmp', JSON.stringify(all, null, 2)); fs.renameSync(LEADS + '.e2e.tmp', LEADS);
+        approvedByUser = true;
+        lead = rec;
+      }
       memberFile = memberFile || (fs.existsSync(MEMBERS) ? fs.readdirSync(MEMBERS) : []).find(f => !membersBefore.has(f));
     }
-    step('register_as_lead: 팀장이 leads.json에 등록됨', !!lead && !!lead.internalId && Array.isArray(lead.approvedMembers) && lead.approvedMembers.length === 1, lead ? `approvedMembers=${JSON.stringify(lead.approvedMembers)}` : '등록되지 않음');
+    step('register_as_lead: 팀장이 leads.json에 등록됨', !!lead && !!lead.internalId && approvedAtRegister === 0, lead ? `등록 직후 approvedMembers 개수=${approvedAtRegister}(0이어야 함 — 모델이 스스로 승인하면 안 된다)` : '등록되지 않음');
     member = memberFile ? readJson(path.join(MEMBERS, memberFile), null) : null;
     step('spawn_team_member: 팀원이 떴고 members/에 등록됨', !!member && !!member.memberId && !!member.sessionId, member ? `memberId=${member.memberId}, label=${member.label}` : '등록되지 않음(app.log의 [run_claude_bg] 줄을 보세요)');
     step('팀원의 leadId가 방금 등록된 팀장과 같다', !!(member && lead && member.leadId === lead.id));

@@ -191,5 +191,6 @@ pub fn projects_dir() -> PathBuf {
 // 읽기 전용 조회라 삭제/쓰기 경로에 직접 이어붙이진 않지만, 화면에 잘못된 값이 그대로 노출되는 것도
 // 막기 위해 원본과 동일하게 걸러낸다).
 pub fn is_safe_id(id: &str) -> bool {
-    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    // 맨 앞의 '-'는 허용하지 않는다 — `claude stop -x`처럼 id 자리의 값이 명령 옵션으로 해석될 수 있다.
+    !id.is_empty() && !id.starts_with('-') && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }

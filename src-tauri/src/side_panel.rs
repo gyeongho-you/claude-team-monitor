@@ -257,6 +257,26 @@ fn load_config_from(path: &Path) -> PanelConfig {
     config
 }
 
+/// 설정 파일에 스크립트 허용 여부가 아직 없으면(예전 설정) 지금의 판단을 명시값으로 굳혀 저장한다 — 안 그러면 파일에 스크립트 슬롯 한 줄만 써 넣어도(다른 프로그램이나 모델이)
+/// "이미 쓰던 사용자"로 간주돼 허용이 켜진다. 시작할 때 한 번 호출한다. 파일이 없거나 이미 값이 있으면 아무것도 하지 않는다.
+pub fn pin_scripts_flag_at_startup() {
+    pin_scripts_flag_at(&side_panel_path());
+}
+
+fn pin_scripts_flag_at(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    let cfg = load_config_from(path);
+    if cfg.scripts_enabled.is_some() {
+        return;
+    }
+    let _ = commit_core(path, |c| {
+        c.scripts_enabled = Some(c.compute_scripts_allowed());
+        Ok(())
+    });
+}
+
 pub fn load_panel_config() -> PanelConfig {
     load_config_from(&side_panel_path())
 }

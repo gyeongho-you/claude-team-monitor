@@ -159,6 +159,8 @@ pub fn run() {
     .setup(|app| {
       // 3일 지난 붙여넣기 이미지 정리(pasted_images.rs 참고).
       pasted_images::purge_old_attachments();
+      // 스크립트 허용 여부를 명시값으로 굳힌다(side_panel.rs 참고).
+      side_panel::pin_scripts_flag_at_startup();
       if cfg!(debug_assertions) {
         app.handle().plugin(
           tauri_plugin_log::Builder::default()

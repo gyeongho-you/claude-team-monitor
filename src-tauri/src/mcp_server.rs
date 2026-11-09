@@ -82,11 +82,6 @@ fn tool_definitions() -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "approvedMembers": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "선택: 이 팀장이 팀원을 띄워도 되는 디렉토리(절대 경로) 목록. 생략하면 빈 목록으로 시작한다 — 팀원이 필요해지면 SKILL.md의 \"새 팀원 승인 요청\" 절차로 그때그때 채워도 된다."
-                    }
                 },
                 "additionalProperties": false,
                 "$schema": "http://json-schema.org/draft-07/schema#"
@@ -286,11 +281,10 @@ fn register_as_lead(be: &dyn Backend, args: &Value) -> Value {
         let id = existing.get("id").and_then(Value::as_str).unwrap_or("");
         return text_result(format!("이미 팀장으로 등록되어 있습니다(id: {id})."));
     }
-    let approved: Vec<Value> = args
-        .get("approvedMembers")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter(|v| v.is_string()).cloned().collect())
-        .unwrap_or_default();
+    // 승인된 디렉토리 목록은 사용자만 정한다 — 모델이 인자로 넘긴 approvedMembers는 무시한다(스스로 승인하면 승인 절차가 무의미해진다).
+    // 팀원 디렉토리는 앱 화면의 승인 요청 흐름으로만 채워진다.
+    let ignored_approved = args.get("approvedMembers").is_some();
+    let approved: Vec<Value> = Vec::new();
     let target_dir = if agent.cwd.is_empty() { be.cwd() } else { agent.cwd.clone() };
     let new_lead = json!({
         "id": agent_id,
@@ -309,7 +303,8 @@ fn register_as_lead(be: &dyn Backend, args: &Value) -> Value {
     if let Err(e) = write_leads(be, &latest) {
         return error_result(format!("등록에 실패했습니다: {e}"));
     }
-    text_result(format!("팀장으로 등록했습니다(id: {agent_id}, 디렉토리: {target_dir})."))
+    let note = if ignored_approved { " approvedMembers 인자는 무시했습니다 — 팀원 디렉토리는 SKILL.md의 \"새 팀원 승인 요청\" 절차로 사용자 승인을 받아야 합니다." } else { "" };
+    text_result(format!("팀장으로 등록했습니다(id: {agent_id}, 디렉토리: {target_dir}).{note}"))
 }
 
 fn list_leads(be: &dyn Backend, args: &Value) -> Value {
@@ -732,7 +727,8 @@ mod tests {
         assert_eq!(leads.len(), 2);
         assert_eq!(leads[0]["futureField"], json!({"x": 1}), "다른 팀장 레코드의 모르는 필드를 잃지 않는다");
         assert_eq!(leads[1]["id"], "newlead");
-        assert_eq!(leads[1]["approvedMembers"], json!([abs("repo")]), "문자열이 아닌 항목은 버린다");
+        assert_eq!(leads[1]["approvedMembers"], json!([]), "모델이 넘긴 승인 목록은 무시한다");
+        assert!(text_of(&r).contains("무시"));
         assert_eq!(leads[1]["internalId"], "uuid-1");
         let again = call_tool(&be, "register_as_lead", &json!({}));
         assert!(text_of(&again).contains("이미 팀장으로 등록"));
