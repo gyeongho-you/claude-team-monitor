@@ -1971,7 +1971,8 @@ async function runEnvironmentCheck() {
   try { r = await window.api.checkEnvironment(); } catch (err) { console.warn('환경 점검 실패:', err); return; }
   const problems = [];
   for (const [label, t] of [['claude CLI', r.claude], ['Node.js', r.node]]) {
-    if (t.problem) problems.push({ blocking: t.blocking, text: `${label}${t.version ? ` ${t.version}` : ''}: ${t.problem}` });
+    // 문제 문장이 이미 "claude CLI를…"처럼 이름으로 시작하면 "claude CLI: claude CLI를…"처럼 겹치지 않게 접두를 붙이지 않는다.
+    if (t.problem) problems.push({ blocking: t.blocking, text: t.problem.startsWith(label) ? t.problem : `${label}${t.version ? ` ${t.version}` : ''}: ${t.problem}` });
   }
   for (const res of r.resources || []) if (res.problem) problems.push({ blocking: true, text: res.problem });
   if (!problems.length || envBannerDismissed && problems.every(p => !p.blocking)) { envBannerEl.innerHTML = ''; return; }
