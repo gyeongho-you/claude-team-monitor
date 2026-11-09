@@ -144,7 +144,9 @@ let modelChangeId = null;
 // "새 작업 시작"/"작업 종료"/"변경 파일" 같은 확인창·상세창은 대화창 아래쪽에 인라인으로 뜨면
 // 스크롤 밖이라 눈에 안 띄어서(사용자 피드백), 화면 가운데 팝업(모달)으로 띄운다 — 배경을
 // 어둡게 깔고 그 위에 패널을 얹는다.
+let modalReturnFocusEl = null; // 모달을 열기 직전에 포커스가 있던 요소 — 닫으면 거기로 돌려 키보드 사용자가 자리를 잃지 않게 한다
 function showModal(panelEl) {
+  if (modalBackdropEl.hidden && document.activeElement instanceof HTMLElement) modalReturnFocusEl = document.activeElement;
   panelEl.hidden = false;
   modalBackdropEl.hidden = false;
   // 모달 안 스크롤을 끝까지 내리면 스크롤 체이닝으로 배경(메인 화면)까지 같이 스크롤되던 문제 —
@@ -157,8 +159,26 @@ function hideModal(panelEl) {
   if (ALL_MODAL_PANELS().every(p => p.hidden)) {
     modalBackdropEl.hidden = true;
     document.body.classList.remove('modal-open');
+    if (modalReturnFocusEl && document.contains(modalReturnFocusEl)) { try { modalReturnFocusEl.focus(); } catch { /* 포커스를 못 주면 그냥 둔다 */ } }
+    modalReturnFocusEl = null;
   }
 }
+
+// Esc로 가장 위에 뜬 모달을 닫고, Tab이 모달 밖으로 빠져나가지 않게 한다.
+document.addEventListener('keydown', e => {
+  if (e.defaultPrevented || modalBackdropEl.hidden) return;
+  const open = ALL_MODAL_PANELS().filter(p => !p.hidden);
+  if (!open.length) return;
+  const top = open[open.length - 1];
+  if (e.key === 'Escape') { e.preventDefault(); hideModal(top); return; }
+  if (e.key !== 'Tab') return;
+  const focusables = [...top.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')].filter(el => !el.disabled && el.offsetParent !== null);
+  if (!focusables.length) return;
+  const first = focusables[0], last = focusables[focusables.length - 1];
+  if (!top.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+  else if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+});
 
 modalBackdropEl.addEventListener('click', () => {
   ALL_MODAL_PANELS().forEach(hideModal);
@@ -827,12 +847,15 @@ function renderPanelChrome() {
   spRefreshBtn.title = slot && slot.mode === 'ai' ? 'AI로 지금 갱신' : '새로고침';
 }
 
+let panelFetchSeq = 0;
 async function refreshPanelContent(force) {
   const slot = activePanelSlot();
   if (!slot || spEl.hidden || panelEditing) return;
   const leadId = (slot.mode === 'auto' && slot.scope === 'selected') || slot.mode === 'script' ? selectedLeadId : null;
   let c;
-  try { c = await window.api.getPanelContent(slot.id, leadId, force === true && slot.mode === 'script'); } catch (err) { spMetaEl.textContent = `불러오지 못했습니다: ${errMsg(err)}`; return; }
+  const mySeq = ++panelFetchSeq;
+  try { c = await window.api.getPanelContent(slot.id, leadId, force === true && slot.mode === 'script'); } catch (err) { if (mySeq === panelFetchSeq) spMetaEl.textContent = `불러오지 못했습니다: ${errMsg(err)}`; return; }
+  if (mySeq !== panelFetchSeq) return; // 그 사이에 더 새로 요청한 조회(탭·팀장 전환)가 있다 — 늦게 온 옛 결과로 화면을 덮지 않는다
   const auto = slot.mode === 'auto' && Array.isArray(c.items);
   const key = `${slot.id}|${leadId || ''}|${c.updatedAt || ''}|${c.markdown.length}|${c.markdown.slice(0, 64)}|${hashStr(c.markdown)}|${c.format || ''}|${auto ? `${panelFilter.lead}|${panelFilter.range}|${panelFilter.current ? selectedLeadId : ''}` : ''}`;
   panelContent = c;
@@ -2705,7 +2728,7 @@ chatFindInputEl.addEventListener('input', () => {
 });
 
 chatFindInputEl.addEventListener('keydown', e => {
-  if (e.key === 'Enter') {
+  if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
     e.preventDefault();
     moveChatFindMatch(e.shiftKey ? -1 : 1);
   } else if (e.key === 'Escape') {
@@ -2826,7 +2849,8 @@ cancelAdoptBtn.addEventListener('click', () => {
 
 chatSendBtn.addEventListener('click', sendChatMessage);
 chatInputEl.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
+  // 한글 등 IME로 글자를 조합하는 중의 Enter는 조합을 확정하는 키다 — 이걸 보내기로 처리하면 마지막 글자가 남은 채 메시지가 두 번 나간다.
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
     e.preventDefault();
     sendChatMessage();
   }

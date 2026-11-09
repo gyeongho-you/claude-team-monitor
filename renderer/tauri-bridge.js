@@ -60,10 +60,15 @@
   // get_stall_alerts를 따로 합치던 이전 방식 대신).
   const AGENTS_UPDATE_POLL_MS = 3000;
   function onAgentsUpdate(callback) {
+    // 이전 조회가 아직 끝나지 않았으면(느린 PC·claude 응답 지연) 새로 시작하지 않는다 — 안 그러면 조회가 겹쳐 쌓이고, 오래된 결과가 더 새 결과를 덮어 화면이 되돌아간다.
+    let inFlight = false;
     const tick = () => {
+      if (inFlight) return;
+      inFlight = true;
       refreshBoard()
         .then(callback)
-        .catch(err => console.error('[tauri-bridge] refresh_board_command 폴링 실패:', err));
+        .catch(err => console.error('[tauri-bridge] refresh_board_command 폴링 실패:', err))
+        .finally(() => { inFlight = false; });
     };
     tick();
     setInterval(tick, AGENTS_UPDATE_POLL_MS);
