@@ -134,7 +134,20 @@ jobs:
 
       - name: Rust 시험
         working-directory: src-tauri
-        run: cargo test --lib
+        shell: bash
+        run: |
+          set +e
+          cargo test --lib --no-fail-fast 2>&1 | tee ../rust-test.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            # 실패한 시험 이름과 단언 메시지를 워크플로 주석으로 남긴다(로그를 내려받지 않아도 Actions 화면과 공개 API에서 바로 보인다)
+            summary="$(grep -E '^test .* FAILED$|panicked at|^  left:|^ right:|^error' ../rust-test.log | head -40)"
+            summary="${summary//'%'/'%25'}"
+            summary="${summary//$'\r'/'%0D'}"
+            summary="${summary//$'\n'/'%0A'}"
+            echo "::error title=Rust 시험 실패::${summary}"
+          fi
+          exit $code
 
   test-macos:
     # 참고용: macOS는 아직 한 번도 검증하지 못했다. 실패해도 CI 전체를 막지 않는다.
@@ -161,7 +174,20 @@ jobs:
 
       - name: Rust 시험
         working-directory: src-tauri
-        run: cargo test --lib
+        shell: bash
+        run: |
+          set +e
+          cargo test --lib --no-fail-fast 2>&1 | tee ../rust-test.log
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            # 실패한 시험 이름과 단언 메시지를 워크플로 주석으로 남긴다(로그를 내려받지 않아도 Actions 화면과 공개 API에서 바로 보인다)
+            summary="$(grep -E '^test .* FAILED$|panicked at|^  left:|^ right:|^error' ../rust-test.log | head -40)"
+            summary="${summary//'%'/'%25'}"
+            summary="${summary//$'\r'/'%0D'}"
+            summary="${summary//$'\n'/'%0A'}"
+            echo "::error title=Rust 시험 실패::${summary}"
+          fi
+          exit $code
 
   audit-rust:
     # 참고용: Rust 의존성(RustSec 데이터베이스)에 알려진 취약점이 있는지 본다. Tauri의 간접 의존성에서 "더 이상 관리되지 않음" 경고가 자주 나와서 막지는 않는다.
