@@ -113,11 +113,25 @@ fn migrate_legacy_leads_path_at(new_path: &Path, legacy_path: &Path) {
 // 같은 read-modify-write 코드 경로를 임시 파일에 대해 그대로 재현하는 데 쓴다(session_registry.rs
 // 자신의 β 시절 테스트와 동일한 이유).
 pub(crate) fn load_leads_from(path: &Path) -> Vec<LeadRecord> {
-    let raw = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
+    // 읽기에 실패하면(OneDrive·백신 잠금 등) 빈 목록으로 처리하되 이 파일은 덮어쓰지 않게 표시된다(json_file::read_json_text_guarded).
+    let Some(raw) = crate::json_file::read_json_text_guarded(path) else {
+        return Vec::new();
     };
-    let mut leads = serde_json::from_str::<Vec<LeadRecord>>(&raw).unwrap_or_default();
+    // 레코드 하나가 스키마에 안 맞아도 나머지 팀장은 살린다(전체를 빈 목록으로 만들면 다음 저장이 모든 히스토리를 지운다).
+    let mut leads: Vec<LeadRecord> = match serde_json::from_str::<Vec<serde_json::Value>>(&raw) {
+        Ok(items) => {
+            let total = items.len();
+            let parsed: Vec<LeadRecord> = items.into_iter().filter_map(|v| serde_json::from_value::<LeadRecord>(v).ok()).collect();
+            if parsed.len() != total {
+                crate::json_file::backup_corrupt_json(path, &raw);
+            }
+            parsed
+        }
+        Err(_) => {
+            crate::json_file::backup_corrupt_json(path, &raw);
+            Vec::new()
+        }
+    };
     let mut dirty = false;
     for lead in leads.iter_mut() {
         if lead.internal_id.is_none() {

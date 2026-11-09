@@ -41,6 +41,11 @@ pub(crate) fn archive_member_file(members_dir: &Path, member_id: &str) -> bool {
     if std::fs::copy(&from, &to).is_err() {
         return false;
     }
+    // 복사본은 원본의 수정 시각을 그대로 가져온다 — 오래 수정되지 않은 등록 파일이면 바로 아래 purge가 방금 보관한 파일을 14일 지난 것으로 보고 지워서 복원이 불가능해진다.
+    // 그래서 보관한 시각으로 갱신한다(보관 후 14일이 지나야 지워진다).
+    if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&to) {
+        let _ = f.set_modified(SystemTime::now());
+    }
     let _ = std::fs::remove_file(&from);
     purge_old_retired(&retired);
     true
@@ -130,6 +135,18 @@ mod tests {
         assert_eq!(restored[0].lead_id, "c728206b");
         assert!(dir.join("548fd6ef.json").exists());
         assert!(!retired_dir_for(&dir).join("548fd6ef.json").exists());
+    }
+
+    #[test]
+    fn archiving_an_old_file_is_not_purged_immediately() {
+        let dir = tmp("oldmtime");
+        register_member_in(&dir, &member("cccc3333", "c728206b", None));
+        let old = SystemTime::now() - Duration::from_secs(40 * 24 * 3600);
+        let f = std::fs::OpenOptions::new().write(true).open(dir.join("cccc3333.json")).unwrap();
+        f.set_modified(old).unwrap();
+        drop(f);
+        assert!(archive_member_file(&dir, "cccc3333"));
+        assert!(retired_dir_for(&dir).join("cccc3333.json").exists(), "방금 보관한 파일이 바로 삭제됨");
     }
 
     #[test]

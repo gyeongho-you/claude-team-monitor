@@ -515,6 +515,10 @@ pub async fn get_live_session_rows() -> Vec<SessionRow> {
 }
 
 static STAGE_AGENTS_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// 직전에 `claude agents --json` 조회가 성공했을 때 만든 보드 행 — 조회가 실패하는 동안(타임아웃·claude를 못 찾음 등) 이 값을 그대로 보여 준다.
+static LAST_GOOD_ROWS: std::sync::Mutex<Option<Vec<SessionRow>>> = std::sync::Mutex::new(None);
+/// 조회 실패가 이어지는 동안 앱 로그에 같은 줄이 쌓이지 않게, 실패로 "바뀌는 순간"에만 한 번 남긴다.
+static AGENTS_FETCH_FAILING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static STAGE_LIVE_ROWS_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // 보드 갱신이 느려지면(전송 버튼이 "전송 중..."에 오래 멈추는 등) 어느 단계가 오래 걸렸는지 앱 로그에 남긴다.
@@ -538,8 +542,28 @@ async fn get_live_session_rows_inner_impl() -> Vec<SessionRow> {
     use std::sync::atomic::Ordering::Relaxed;
     let now = now_ms();
     let t_agents = std::time::Instant::now();
-    let agents = fetch_agents_typed();
+    // 이 조회는 claude를 실행하고 최대 10초까지 기다리므로 비동기 런타임 스레드를 막지 않게 별도 스레드에서 한다.
+    let fetched = tokio::task::spawn_blocking(crate::agents_json::fetch_agents_result).await.unwrap_or_else(|e| Err(format!("조회 스레드 오류: {e}")));
     STAGE_AGENTS_MS.store(t_agents.elapsed().as_millis() as u64, Relaxed);
+    let agents_ok = fetched.is_ok();
+    let agents = match fetched {
+        Ok(list) => {
+            if AGENTS_FETCH_FAILING.swap(false, Relaxed) {
+                log_critical("[live_rows] claude agents --json 조회가 다시 정상으로 돌아왔습니다.");
+            }
+            list
+        }
+        Err(e) => {
+            if !AGENTS_FETCH_FAILING.swap(true, Relaxed) {
+                log_critical(&format!("[live_rows] claude agents --json 조회에 실패했습니다 — 조회가 돌아올 때까지 직전 화면을 유지하고 팀원 등록 정리를 건너뜁니다: {e}"));
+            }
+            // 실패를 "세션이 하나도 없다"로 오해하면 살아 있는 팀원의 등록이 보관함으로 옮겨지고 팀장이 오프라인으로 보인다 — 직전 정상 결과가 있으면 그대로 돌려준다.
+            if let Some(rows) = LAST_GOOD_ROWS.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                return rows;
+            }
+            Vec::new()
+        }
+    };
     let mut agent_id_set: HashSet<String> = agents.iter().filter_map(|a| a.id.clone()).collect();
 
     // reconcileLeadIds(main.ts:1585-1592)와 동일한 순서 — leads.json 쓰기가 필요해서
@@ -675,8 +699,11 @@ async fn get_live_session_rows_inner_impl() -> Vec<SessionRow> {
     rows.extend(offline_rows);
 
     // cleanupStaleMembers(main.ts:1621)와 같은 위치 — rows를 다 만든 뒤, 이번 폴링에서 쓴 members
-    // 스냅샷 기준으로 정리한다.
-    cleanup_stale_members(&members, &agent_id_set, now);
+    // 스냅샷 기준으로 정리한다. 목록 조회에 실패한 틱(직전 정상 결과가 없어서 여기까지 온 경우)에는 건너뛴다.
+    if agents_ok {
+        cleanup_stale_members(&members, &agent_id_set, now);
+        *LAST_GOOD_ROWS.lock().unwrap_or_else(|e| e.into_inner()) = Some(rows.clone());
+    }
 
     rows
 }

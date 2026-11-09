@@ -245,7 +245,14 @@ pub(crate) fn slot_from_input(input: &PanelSlotInput, id: String, created_at: i6
 }
 
 fn load_config_from(path: &Path) -> PanelConfig {
-    let mut config: PanelConfig = std::fs::read_to_string(path).ok().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+    // 읽기 실패 시 덮어쓰지 않게 표시되고, 해석 못 하는 내용은 지우기 전에 백업된다(슬롯과 스크립트가 사라지지 않게).
+    let mut config: PanelConfig = match crate::json_file::read_json_text_guarded(path) {
+        None => PanelConfig::default(),
+        Some(raw) => serde_json::from_str(&raw).unwrap_or_else(|_| {
+            crate::json_file::backup_corrupt_json(path, &raw);
+            PanelConfig::default()
+        }),
+    };
     config.scripts_allowed = config.compute_scripts_allowed();
     config
 }

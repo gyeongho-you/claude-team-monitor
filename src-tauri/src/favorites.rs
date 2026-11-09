@@ -22,11 +22,11 @@ pub struct Favorite {
 }
 
 fn load_favorites_from(path: &Path) -> Vec<Favorite> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    serde_json::from_str::<Vec<Favorite>>(&raw).unwrap_or_default()
+    let Some(raw) = crate::json_file::read_json_text_guarded(path) else { return Vec::new() };
+    serde_json::from_str::<Vec<Favorite>>(&raw).unwrap_or_else(|_| {
+        crate::json_file::backup_corrupt_json(path, &raw);
+        Vec::new()
+    })
 }
 
 /// loadFavorites(main.ts)와 동일 — 읽기 전용 호출부는 락 없이 이 함수를 직접 쓴다(다른 모듈의

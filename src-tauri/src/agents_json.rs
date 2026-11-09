@@ -103,6 +103,13 @@ pub fn get_agents_json() -> Result<Value, String> {
 /// 목록 표시처럼 "일시적으로 몇 초 못 그려도 그만"인 호출부 전용이다(생존 확인처럼 "빈 배열=확실히
 /// 죽었다"로 오판하면 안 되는 곳엔 쓰면 안 된다 — 그런 곳이 생기면 run_claude_agents_json을 직접
 /// 호출하는 strict 버전을 별도로 추가할 것).
+/// `claude agents --json`을 실행해 파싱한다 — 실패(실행·타임아웃·종료 코드·JSON 형식)를 "세션이 0개"와 구분해 Err로 돌려준다.
+/// 팀원 등록을 정리하거나 팀장을 오프라인으로 보는 판단은 반드시 이쪽을 써야 한다(조회 실패를 빈 목록으로 오해하면 살아 있는 팀원의 등록이 보관함으로 옮겨진다).
+pub fn fetch_agents_result() -> Result<Vec<AgentEntry>, String> {
+    let raw = run_claude_agents_json()?;
+    serde_json::from_str::<Vec<AgentEntry>>(&raw).map_err(|e| format!("JSON 파싱 실패: {e}"))
+}
+
 pub fn fetch_agents_typed() -> Vec<AgentEntry> {
     match run_claude_agents_json() {
         Ok(raw) => serde_json::from_str::<Vec<AgentEntry>>(&raw).unwrap_or_default(),

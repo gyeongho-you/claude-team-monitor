@@ -132,10 +132,14 @@ pub(crate) fn migrate_pending_notices(raw: Vec<serde_json::Value>, leads: &[Lead
 }
 
 fn read_raw_notices_from(path: &Path) -> Vec<serde_json::Value> {
-    let Ok(raw) = std::fs::read_to_string(path) else { return Vec::new() };
+    // 읽기 실패 시 이 파일은 덮어쓰지 않게 표시되고(json_file), 해석 못 하는 내용은 지우기 전에 백업한다 — 대기 중인 알림이 통째로 사라지지 않게.
+    let Some(raw) = crate::json_file::read_json_text_guarded(path) else { return Vec::new() };
     match serde_json::from_str::<serde_json::Value>(&raw) {
         Ok(serde_json::Value::Array(items)) => items,
-        _ => Vec::new(),
+        _ => {
+            crate::json_file::backup_corrupt_json(path, &raw);
+            Vec::new()
+        }
     }
 }
 
