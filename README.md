@@ -62,6 +62,8 @@ cd claude-team-monitor
 npm install
 npm run tauri:build:release     # 설치 파일(NSIS): src-tauri/target/release/bundle/nsis/*-setup.exe
 ```
+> 참고: `src/main.ts` 등 Electron 구현은 참고용으로만 남겨 두었고, 그 스크립트는 `electron:` 접두(`electron:start`, `electron:dist:win` 등)로 분리했습니다. 기본 `npm run build`는 타입 검사와 MCP 서버 번들만 합니다.
+
 빌드에는 Node.js 18+와 [Rust](https://www.rust-lang.org/tools/install) 툴체인(`rustup`)이 필요합니다. exe만 빠르게 만들려면 `npm run build:mcp && npm run tauri:build`(결과: `src-tauri/target/release/app.exe`)를 쓰되, 이 exe는 옆에 `dist/teamMemberServer.js`와 `resources/skills/team-lead/SKILL.md`를 직접 복사해 둬야 팀원 생성이 됩니다.
 
 개발 중 바로 띄워보고 싶다면 `npm run tauri:dev`.
