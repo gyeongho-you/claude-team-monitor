@@ -63,6 +63,7 @@ async function main() {
 
     let lead = null, memberFile = null;
     let approvedAtRegister = null, approvedByUser = false;
+    var shadowFile = null, shadowKey = null;
     for (let i = 0; i < 75 && !(lead && memberFile); i++) {
       await sleep(2000);
       lead = lead || readJson(LEADS, []).find(l => l.id === leadId);
@@ -73,6 +74,9 @@ async function main() {
         const rec = all.find(l => l.id === leadId);
         rec.approvedMembers = [TRUSTED];
         fs.writeFileSync(LEADS + '.e2e.tmp', JSON.stringify(all, null, 2)); fs.renameSync(LEADS + '.e2e.tmp', LEADS);
+        // 앱이 승인할 때는 승인 사본(앱 데이터 폴더)도 같이 갱신한다 — 같은 일을 흉내 낸다. 사본이 아직 없으면(앱을 한 번도 안 켠 PC) 파일 내용을 그대로 믿으므로 할 일이 없다.
+        shadowFile = path.join(process.env.APPDATA || '', 'claude-team-monitor', 'approvalShadow.json');
+        if (fs.existsSync(shadowFile)) { const sh = readJson(shadowFile, {}); shadowKey = rec.internalId || rec.id; sh[shadowKey] = [TRUSTED]; fs.writeFileSync(shadowFile, JSON.stringify(sh)); }
         approvedByUser = true;
         lead = rec;
       }
@@ -94,6 +98,7 @@ async function main() {
     }
     if (member) { try { fs.unlinkSync(path.join(MEMBERS, member.memberId + '.json')); } catch { /* 이미 없음 */ } }
     try { fs.unlinkSync(cfgPath); } catch { /* 이미 없음 */ }
+    try { if (typeof shadowFile === 'string' && shadowKey && fs.existsSync(shadowFile)) { const sh = readJson(shadowFile, {}); delete sh[shadowKey]; fs.writeFileSync(shadowFile, JSON.stringify(sh)); } } catch { /* 사본 정리 실패는 무시 */ }
     console.log('\n(시험이 만든 세션·기록은 정리했습니다)');
   }
   const failed = results.filter(r => !r.ok);

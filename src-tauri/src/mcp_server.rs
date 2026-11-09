@@ -140,12 +140,20 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     }
 }
 
-fn read_leads(be: &dyn Backend) -> Vec<Value> {
-    // leads.json을 Value 그대로 다룬다 — 이 서버가 모르는 필드가 있어도 다시 쓸 때 잃어버리지 않게(앱이 쓰는 필드 집합과 어긋나도 안전).
-    std::fs::read_to_string(be.leads_path())
-        .ok()
-        .and_then(|raw| serde_json::from_str::<Vec<Value>>(&raw).ok())
-        .unwrap_or_default()
+/// leads.json을 Value 그대로 다룬다 — 이 서버가 모르는 필드가 있어도 다시 쓸 때 잃어버리지 않게(앱이 쓰는 필드 집합과 어긋나도 안전).
+/// 파일이 없으면 빈 목록이지만, 있는데 읽지 못했거나 해석하지 못하면 빈 목록으로 보지 않고 Err로 돌려준다 — 그 위에 새로 쓰면 등록된 팀장 전부가 사라진다.
+/// 해석 못 한 내용은 덮어쓰기 전에 `.corrupt-…`로 백업한다.
+fn read_leads(be: &dyn Backend) -> Result<Vec<Value>, String> {
+    let path = be.leads_path();
+    match crate::json_file::read_json_text_guarded(&path) {
+        None if !path.exists() => Ok(Vec::new()),
+        None => Err("leads.json을 지금 읽지 못했습니다 — 잠시 후 다시 시도하세요(등록 정보를 보호하려고 쓰지 않았습니다).".to_string()),
+        Some(raw) if raw.trim().is_empty() => Ok(Vec::new()),
+        Some(raw) => serde_json::from_str::<Vec<Value>>(&raw).map_err(|e| {
+            crate::json_file::backup_corrupt_json(&path, &raw);
+            format!("leads.json을 해석하지 못했습니다({e}) — 원본은 .corrupt-… 파일로 보관했습니다. 앱을 열어 상태를 확인하세요.")
+        }),
+    }
 }
 
 fn write_leads(be: &dyn Backend, leads: &[Value]) -> Result<(), String> {
@@ -179,7 +187,10 @@ fn spawn_team_member(be: &dyn Backend, args: &Value) -> Value {
     let Some(agent) = find_calling_agent(be).filter(|a| !a.session_id.is_empty()) else {
         return error_result(AGENT_NOT_FOUND_FOR_SPAWN);
     };
-    let leads = read_leads(be);
+    let leads = match read_leads(be) {
+        Ok(l) => l,
+        Err(e) => return error_result(e),
+    };
     let Some(lead) = leads.iter().find(|l| lead_session_id(l) == agent.session_id) else {
         return error_result("이 세션은 아직 팀장으로 등록되지 않았습니다 — 먼저 mcp__team-monitor__register_as_lead 툴을 호출해 스스로를 등록한 뒤 다시 시도하세요.");
     };
@@ -193,11 +204,12 @@ fn spawn_team_member(be: &dyn Backend, args: &Value) -> Value {
 
     let cwd = be.cwd();
     let resolved = resolve_path(target_dir, &cwd);
-    let approved = lead
-        .get("approvedMembers")
-        .and_then(Value::as_array)
-        .map(|dirs| dirs.iter().filter_map(Value::as_str).any(|d| same_dir(&resolve_path(d, &cwd), &resolved)))
-        .unwrap_or(false);
+    // 파일에 적힌 승인 중 앱이 저장한 사본에도 있는 것만 인정한다 — 팀장이 leads.json을 직접 고쳐 스스로 승인하는 우회를 막는다(session_registry.rs의 승인 사본 설명 참고).
+    let file_list: Vec<String> = lead.get("approvedMembers").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+    let lead_internal = lead.get("internalId").and_then(Value::as_str);
+    let lead_id_str = lead.get("id").and_then(Value::as_str).unwrap_or("");
+    let approved_list = crate::session_registry::shadow_filtered_approvals(&be.leads_path(), lead_internal, lead_id_str, file_list);
+    let approved = approved_list.iter().any(|d| same_dir(&resolve_path(d, &cwd), &resolved));
     if !approved {
         return error_result(format!(
             "\"{target_dir}\"는 사전 승인된 디렉토리 목록에 없습니다. 바로 띄우지 말고, SKILL.md의 \"새 팀원 승인 요청\" 절차(~/.claude/claude-team-monitor/requests/에 dir-approval 요청 작성 후 턴 종료)를 먼저 거치세요."
@@ -277,7 +289,11 @@ fn register_as_lead(be: &dyn Backend, args: &Value) -> Value {
         return error_result("interactive(사람이 직접 타이핑하는) 세션은 팀장으로 등록할 수 없습니다 — claude --bg로 띄운 세션만 지원합니다.");
     }
     let agent_id = agent.id.clone().unwrap_or_default();
-    if let Some(existing) = read_leads(be).iter().find(|l| lead_session_id(l) == agent.session_id) {
+    let first = match read_leads(be) {
+        Ok(l) => l,
+        Err(e) => return error_result(e),
+    };
+    if let Some(existing) = first.iter().find(|l| lead_session_id(l) == agent.session_id) {
         let id = existing.get("id").and_then(Value::as_str).unwrap_or("");
         return text_result(format!("이미 팀장으로 등록되어 있습니다(id: {id})."));
     }
@@ -295,7 +311,11 @@ fn register_as_lead(be: &dyn Backend, args: &Value) -> Value {
         "internalId": be.new_uuid(),
     });
     // 위에서 읽은 뒤 다른 팀장의 등록/변경이 먼저 반영됐을 수 있다 — 쓰기 직전에 다시 읽어 최신 상태 위에 얹는다.
-    let mut latest = read_leads(be);
+    let _file_lock = crate::json_file::lock_file_for(&be.leads_path());
+    let mut latest = match read_leads(be) {
+        Ok(l) => l,
+        Err(e) => return error_result(e),
+    };
     if latest.iter().any(|l| lead_session_id(l) == agent.session_id) {
         return text_result(format!("이미 팀장으로 등록되어 있습니다(id: {agent_id})."));
     }
@@ -321,7 +341,11 @@ fn list_leads(be: &dyn Backend, args: &Value) -> Value {
         }
     }
     let mut lines: Vec<String> = Vec::new();
-    for lead in read_leads(be) {
+    let all_leads = match read_leads(be) {
+        Ok(l) => l,
+        Err(e) => return error_result(e),
+    };
+    for lead in all_leads {
         let sid = lead_session_id(&lead).to_string();
         let live = agents.iter().find(|a| !sid.is_empty() && a.session_id == sid);
         if live.is_none() && !include_offline {
@@ -642,6 +666,20 @@ mod tests {
     }
 
     #[test]
+    fn spawn_ignores_approvals_that_were_added_to_the_file_without_the_app() {
+        let be = Fake::new(vec![agent("lead1", "sess-lead", 100, "background", None)]);
+        be.put_leads(json!([{"id":"lead1","sessionId":"sess-lead","targetDir":abs("main"),"approvedMembers":[abs("repo")]}]));
+        // 앱이 저장한 사본에는 이 팀장의 승인이 없다 — 팀장이 파일만 고쳐 스스로 승인한 상황
+        std::fs::write(crate::session_registry::approvals_shadow_path_for(&be.leads_path()), r#"{"lead1": []}"#).unwrap();
+        let r = call_tool(&be, "spawn_team_member", &json!({"targetDir": abs("repo"), "instruction": "x", "label": "a"}));
+        assert!(is_error(&r) && text_of(&r).contains("사전 승인"), "{}", text_of(&r));
+        // 사본에도 있으면(앱이 승인한 것) 통과해 다음 단계로 간다
+        std::fs::write(crate::session_registry::approvals_shadow_path_for(&be.leads_path()), json!({"lead1": [abs("repo")]}).to_string()).unwrap();
+        let ok = call_tool(&be, "spawn_team_member", &json!({"targetDir": abs("repo"), "instruction": "x", "label": "a"}));
+        assert!(!text_of(&ok).contains("사전 승인"), "{}", text_of(&ok));
+    }
+
+    #[test]
     fn spawn_requires_the_calling_session_to_be_found_and_registered() {
         let be = Fake::new(vec![agent("lead1", "sess-lead", 999, "background", None)]); // ppid(100)와 안 맞음
         let r = call_tool(&be, "spawn_team_member", &json!({"targetDir": abs("repo"), "instruction": "x", "label": "a"}));
@@ -734,6 +772,21 @@ mod tests {
         assert!(text_of(&again).contains("이미 팀장으로 등록"));
         let leads: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(be.leads_path()).unwrap()).unwrap();
         assert_eq!(leads.len(), 2, "두 번째 호출은 아무것도 바꾸지 않는다");
+    }
+
+    #[test]
+    fn register_as_lead_never_overwrites_an_unparseable_leads_file() {
+        let be = Fake::new(vec![agent("newlead", "sess-new", 100, "background", None)]);
+        let broken = r#"[{"id":"keep","sessionId":"s1","approvedMembers":["C:/x"]}, {oops"#;
+        std::fs::write(be.leads_path(), broken).unwrap();
+        let r = call_tool(&be, "register_as_lead", &json!({}));
+        assert!(is_error(&r), "{}", text_of(&r));
+        assert_eq!(std::fs::read_to_string(be.leads_path()).unwrap(), broken, "해석 못 한 파일은 그대로 둔다");
+        let dir = be.leads_path().parent().unwrap().to_path_buf();
+        let backups = std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().contains(".corrupt-")).count();
+        assert_eq!(backups, 1, "원본 백업이 남는다");
+        let spawn = call_tool(&be, "spawn_team_member", &json!({"targetDir": abs("repo"), "instruction": "x", "label": "a"}));
+        assert!(is_error(&spawn));
     }
 
     #[test]

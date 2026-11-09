@@ -142,7 +142,77 @@ pub(crate) fn load_leads_from(path: &Path) -> Vec<LeadRecord> {
     if dirty {
         save_leads_to(path, &leads);
     }
+    apply_approvals_shadow(path, &mut leads);
     leads
+}
+
+// ---------------------------------------------------------------------------------------------
+// 승인 목록의 "앱 밖 변조" 감지 — approvedMembers는 모델이 쓸 수 있는 ~/.claude 아래 leads.json에 있어서, 파일을 직접 고칠 수 있는 팀장이 스스로 디렉토리를 승인할 수 있다.
+// 그래서 앱이 마지막으로 저장한 승인 목록의 사본(shadow)을 앱 데이터 폴더에 따로 두고, 파일에만 있는 승인 항목은 무시한다(읽을 때 제거 + 팀원 생성 도구도 사본과 대조).
+// 같은 사용자 권한의 프로세스를 완전히 막는 장치는 아니다(사본 파일도 쓸 수는 있다) — 모델이 "승인 요청" 절차를 건너뛰고 파일만 고치는 흔한 우회를 막는 용도다. SECURITY.md 참고.
+// ---------------------------------------------------------------------------------------------
+
+fn lead_shadow_key(internal_id: Option<&str>, id: &str) -> String {
+    internal_id.filter(|s| !s.is_empty()).unwrap_or(id).to_string()
+}
+
+/// 승인 사본 파일 위치 — 실제 leads.json이면 앱 데이터 폴더, 시험용 임시 파일이면 그 옆.
+pub(crate) fn approvals_shadow_path_for(leads: &Path) -> std::path::PathBuf {
+    if leads == leads_path() {
+        crate::paths::app_data_dir().join("approvalShadow.json")
+    } else {
+        let mut n = leads.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+        n.push(".approvals-shadow");
+        leads.with_file_name(n)
+    }
+}
+
+/// 사본을 읽는다 — 파일이 없으면 None(아직 만든 적 없음), 읽었는데 해석하지 못하면 빈 사본(= 아무 승인도 인정하지 않음).
+pub(crate) fn read_approvals_shadow(leads: &Path) -> Option<HashMap<String, Vec<String>>> {
+    let p = approvals_shadow_path_for(leads);
+    let raw = crate::json_file::read_json_text_guarded(&p)?;
+    Some(serde_json::from_str(&raw).unwrap_or_default())
+}
+
+fn write_approvals_shadow(leads_file: &Path, leads: &[LeadRecord]) {
+    let map: HashMap<String, Vec<String>> = leads.iter().map(|l| (lead_shadow_key(l.internal_id.as_deref(), &l.id), l.approved_members.clone())).collect();
+    let p = approvals_shadow_path_for(leads_file);
+    if let Some(dir) = p.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    if let Err(e) = write_json_file_atomic(&p, &map) {
+        eprintln!("[approvals_shadow] 승인 사본 저장 실패: {e}");
+    }
+}
+
+/// 사본에 없는 승인 항목을 제거한다. 사본이 아직 없으면(처음 실행·업데이트 직후) 지금 파일의 내용을 그대로 인정하고 사본을 만든다.
+fn apply_approvals_shadow(path: &Path, leads: &mut [LeadRecord]) {
+    let Some(shadow) = read_approvals_shadow(path) else {
+        if path.exists() {
+            write_approvals_shadow(path, leads);
+        }
+        return;
+    };
+    for lead in leads.iter_mut() {
+        let key = lead_shadow_key(lead.internal_id.as_deref(), &lead.id);
+        let allowed = shadow.get(&key);
+        let before = lead.approved_members.len();
+        lead.approved_members.retain(|d| allowed.map_or(false, |a| a.contains(d)));
+        if lead.approved_members.len() != before {
+            crate::logging::log_critical(&format!("[approvals] 팀장 {}의 승인 목록에 앱을 거치지 않고 추가된 디렉토리 {}개를 무시했습니다(승인은 앱 화면에서만 합니다).", lead.id, before - lead.approved_members.len()));
+        }
+    }
+}
+
+/// 팀원 생성 도구 서버(--mcp-server)용 — 이 팀장의 승인 목록 중 앱이 저장한 사본에도 있는 것만 돌려준다. 사본이 아직 없으면 파일 내용을 그대로 쓴다.
+pub(crate) fn shadow_filtered_approvals(leads_file: &Path, internal_id: Option<&str>, id: &str, file_list: Vec<String>) -> Vec<String> {
+    match read_approvals_shadow(leads_file) {
+        None => file_list,
+        Some(shadow) => {
+            let allowed = shadow.get(&lead_shadow_key(internal_id, id));
+            file_list.into_iter().filter(|d| allowed.map_or(false, |a| a.contains(d))).collect()
+        }
+    }
 }
 
 // saveLeads(main.ts)와 동일한 파일 쓰기 — 의도적으로 pub이 아니다. leads.json에 쓰는 모든 지점은
@@ -151,8 +221,9 @@ pub(crate) fn load_leads_from(path: &Path) -> Vec<LeadRecord> {
 // 짝지어 쓰는" 실수가 컴파일은 되면서 조용히 재발할 수 있다. 그래서 이 모듈 밖에서는 애초에 호출할
 // 방법이 없게 막아둔다(A-1의 "타입 시스템으로 강제" 정신을 이 범위에 적용한 것).
 pub(crate) fn save_leads_to(path: &Path, leads: &[LeadRecord]) {
-    if let Err(e) = write_json_file_atomic(path, &leads) {
-        eprintln!("[save_leads] leads.json 저장 실패: {e}");
+    match write_json_file_atomic(path, &leads) {
+        Ok(()) => write_approvals_shadow(path, leads),
+        Err(e) => eprintln!("[save_leads] leads.json 저장 실패: {e}"),
     }
 }
 
@@ -195,6 +266,8 @@ where
     F: FnOnce(&mut Vec<LeadRecord>) -> (bool, R),
 {
     let _guard = lock.lock().await;
+    // 앱 안의 동시 변경은 위 뮤텍스가, 앱 밖(--mcp-server 프로세스)과의 동시 변경은 파일 잠금이 막는다.
+    let _file_lock = crate::json_file::lock_file_for(path);
     let mut leads = load_leads_from(path);
     let (dirty, result) = mutate(&mut leads);
     if dirty {
@@ -434,6 +507,49 @@ pub async fn get_interactive_sessions_command() -> Vec<AgentEntry> {
     let mut agents: Vec<AgentEntry> = fetch_agents_typed_async().await.into_iter().filter(|a| a.kind == "interactive").collect();
     agents.sort_by(|a, b| b.started_at.unwrap_or(0).cmp(&a.started_at.unwrap_or(0)));
     agents
+}
+
+#[cfg(test)]
+mod approval_shadow_tests {
+    use super::*;
+
+    fn lead(id: &str, approved: &[&str]) -> LeadRecord {
+        serde_json::from_value(serde_json::json!({"id": id, "sessionId": "s", "targetDir": "C:/x", "launchedAt": 1, "internalId": format!("int-{id}"), "approvedMembers": approved})).unwrap()
+    }
+
+    #[test]
+    fn approvals_added_outside_the_app_are_dropped_but_app_saved_ones_survive() {
+        let dir = std::env::temp_dir().join(format!("ctm_shadow_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("leads.json");
+        // 앱이 저장: 승인 1개
+        save_leads_to(&path, &[lead("a", &["C:/ok"])]);
+        assert_eq!(load_leads_from(&path)[0].approved_members, vec!["C:/ok"]);
+        // 팀장이 파일을 직접 고쳐 승인을 늘리고, 새 팀장 레코드도 승인과 함께 끼워 넣음
+        let tampered = serde_json::json!([
+            {"id":"a","sessionId":"s","targetDir":"C:/x","launchedAt":1,"internalId":"int-a","approvedMembers":["C:/ok","C:/evil"]},
+            {"id":"b","sessionId":"s2","targetDir":"C:/x","launchedAt":1,"internalId":"int-b","approvedMembers":["C:/evil2"]}
+        ]);
+        fs::write(&path, tampered.to_string()).unwrap();
+        let loaded = load_leads_from(&path);
+        assert_eq!(loaded[0].approved_members, vec!["C:/ok"]);
+        assert!(loaded[1].approved_members.is_empty());
+        // 앱이 정상 경로로 승인을 추가하면(저장) 그 다음부터는 인정된다
+        let mut l = loaded;
+        l[0].approved_members.push("C:/new".into());
+        save_leads_to(&path, &l);
+        assert_eq!(load_leads_from(&path)[0].approved_members, vec!["C:/ok", "C:/new"]);
+    }
+
+    #[test]
+    fn first_run_without_a_shadow_trusts_the_existing_file() {
+        let dir = std::env::temp_dir().join(format!("ctm_shadow_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("leads.json");
+        fs::write(&path, serde_json::json!([{"id":"a","sessionId":"s","targetDir":"C:/x","launchedAt":1,"internalId":"int-a","approvedMembers":["C:/legacy"]}]).to_string()).unwrap();
+        assert_eq!(load_leads_from(&path)[0].approved_members, vec!["C:/legacy"], "업데이트 직후 기존 승인이 사라지면 안 된다");
+        assert!(read_approvals_shadow(&path).is_some(), "사본이 만들어진다");
+    }
 }
 
 #[cfg(test)]

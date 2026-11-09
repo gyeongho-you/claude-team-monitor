@@ -61,6 +61,48 @@ pub(crate) fn read_json_text_guarded_with(path: &Path, attempts: u32, gap: std::
     None
 }
 
+/// 파일 하나에 대한 프로세스 간 잠금 — `<파일>.lock`을 새로 만들어 쥐고, 닫히면(Drop) 지운다. 앱 본체와 `--mcp-server` 프로세스가 같은 leads.json을
+/// 동시에 "읽고 고쳐 쓰기" 해서 서로의 변경을 덮어쓰는 것을 막는다. 오래된 잠금 파일(15초 넘음)은 무시하고 지우며, 5초 안에 못 얻으면 잠금 없이 진행한다 —
+/// 잠금 때문에 앱이 영영 멈추는 것보다 드문 경합을 감수하는 쪽을 택한다(그때는 로그를 남긴다).
+pub struct FileLock(Option<PathBuf>);
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+pub fn lock_file_for(path: &Path) -> FileLock {
+    lock_file_for_with(path, std::time::Duration::from_secs(5), std::time::Duration::from_secs(15))
+}
+
+pub(crate) fn lock_file_for_with(path: &Path, wait: std::time::Duration, stale_after: std::time::Duration) -> FileLock {
+    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(".lock");
+    let lock_path = path.with_file_name(name);
+    let started = std::time::Instant::now();
+    loop {
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
+            Ok(_) => return FileLock(Some(lock_path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = std::fs::metadata(&lock_path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).map_or(false, |age| age > stale_after);
+                if stale {
+                    let _ = std::fs::remove_file(&lock_path);
+                    continue;
+                }
+            }
+            Err(_) => {}
+        }
+        if started.elapsed() >= wait {
+            eprintln!("[json_file] {} 잠금을 얻지 못해 잠금 없이 진행합니다", lock_path.display());
+            return FileLock(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 /// 내용은 있는데 파싱할 수 없는 파일은 빈 목록으로 취급해 그 위에 새로 쓰기 전에, 원본을 `<파일>.corrupt-<해시>`로 보관한다(같은 내용은 한 번만).
 pub fn backup_corrupt_json(path: &Path, raw: &str) {
     if raw.trim().is_empty() {
@@ -82,6 +124,25 @@ pub fn backup_corrupt_json(path: &Path, raw: &str) {
 #[cfg(test)]
 mod guard_tests {
     use super::*;
+
+    #[test]
+    fn file_lock_excludes_second_holder_until_dropped_and_recovers_from_stale_lock() {
+        let dir = std::env::temp_dir().join(format!("ctm_lock_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("leads.json");
+        let g1 = lock_file_for_with(&target, std::time::Duration::from_secs(1), std::time::Duration::from_secs(60));
+        assert!(g1.0.is_some());
+        let started = std::time::Instant::now();
+        let g2 = lock_file_for_with(&target, std::time::Duration::from_millis(200), std::time::Duration::from_secs(60));
+        assert!(g2.0.is_none() && started.elapsed() >= std::time::Duration::from_millis(200), "이미 잠겨 있으면 기다린 뒤 잠금 없이 진행한다");
+        drop(g2);
+        assert!(dir.join("leads.json.lock").exists(), "잠금 없이 진행한 쪽이 남의 잠금 파일을 지우면 안 된다");
+        drop(g1);
+        assert!(!dir.join("leads.json.lock").exists());
+        std::fs::write(dir.join("leads.json.lock"), b"").unwrap();
+        let g3 = lock_file_for_with(&target, std::time::Duration::from_secs(1), std::time::Duration::from_millis(0));
+        assert!(g3.0.is_some(), "오래된 잠금 파일은 넘겨받는다");
+    }
 
     fn tmpdir() -> PathBuf {
         let d = std::env::temp_dir().join(format!("ctm-jsonguard-{}", uuid::Uuid::new_v4()));

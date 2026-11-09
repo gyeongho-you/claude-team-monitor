@@ -1,5 +1,7 @@
 # Claude Team Monitor
 
+(English summary: [README.en.md](README.en.md))
+
 [![CI](https://github.com/gyeongho-you/claude-team-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/gyeongho-you/claude-team-monitor/actions/workflows/ci.yml)
 
 여러 저장소(repo)에 걸친 작업을 헤드리스 Claude Code 세션("팀장" 1개 + 필요한 만큼의 "팀원")으로 분담시키고, 진행 상황을 한 화면에서 모니터링·관리하는 도구입니다.

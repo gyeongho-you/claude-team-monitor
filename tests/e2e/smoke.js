@@ -176,10 +176,18 @@ async function main() {
   console.log('\n스크립트 그래픽(격리 프레임)');
   await check('JavaScript 허용 슬롯의 프레임: 스크립트는 돌지만 네트워크·부모 접근은 막힌다', async () => {
     await app.eval('window.api.setScriptsEnabled(true)');
+    // 데이터를 빼내려는 "주소 이동" 시도(location 변경·window.open·이미지·링크)가 이 PC의 로컬 서버에 닿는지 센다.
+    const hits = [];
+    const sink = require('node:http').createServer((req, res) => { hits.push(req.url); res.end('x'); });
+    await new Promise(r => sink.listen(0, '127.0.0.1', r));
+    const sinkBase = `http://127.0.0.1:${sink.address().port}`;
     const frameScript = [
       "console.log('<div id=\"out\">정적</div>');",
       "console.log('<script>', \"document.getElementById('out').textContent = 'JS 실행됨';\",",
       "  \"window.__info = { ctm: typeof window.ctm, parent: (() => { try { return typeof window.parent.document } catch (e) { return 'blocked' } })() };\",",
+      "  \"setTimeout(function(){ try { location.href = '" + sinkBase + "/nav'; } catch (e) {} }, 1200);\",",
+      "  \"try { window.open('" + sinkBase + "/open'); } catch (e) {}\",",
+      "  \"var im = new Image(); im.src = '" + sinkBase + "/img'; var lk = document.createElement('link'); lk.rel = 'prefetch'; lk.href = '" + sinkBase + "/link'; document.head.appendChild(lk);\",",
       "  \"fetch('https://example.com').then(() => { window.__fetch = 'allowed' }).catch(() => { window.__fetch = 'blocked' });\",",
       "  '<' + '/script>');",
     ].join('\n');
@@ -191,6 +199,9 @@ async function main() {
     const r = JSON.parse(await app.eval("JSON.stringify({ text: document.getElementById('out') && document.getElementById('out').textContent, info: window.__info, fetch: window.__fetch })", fs_));
     ok(r.text === 'JS 실행됨', `프레임 안 스크립트가 실행되지 않았습니다: ${JSON.stringify(r)}`);
     ok(r.info && r.info.ctm === 'object' && r.info.parent === 'blocked' && r.fetch === 'blocked', `격리가 새고 있습니다: ${JSON.stringify(r)}`);
+    await sleep(3500); // 1.2초 뒤 시도하는 주소 이동까지 기다린다
+    sink.close();
+    ok(hits.length === 0, `프레임이 바깥 주소로 요청을 보냈습니다: ${JSON.stringify(hits)}`);
   });
 
   console.log('\n진단·환경');
