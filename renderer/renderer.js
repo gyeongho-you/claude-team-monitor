@@ -1681,8 +1681,8 @@ const { execFile } = require('child_process');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
-const LIMIT = 40; // '전체 브랜치' 그래프에 그릴 커밋 수(많을수록 느려집니다)
-const BLIMIT = 40; // 브랜치(워크트리)별 그래프에 그릴 커밋 수 — 저장소가 여러 개여도 데이터 한도 안에 들도록 전체보다 적게
+const LIMIT = 100; // '전체 브랜치' 그래프에 그릴 커밋 수(많을수록 느려집니다)
+const BLIMIT = 100; // 브랜치(워크트리)별 그래프에 그릴 커밋 수(올리면 더 옛날 기록까지 보이지만 데이터가 커집니다 — 저장소 6개·200개까지 한도 안에서 확인)
 const OUT_BUDGET = 900000; // HTML 출력 한도 1000000자 − (화면 코드·스타일 약 1.5만자) − 여유 // 데이터(JSON) 최대 글자 수 — 넘으면 커밋별 변경 파일 수를 줄인다
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const dir = process.env.CTM_LEAD_DIR;
