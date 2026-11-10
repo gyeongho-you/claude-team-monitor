@@ -950,7 +950,6 @@ struct ScriptCacheEntry {
     output: String,
     format: String,
 }
-const SCRIPT_CACHE_TTL: Duration = Duration::from_secs(5);
 
 fn script_cache() -> &'static Mutex<HashMap<String, ScriptCacheEntry>> {
     static C: OnceLock<Mutex<HashMap<String, ScriptCacheEntry>>> = OnceLock::new();
@@ -969,8 +968,10 @@ async fn script_content(slot: PanelSlot, lead_id: Option<String>, force: bool) -
     let note = "스크립트를 이 PC에서 실행한 결과입니다".to_string();
     let cached = |c: &HashMap<String, ScriptCacheEntry>| c.get(&slot.id).filter(|e| e.key == key).map(|e| (e.output.clone(), e.format.clone(), e.updated_at, e.at.elapsed()));
     let content = |output: String, format: String, at: Option<i64>, slot: &PanelSlot, note: String| PanelContent { markdown: output, updated_at: at, mode: slot.mode.clone(), note, items: Vec::new(), format };
-    if let Some((out, fmt, at, age)) = cached(&script_cache().lock().unwrap_or_else(|e| e.into_inner())) {
-        if !force && age < SCRIPT_CACHE_TTL {
+    // 같은 입력(스크립트·설정·팀장)의 결과가 있으면 시간이 지나도 다시 실행하지 않는다 — 스크립트는 처음 열 때, 입력이 바뀔 때, 사용자가 새로고침을 눌렀을 때(force)만 돈다.
+    // (예전에는 5초가 지나면 화면이 갱신을 부를 때마다 다시 실행해서, 보고 있던 그래프가 계속 다시 그려졌다.)
+    if let Some((out, fmt, at, _age)) = cached(&script_cache().lock().unwrap_or_else(|e| e.into_inner())) {
+        if !force {
             return Ok(content(out, fmt, Some(at), &slot, note));
         }
     }

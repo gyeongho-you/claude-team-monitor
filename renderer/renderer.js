@@ -848,13 +848,14 @@ function renderPanelChrome() {
 }
 
 let panelFetchSeq = 0;
-async function refreshPanelContent(force) {
+// force: 화면을 다시 그린다. runScript: (스크립트 슬롯에서) 스크립트도 다시 실행한다 — 새로고침 버튼·슬롯 저장처럼 사용자가 직접 시킨 경우만 true.
+async function refreshPanelContent(force, runScript) {
   const slot = activePanelSlot();
   if (!slot || spEl.hidden || panelEditing) return;
   const leadId = (slot.mode === 'auto' && slot.scope === 'selected') || slot.mode === 'script' ? selectedLeadId : null;
   let c;
   const mySeq = ++panelFetchSeq;
-  try { c = await window.api.getPanelContent(slot.id, leadId, force === true && slot.mode === 'script'); } catch (err) { if (mySeq === panelFetchSeq) spMetaEl.textContent = `불러오지 못했습니다: ${errMsg(err)}`; return; }
+  try { c = await window.api.getPanelContent(slot.id, leadId, runScript === true && slot.mode === 'script'); } catch (err) { if (mySeq === panelFetchSeq) spMetaEl.textContent = `불러오지 못했습니다: ${errMsg(err)}`; return; }
   if (mySeq !== panelFetchSeq) return; // 그 사이에 더 새로 요청한 조회(탭·팀장 전환)가 있다 — 늦게 온 옛 결과로 화면을 덮지 않는다
   const auto = slot.mode === 'auto' && Array.isArray(c.items);
   const key = `${slot.id}|${leadId || ''}|${c.updatedAt || ''}|${c.markdown.length}|${c.markdown.slice(0, 64)}|${hashStr(c.markdown)}|${c.format || ''}|${auto ? `${panelFilter.lead}|${panelFilter.range}|${panelFilter.current ? selectedLeadId : ''}` : ''}`;
@@ -1182,10 +1183,10 @@ spExpandBtn.addEventListener('click', () => setPanelCollapsed(false));
 spRefreshBtn.addEventListener('click', async () => {
   const slot = activePanelSlot();
   if (!slot || panelBusy) return;
-  if (slot.mode !== 'ai') { refreshPanelContent(true); return; }
+  if (slot.mode !== 'ai') { refreshPanelContent(true, true); return; }
   panelBusy = true; spRefreshBtn.disabled = true; spMetaEl.textContent = 'AI가 정리하는 중입니다(최대 2분)...';
   try { await window.api.refreshPanelSlot(slot.id); panelLastKey = ''; } catch (err) { spMetaEl.textContent = errMsg(err); }
-  finally { panelBusy = false; spRefreshBtn.disabled = false; await refreshPanelContent(true); }
+  finally { panelBusy = false; spRefreshBtn.disabled = false; await refreshPanelContent(true, true); }
 });
 spEditBtn.addEventListener('click', () => {
   const slot = activePanelSlot();
@@ -1198,7 +1199,7 @@ document.getElementById('sp-editor-save').addEventListener('click', async () => 
   const slot = activePanelSlot();
   if (!slot) return;
   try { await window.api.savePanelContent(slot.id, spEditorText.value); } catch (err) { spMetaEl.textContent = errMsg(err); return; }
-  panelEditing = false; spEditorEl.hidden = true; spBodyEl.hidden = false; panelLastKey = ''; refreshPanelContent(true);
+  panelEditing = false; spEditorEl.hidden = true; spBodyEl.hidden = false; panelLastKey = ''; refreshPanelContent(true, true);
 });
 document.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => setTimeout(() => { renderPanelChrome(); refreshPanelContent(true); }, 0)));
 window.addEventListener('resize', () => renderPanelChrome());
