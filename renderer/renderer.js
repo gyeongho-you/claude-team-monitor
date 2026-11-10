@@ -1653,6 +1653,427 @@ console.log('<div id="wt"></div>');
 console.log('<script type="application/json" id="data">' + json + '</script>');
 console.log('<script>(' + frameMain.toString() + ')()</script>');
 `;
+// 두 번째 예제: 팀장(설계) 저장소와 허용한 팀원(구현) 저장소를 탭으로 골라 보는 git 그래프(팀원 저장소가 먼저·기본 선택).
+const PS_EXAMPLE_GRAPH_TEAM_JS = String.raw`// git 그래프(상호작용): 커밋을 클릭하면 변경 파일이 나오고, 파일마다 탐색기·VS Code로 열 수 있습니다. 워크트리 표는 열 머리를 눌러 정렬하고, 행(브랜치)을 누르면 위 그래프가 그 브랜치 기준으로 바뀝니다.
+// 위쪽 탭에서 팀장 저장소(설계)와 허용한 팀원 저장소(구현)를 골라 볼 수 있습니다(팀원 저장소가 먼저, 기본 선택).
+// 이 슬롯은 "출력: HTML"과 "JavaScript 허용"을 켜야 합니다(읽기만 하는 git 명령, 상태를 바꾸지 않습니다).
+// 그래프는 데이터만 미리 넣고 화면 안에서 그립니다(출력이 200000자를 넘어 뒤쪽 스크립트·표가 잘리지 않도록).
+const { execFile } = require('child_process');
+const os = require('os');
+const fs = require('fs');
+const path = require('path');
+const LIMIT = 40; // 그래프마다 그릴 커밋 수(많을수록 느려집니다)
+const OUT_BUDGET = 160000; // 데이터(JSON) 최대 글자 수 — 넘으면 커밋별 변경 파일 수를 줄인다
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const dir = process.env.CTM_LEAD_DIR;
+if (!dir) { console.log('<p style="color:var(--text-soft)">작업 탭에서 팀장을 선택하세요.</p>'); process.exit(0); }
+const norm = p => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+// git은 프로세스를 새로 띄우는 비용이 커서(Windows에서 한 번에 수십~수백 ms) 순서대로 부르면 느리다 — 동시에 최대 8개까지 병렬로 부른다.
+let running = 0; const waitq = [];
+const take = () => new Promise(r => { if (running < 8) { running++; r(); } else waitq.push(r); });
+const give = () => { const n = waitq.shift(); if (n) n(); else running--; };
+const mkGit = cwd => async (...a) => {
+  await take();
+  try { return await new Promise(res => execFile('git', ['-c', 'core.quotePath=false', '--no-optional-locks', ...a], { cwd, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (e, out) => res(e ? null : out))); }
+  finally { give(); }
+};
+// 커밋의 변경 파일 목록은 커밋이 만들어진 뒤로 절대 바뀌지 않는다 — 임시 폴더에 기억해 두면 다시 그릴 때는 새로 생긴 커밋만 git에 묻는다.
+const FCACHE_PATH = path.join(os.tmpdir(), 'ctm-git-graph-files.json');
+const FCACHE_MAX = 6000;
+let fcache = {}; let fcacheDirty = false;
+try { const j = JSON.parse(fs.readFileSync(FCACHE_PATH, 'utf8')); if (j && typeof j === 'object' && !Array.isArray(j)) fcache = j; } catch { /* 처음이거나 깨졌으면 새로 시작 */ }
+function saveFcache() {
+  if (!fcacheDirty) return;
+  try {
+    const keys = Object.keys(fcache);
+    if (keys.length > FCACHE_MAX) keys.slice(0, keys.length - FCACHE_MAX).forEach(k => { delete fcache[k]; });
+    const tmp = FCACHE_PATH + '.' + process.pid + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(fcache)); fs.renameSync(tmp, FCACHE_PATH);
+  } catch { /* 캐시를 못 써도 결과에는 영향 없다 */ }
+}
+
+// 0) 이 팀장이 허용한 팀원 폴더(CTM_LEADS_FILE에서 읽기만 한다)
+let members = [];
+try {
+  const leads = JSON.parse(fs.readFileSync(process.env.CTM_LEADS_FILE, 'utf8'));
+  if (Array.isArray(leads)) {
+    const me = leads.find(l => l && l.id && l.id === process.env.CTM_LEAD_ID)
+      || leads.find(l => l && l.sessionId && l.sessionId === process.env.CTM_SESSION_ID)
+      || leads.find(l => l && l.targetDir && norm(l.targetDir) === norm(dir));
+    if (me && Array.isArray(me.approvedMembers)) members = me.approvedMembers.filter(p => typeof p === 'string' && p.trim());
+  }
+} catch { /* 목록을 못 읽으면 팀장 저장소만 보여 준다 */ }
+{ const seen = new Set([norm(dir)]); members = members.filter(m => { const k = norm(m); if (seen.has(k)) return false; seen.add(k); return true; }); }
+const memberSet = new Set(members.map(norm));
+
+// 저장소 묶기: 같은 저장소(워크트리 포함)는 하나로 — 팀원 먼저, 팀장(설계) 마지막. 후보마다 git을 한 번만(병렬로) 부른다.
+const groups = []; const byKey = new Map();
+async function probe(d) {
+  if (!fs.existsSync(d)) return { dir: d, err: '폴더가 없습니다' };
+  const out = await mkGit(d)('rev-parse', '--is-inside-work-tree', '--git-common-dir', '--show-toplevel');
+  const l = (out || '').split('\n').map(s => s.trim());
+  if (l[0] !== 'true') return { dir: d, err: 'git 저장소가 아닙니다' };
+  return { dir: d, key: l[1] ? norm(path.resolve(d, l[1])) : norm(d), top: l[2] || d };
+}
+async function buildGroups() {
+  const cands = members.map(m => [m, '팀원']).concat([[dir, '팀장']]);
+  const probes = await Promise.all(cands.map(c => probe(c[0])));
+  probes.forEach((p, i) => {
+    const role = cands[i][1];
+    if (p.err) { groups.push({ dir: p.dir, roles: [role], err: p.err }); return; }
+    if (byKey.has(p.key)) { const gr = byKey.get(p.key); if (gr.roles.indexOf(role) === -1) gr.roles.push(role); return; }
+    const gr = { dir: p.dir, roles: [role], err: null, top: p.top };
+    byKey.set(p.key, gr); groups.push(gr);
+  });
+}
+
+// 저장소 하나 모으기. 필요한 git 호출을 한꺼번에 병렬로 보낸다: 워크트리 목록 → (시각 1번 + 그래프별 커밋 목록) 병렬 → 변경 파일은 겹치는 커밋을 한 번만 묶어서.
+async function collect(gr) {
+  const rdir = gr.dir;
+  const name0 = rdir.split(/[\\/]/).filter(Boolean).pop() || rdir;
+  const role = gr.roles.join('·') + (gr.roles.length === 1 && gr.roles[0] === '팀장' ? '(설계)' : '');
+  if (gr.err) return { name: name0, role, dir: rdir, err: gr.err };
+  const git = mkGit(rdir);
+  const top = (gr.top || rdir).trim();
+  const isSha = h => /^[0-9a-f]{7,64}$/.test(h);
+
+  // 1) 워크트리 목록
+  const wts = []; let cur = null;
+  for (const l of ((await git('worktree', 'list', '--porcelain')) || '').split('\n')) {
+    if (l.startsWith('worktree ')) { cur = { path: l.slice(9), head: '', branch: '' }; wts.push(cur); }
+    else if (cur && l.startsWith('HEAD ')) cur.head = l.slice(5);
+    else if (cur && l.startsWith('branch ')) cur.branch = l.slice(7).replace('refs/heads/', '');
+    else if (cur && l === 'detached') cur.branch = '(분리된 HEAD)';
+  }
+  wts.forEach((w, i) => {
+    w.name = i === 0 ? '메인' : w.path.split(/[\\/]/).filter(Boolean).pop();
+    w.mine = norm(w.path) === norm(dir);
+    w.member = memberSet.has(norm(w.path));
+    w.ts = 0;
+  });
+  const repoName = (wts[0] ? wts[0].path : top).split(/[\\/]/).filter(Boolean).pop() || name0;
+
+  // 2) 그래프 목록: 전체 + 워크트리마다(같은 커밋을 가리키면 하나로 묶음)
+  const defs = [{ key: 'all', title: '전체 브랜치', rev: null }];
+  const byHead = new Map();
+  wts.forEach((w, i) => {
+    w.g = null;
+    if (!isSha(w.head)) return;
+    if (byHead.has(w.head)) { w.g = byHead.get(w.head); return; }
+    const key = 'w' + i;
+    byHead.set(w.head, key);
+    defs.push({ key, title: (w.branch || '(분리된 HEAD)') + ' · 📁 ' + w.name, rev: w.head });
+    w.g = key;
+  });
+
+  // 3) 병렬: 워크트리 시각(한 번에) + 그래프마다 커밋 목록(변경 파일은 빼서 가볍게)
+  const S = '\x1f';
+  const heads = [...byHead.keys()];
+  const [tsOut, ...logs] = await Promise.all([
+    heads.length ? git('log', '--no-walk', '--format=%H' + S + '%ct', ...heads) : Promise.resolve(''),
+    ...defs.map(d => git('log', ...(d.rev ? [d.rev] : ['--all']), '--date-order', '-n', String(LIMIT), '--format=%H' + S + '%P' + S + '%D' + S + '%s' + S + '%cr' + S + '%an')),
+  ]);
+  const tsMap = new Map();
+  if (tsOut != null) { for (const l of tsOut.split('\n')) { const p = l.split(S); if (p[0]) tsMap.set(p[0], Number(p[1]) || 0); } }
+  else await Promise.all(heads.map(async h => tsMap.set(h, Number((((await git('log', '-1', '--format=%ct', h)) || '0')).trim()) || 0)));
+  wts.forEach(w => { w.ts = isSha(w.head) ? (tsMap.get(w.head) || 0) : 0; });
+
+  // 4) 그래프마다 줄(lane) 배치 — 디스크를 보지 않는 계산
+  const files = {};
+  const info = {};
+  function buildGraph(raw) {
+    const commits = (raw || '').split('\n').filter(Boolean).map(l => {
+      const [sha, parents, refs, subject, when, author] = l.split(S);
+      return { sha, parents: parents ? parents.split(' ') : [], refs: refs ? refs.split(', ').filter(Boolean) : [], subject, when, author };
+    });
+    if (!commits.length) return null;
+    commits.forEach(c => { info[c.sha] = { short: c.sha.slice(0, 7), subject: c.subject, author: c.author, when: c.when }; });
+    const idx = new Map(commits.map((c, i) => [c.sha, i]));
+    const lanes = [];
+    const edges = [];
+    commits.forEach((c, i) => {
+      let col = lanes.indexOf(c.sha);
+      if (col === -1) { col = lanes.indexOf(null); if (col === -1) { col = lanes.length; lanes.push(null); } }
+      c.row = i; c.col = col;
+      lanes.forEach((s, k) => { if (s === c.sha && k !== col) lanes[k] = null; });
+      lanes[col] = null;
+      c.parents.forEach((p, n) => {
+        let lane = lanes.indexOf(p);
+        if (lane === -1) {
+          lane = n === 0 ? col : lanes.indexOf(null);
+          if (lane === -1) { lane = lanes.length; lanes.push(null); }
+          lanes[lane] = p;
+        }
+        edges.push({ from: c, to: p, lane });
+      });
+    });
+    return {
+      n: commits.length,
+      c: commits.map(c => [c.sha, c.col, c.parents.length > 1 ? 1 : 0, c.refs]),
+      e: edges.map(e => [e.from.row, e.lane, idx.has(e.to) ? idx.get(e.to) : -1]),
+    };
+  }
+  const graphs = {};
+  defs.forEach((d, i) => { const g = buildGraph(logs[i]); if (g) graphs[d.key] = Object.assign({ title: d.title }, g); });
+  if (!graphs.all) return { name: repoName, role, dir: rdir, err: '커밋이 없습니다' };
+  wts.forEach(w => { if (w.g && !graphs[w.g]) w.g = null; });
+
+  // 5) 변경 파일: 그래프마다 같은 커밋이 겹치므로 한 번만, 여러 커밋을 한 번에 묻는다(--no-walk). 인자가 너무 길어지지 않게 나눠서 병렬로.
+  const need = Object.keys(info).filter(s => !Object.prototype.hasOwnProperty.call(fcache, s));
+  const chunks = [];
+  for (let i = 0; i < need.length; i += 100) chunks.push(need.slice(i, i + 100));
+  const outs = await Promise.all(chunks.map(c => git('log', '--no-walk', '--name-status', '--format=@@%H', ...c)));
+  for (const out of outs) {
+    let fc = null;
+    for (const l of (out || '').split('\n')) {
+      if (l.startsWith('@@')) { const s = l.slice(2); fc = files[s] ? null : (files[s] = []); }
+      else if (fc && l.trim() && fc.length < 60) { const parts = l.split('\t'); fc.push({ s: parts[0][0], p: parts[parts.length - 1] }); }
+    }
+  }
+  for (const s of Object.keys(files)) { fcache[s] = files[s]; fcacheDirty = true; }
+  for (const s of Object.keys(info)) { if (!files[s] && Object.prototype.hasOwnProperty.call(fcache, s)) files[s] = fcache[s]; }
+  const last = wts.reduce((m, w) => Math.max(m, w.ts), 0);
+  return { name: repoName, role, dir: rdir, top, wts, graphs, files, info, last, err: null };
+}
+
+(async () => {
+await buildGroups();
+const repos = await Promise.all(groups.map(collect));
+saveFcache();
+const okRepos = repos.filter(r => !r.err);
+if (!okRepos.length) {
+  console.log(repos.map(r => '<p>' + esc(r.role) + ' · ' + esc(r.err) + ': <code>' + esc(r.dir) + '</code></p>').join(''));
+  process.exit(0);
+}
+const defIdx = repos.findIndex(r => !r.err); // 팀원 저장소가 먼저 오므로 정상인 첫 저장소를 기본으로
+
+// 4) 화면 안 상호작용 코드(함수를 글자로 바꿔 넣는다 — 프레임 안에서만 실행된다)
+function frameMain() {
+  var data = JSON.parse(document.getElementById('data').textContent);
+  var pane = document.getElementById('pane');
+  var gbox = document.getElementById('graph');
+  var rbox = document.getElementById('repos');
+  var wth = document.getElementById('wth');
+  var R = null, curR = -1;
+  var sel = null;
+  var curG = 'all';
+  var ROW = 24, COL = 14, PAD = 10;
+  var COLORS = ['#58a6ff', '#3fb950', '#d29922', '#f778ba', '#a371f7', '#39c5cf', '#ff7b72', '#8b949e'];
+  function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+  function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+  function badge(txt, style) { return '<span style="flex:none;border-radius:4px;padding:0 5px;font-size:10px;line-height:16px;' + style + '">' + esc(txt) + '</span>'; }
+  function join(a, b) { return a.replace(/[\\/]+$/, '') + '/' + b; }
+  function iconBtn(label, title, fn) { var b = el('button', 'ib', label); b.title = title; b.addEventListener('click', function (e) { e.stopPropagation(); fn(); }); return b; }
+  function resetPane() { pane.textContent = ''; pane.appendChild(el('span', 'empty', '아래 그래프에서 커밋을 클릭하세요.')); }
+  function show(sha) {
+    var c = R.commits[sha];
+    if (!c) return;
+    pane.textContent = '';
+    var h = el('div', 'ph');
+    h.appendChild(el('code', '', c.short));
+    h.appendChild(el('b', '', ' ' + c.subject));
+    pane.appendChild(h);
+    pane.appendChild(el('div', 'pm', R.name + ' · ' + c.author + ' · ' + c.when + ' · 변경 파일 ' + c.fn + '개' + (c.fn > c.files.length ? ' (' + c.files.length + '개만 표시)' : '')));
+    c.files.forEach(function (f) {
+      var full = join(R.top, f.p);
+      var r = el('div', 'fr');
+      r.appendChild(el('span', 'st st' + f.s, f.s));
+      r.appendChild(el('span', 'fp', f.p));
+      r.appendChild(iconBtn('📂', '탐색기에서 보기', function () { ctm.reveal(full); }));
+      r.appendChild(iconBtn('✎', 'VS Code로 열기', function () { ctm.editor(full); }));
+      pane.appendChild(r);
+    });
+  }
+  // 그래프 그리기(선택한 그래프 하나만)
+  function renderGraph(g) {
+    var cs = g.c, es = g.e, maxLane = 0;
+    cs.forEach(function (c) { if (c[1] > maxLane) maxLane = c[1]; });
+    es.forEach(function (e) { if (e[1] > maxLane) maxLane = e[1]; });
+    var GW = PAD * 2 + (maxLane + 1) * COL, H = cs.length * ROW;
+    function X(l) { return PAD + l * COL; }
+    function Y(r) { return ROW / 2 + r * ROW; }
+    var lines = es.map(function (e) {
+      var fr = e[0], lane = e[1], to = e[2], hasP = to >= 0;
+      var xa = X(cs[fr][1]), ya = Y(fr), xl = X(lane);
+      var yb = hasP ? Y(to) : H, xb = hasP ? X(cs[to][1]) : xl;
+      var d = 'M' + xa + ' ' + ya, y = ya;
+      if (xl !== xa) { d += ' C' + xa + ' ' + (ya + ROW * 0.6) + ' ' + xl + ' ' + (ya + ROW * 0.4) + ' ' + xl + ' ' + (ya + ROW); y = ya + ROW; }
+      if (hasP && xl !== xb) {
+        var yc = Math.max(y, yb - ROW);
+        d += ' L' + xl + ' ' + yc + ' C' + xl + ' ' + (yc + ROW * 0.4) + ' ' + xb + ' ' + (yc + ROW * 0.6) + ' ' + xb + ' ' + yb;
+      } else d += ' L' + xb + ' ' + yb;
+      return '<path d="' + d + '" stroke="' + COLORS[lane % COLORS.length] + '" stroke-width="2" fill="none" stroke-linecap="round"' + (hasP ? '' : ' stroke-dasharray="2 3"') + '/>';
+    }).join('');
+    var dots = cs.map(function (c, i) {
+      return '<circle cx="' + X(c[1]) + '" cy="' + Y(i) + '" r="4.5" fill="' + COLORS[c[1] % COLORS.length] + '" stroke="var(--bg)" stroke-width="1.5"/>' +
+        (c[2] ? '<circle cx="' + X(c[1]) + '" cy="' + Y(i) + '" r="1.8" fill="var(--bg)"/>' : '');
+    }).join('');
+    var rows = cs.map(function (c) {
+      var sha = c[0], info = R.commits[sha] || { subject: '', when: '' };
+      var refs = c[3].map(function (r) {
+        if (r.indexOf('tag: ') === 0) return badge('🏷 ' + r.slice(5), 'background:#d2992233;color:#d29922');
+        if (r.indexOf('HEAD -> ') === 0) return badge('● ' + r.slice(8), 'background:var(--accent);color:var(--bg);font-weight:600');
+        if (r === 'HEAD') return badge('HEAD', 'background:var(--border-2);color:var(--text)');
+        if (r.indexOf('/') !== -1) return badge(r, 'border:1px solid var(--border-2);color:var(--text-soft)');
+        return badge(r, 'background:#3fb95033;color:#3fb950');
+      });
+      var shown = refs.slice(0, 3).join('') + (refs.length > 3 ? badge('+' + (refs.length - 3), 'color:var(--text-soft)') : '');
+      var here = R.wts.filter(function (w) { return w.sha === sha; }).map(function (w) {
+        var tag = w.mine ? ' ◀ 여기' : w.member ? ' ◀ 팀원' : '';
+        return badge('📁 ' + w.name + tag, 'border:1px dashed var(--accent);color:var(--accent)' + (tag ? ';font-weight:600' : ''));
+      }).join('');
+      return '<div class="row" data-sha="' + sha + '" style="display:flex;align-items:center;gap:5px;height:' + ROW + 'px;font-size:11px;white-space:nowrap;cursor:pointer">' + here + shown +
+        '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">' + esc(info.subject) + '</span>' +
+        '<span style="flex:none;color:var(--text-soft);font-size:10px">' + esc(info.when) + '</span></div>';
+    }).join('');
+    gbox.style.paddingLeft = GW + 'px';
+    gbox.innerHTML = '<svg width="' + GW + '" height="' + H + '" viewBox="0 0 ' + GW + ' ' + H + '" style="position:absolute;left:0;top:0;pointer-events:none">' + lines + dots + '</svg>' + rows;
+    Array.prototype.forEach.call(gbox.querySelectorAll('.row'), function (r) {
+      r.addEventListener('click', function () {
+        if (sel) sel.classList.remove('sel');
+        sel = r; r.classList.add('sel');
+        show(r.getAttribute('data-sha'));
+      });
+    });
+  }
+  // 그래프 전환(워크트리 표의 행을 누르거나 '전체 보기')
+  var gtitle = document.getElementById('gtitle');
+  var gall = document.getElementById('gall');
+  function setGraph(g) {
+    if (!R || !R.graphs || !R.graphs[g]) return;
+    curG = g;
+    sel = null;
+    renderGraph(R.graphs[g]);
+    gtitle.textContent = '그래프: ' + R.graphs[g].title + ' · 커밋 ' + R.graphs[g].n + '개';
+    gall.style.display = g === 'all' ? 'none' : '';
+    resetPane();
+    draw();
+  }
+  gall.addEventListener('click', function () { setGraph('all'); });
+  // 저장소 탭(팀원 구현 저장소 / 팀장 설계 저장소)
+  function drawTabs() {
+    rbox.textContent = '';
+    data.repos.forEach(function (r, i) {
+      var b = el('button', 'rt' + (i === curR ? ' on' : '') + (r.err ? ' bad' : ''));
+      b.title = r.dir;
+      var isMember = r.role.indexOf('팀원') !== -1;
+      b.appendChild(el('span', 'rr ' + (isMember ? 'rm' : 'rl'), r.role));
+      b.appendChild(el('span', '', ' ' + r.name));
+      b.appendChild(el('span', 'ra', r.err ? ' · ' + r.err : ' · ' + ago(r.last)));
+      b.addEventListener('click', function () { setRepo(i); });
+      rbox.appendChild(b);
+    });
+  }
+  function setRepo(i) {
+    curR = i; R = data.repos[i];
+    drawTabs();
+    if (R.err) {
+      gbox.style.paddingLeft = '0';
+      gbox.textContent = '';
+      gbox.appendChild(el('span', 'empty', R.err + ': ' + R.dir));
+      gtitle.textContent = R.role + ' · ' + R.name;
+      gall.style.display = 'none';
+      wth.textContent = '워크트리';
+      wrap.textContent = '';
+      resetPane();
+      return;
+    }
+    wth.textContent = '워크트리 ' + R.wts.length + '개 · ' + R.name;
+    setGraph('all');
+  }
+  // 워크트리 표(열 머리를 누르면 정렬, 행을 누르면 그 브랜치 그래프)
+  var cols = [['name', '이름'], ['branch', '브랜치'], ['head', '커밋'], ['ts', '마지막 커밋']];
+  var sortKey = 'ts', dir = -1;
+  var wrap = document.getElementById('wt');
+  function ago(ts) { if (!ts) return '-'; var s = Math.max(0, Date.now() / 1000 - ts); return s < 3600 ? Math.floor(s / 60) + '분 전' : s < 86400 ? Math.floor(s / 3600) + '시간 전' : Math.floor(s / 86400) + '일 전'; }
+  function draw() {
+    var list = R.wts.slice().sort(function (a, b) { var x = a[sortKey], y = b[sortKey]; return (x < y ? -1 : x > y ? 1 : 0) * dir; });
+    wrap.textContent = '';
+    var t = el('table', 'wtt'); var hr = el('tr');
+    cols.forEach(function (c) {
+      var th = el('th', 'sortable', c[1] + (sortKey === c[0] ? (dir > 0 ? ' ▲' : ' ▼') : ''));
+      th.addEventListener('click', function () { if (sortKey === c[0]) dir = -dir; else { sortKey = c[0]; dir = c[0] === 'ts' ? -1 : 1; } draw(); });
+      hr.appendChild(th);
+    });
+    hr.appendChild(el('th', '', ''));
+    t.appendChild(hr);
+    list.forEach(function (w) {
+      var tr = el('tr', w.g ? ('pick' + (w.g === curG ? ' on' : '')) : '');
+      if (w.g) { tr.title = '눌러서 위 그래프를 이 브랜치 기준으로 보기'; tr.addEventListener('click', function () { setGraph(w.g); }); }
+      tr.appendChild(el('td', '', w.name + (w.mine ? ' ◀' : '') + (w.member ? ' 👥' : '')));
+      tr.appendChild(el('td', w.g ? 'blink' : '', w.branch || '-'));
+      tr.appendChild(el('td', 'mono', w.head));
+      tr.appendChild(el('td', '', ago(w.ts)));
+      var td = el('td'); td.appendChild(iconBtn('📂', '탐색기에서 이 워크트리 폴더 보기', function () { ctm.reveal(w.path); })); tr.appendChild(td);
+      t.appendChild(tr);
+    });
+    wrap.appendChild(t);
+  }
+  setRepo(data.def);
+}
+
+// 5) 데이터 묶기 — 출력 한도(200000자)를 넘지 않도록 변경 파일 수를 단계적으로 줄인다
+function makeJson(fileCap, onlyAll) {
+  const out = repos.map(r => {
+    if (r.err) return { name: r.name, role: r.role, dir: r.dir, err: r.err, last: 0 };
+    const gs = {};
+    for (const [k, g] of Object.entries(r.graphs)) { if (!onlyAll || k === 'all') gs[k] = g; }
+    const used = new Set();
+    Object.values(gs).forEach(g => g.c.forEach(c => used.add(c[0])));
+    const commitData = {};
+    used.forEach(sha => {
+      const f = r.files[sha] || [];
+      commitData[sha] = Object.assign({}, r.info[sha], { files: f.slice(0, fileCap), fn: f.length });
+    });
+    return {
+      name: r.name, role: r.role, dir: r.dir, top: r.top, last: r.last, err: null,
+      commits: commitData,
+      graphs: gs,
+      wts: r.wts.map(w => ({ name: w.name, path: w.path, branch: w.branch, head: w.head.slice(0, 7), sha: w.head, ts: w.ts, mine: w.mine, member: w.member, g: w.g && gs[w.g] ? w.g : null })),
+    };
+  });
+  return JSON.stringify({ def: defIdx, repos: out }).replace(/</g, '\\u003c');
+}
+let json = null;
+for (const onlyAll of [false, true]) {
+  for (const cap of [60, 30, 15, 5, 0]) { json = makeJson(cap, onlyAll); if (json.length <= OUT_BUDGET) break; }
+  if (json.length <= OUT_BUDGET) break;
+}
+
+const css = '.row:hover{background:var(--surface-2)}.row.sel{background:var(--surface-2);box-shadow:inset 2px 0 0 var(--accent)}'
+  + '#pane{border:1px solid var(--border);border-radius:6px;padding:6px 8px;margin:6px 0;height:150px;overflow:auto;font-size:11px;background:var(--surface-2)}'
+  + '#pane .ph code{color:var(--accent)}#pane .pm{color:var(--text-soft);margin:2px 0 6px}.empty{color:var(--text-soft)}'
+  + '.fr{display:flex;gap:6px;align-items:center;padding:1px 0}.fp{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
+  + '.st{flex:none;width:14px;text-align:center;font-weight:700}.stM{color:#d29922}.stA{color:#3fb950}.stD{color:#f85149}.stR{color:#a371f7}'
+  + '.ib{flex:none;background:transparent;border:1px solid var(--border-2);color:var(--text);border-radius:4px;cursor:pointer;font-size:11px;padding:0 4px;line-height:16px}.ib:hover{border-color:var(--accent)}'
+  + '.wtt{width:100%;font-size:11px}.wtt th,.wtt td{border-bottom:1px solid var(--border);padding:3px 4px;text-align:left}.wtt th.sortable{cursor:pointer;color:var(--text-soft)}.wtt th.sortable:hover{color:var(--accent)}.mono{font-family:Consolas,monospace}'
+  + '.wtt tr.pick{cursor:pointer}.wtt tr.pick:hover td{background:var(--surface-2)}.wtt tr.on td{background:var(--surface-2)}.wtt tr.on td:first-child{box-shadow:inset 2px 0 0 var(--accent)}'
+  + '.blink{color:var(--accent);text-decoration:underline dotted}'
+  + '#gbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:2px 0 4px;font-size:11px}#gtitle{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
+  + '#repos{display:flex;flex-wrap:wrap;gap:4px;margin:0 0 4px}'
+  + '.rt{display:flex;align-items:center;max-width:100%;background:transparent;border:1px solid var(--border-2);color:var(--text);border-radius:6px;cursor:pointer;font-size:11px;padding:2px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
+  + '.rt:hover{border-color:var(--accent)}.rt.on{border-color:var(--accent);background:var(--surface-2);font-weight:600}.rt.bad{opacity:.7}'
+  + '.rr{border-radius:4px;padding:0 4px;font-size:10px;line-height:15px;font-weight:600}.rm{background:#3fb95033;color:#3fb950}.rl{background:var(--border-2);color:var(--text)}.ra{color:var(--text-soft);font-weight:400;font-size:10px}';
+
+const nMem = repos.filter(r => r.role.indexOf('팀원') !== -1).length;
+const first = repos[defIdx];
+console.log('<style>' + css + '</style>');
+console.log('<div style="font-size:11px;color:var(--text-soft);margin-bottom:4px">' + esc(process.env.CTM_LEAD_LABEL || '팀장') + ' · 저장소 ' + repos.length + '개 (팀원 ' + nMem + ') · 커밋을 클릭하면 변경 파일이 나옵니다</div>');
+console.log('<div id="repos"></div>');
+console.log('<div id="pane"><span class="empty">아래 그래프에서 커밋을 클릭하세요.</span></div>');
+console.log('<div id="gbar"><b id="gtitle">그래프: ' + esc(first.name) + ' · ' + esc(first.graphs.all.title) + ' · 커밋 ' + first.graphs.all.n + '개</b><button id="gall" class="ib" style="display:none">전체 보기</button></div>');
+console.log('<div id="graph" class="graph" style="position:relative"><span style="color:var(--text-soft)">그래프를 그리는 중… (보이지 않으면 이 슬롯의 "JavaScript 허용"을 켜세요)</span></div>');
+console.log('<div style="margin:10px 0 4px;font-weight:600"><span id="wth">워크트리 ' + first.wts.length + '개 · ' + esc(first.name) + '</span> <span style="font-weight:400;color:var(--text-soft);font-size:10px">(열 머리를 누르면 정렬 · 행을 누르면 위 그래프가 그 브랜치로 바뀜)</span></div>');
+console.log('<div id="wt"></div>');
+console.log('<script type="application/json" id="data">' + json + '</script>');
+console.log('<script>(' + frameMain.toString() + ')()</script>');
+})().catch(e => { console.log('<pre style="color:#f85149;white-space:pre-wrap">' + esc((e && e.stack) || e) + '</pre>'); });
+`;
+document.getElementById('ps-example-graph-team-btn').addEventListener('click', () => {
+  if (psScript.value.trim() && !confirm('입력해 둔 스크립트를 예제로 바꿉니다. 계속할까요?')) return;
+  psInterp.value = 'node'; psFormat.value = 'html'; psAllowJs.checked = true; updatePsJsUi(); psTimeout.value = 15000; psScript.value = PS_EXAMPLE_GRAPH_TEAM_JS; clearPsTest();
+  if (!psName.value.trim()) psName.value = '깃 그래프(팀장+팀원)';
+});
 document.getElementById('ps-example-graph-js-btn').addEventListener('click', () => {
   if (psScript.value.trim() && !confirm('입력해 둔 스크립트를 예제로 바꿉니다. 계속할까요?')) return;
   psInterp.value = 'node'; psFormat.value = 'html'; psAllowJs.checked = true; updatePsJsUi(); psTimeout.value = 15000; psScript.value = PS_EXAMPLE_GRAPH_JS; clearPsTest();
