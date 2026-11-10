@@ -98,7 +98,7 @@ pub(crate) fn render(info: &DiagInfo) -> String {
         LOG_TAIL_LINES,
         if info.log_tail.trim().is_empty() { "(비어 있음)" } else { info.log_tail },
     );
-    let text = format!("{text}\n### claude 호출 계측(앱을 켠 뒤)\n{}\n", crate::agents_json::call_stats_summary());
+    let text = format!("{text}\n### claude 호출 계측(앱을 켠 뒤)\n{}\n{}\n", crate::agents_json::call_stats_summary(), crate::oauth_tmp_cleanup::summary());
     redact_home(&text, info.home)
 }
 

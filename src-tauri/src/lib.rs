@@ -37,6 +37,7 @@ mod panel_script;
 mod side_panel;
 mod settings;
 mod stall_watchdog;
+mod oauth_tmp_cleanup;
 mod timing;
 mod update_check;
 mod transcript;
@@ -162,6 +163,8 @@ pub fn run() {
       pasted_images::purge_old_attachments();
       // 스크립트 허용 여부를 명시값으로 굳힌다(side_panel.rs 참고).
       side_panel::pin_scripts_flag_at_startup();
+      // ~/.claude에 쌓이는 claude OAuth 갱신 잠금의 오래된 임시 파일을 보수적으로 정리한다(oauth_tmp_cleanup.rs 참고).
+      oauth_tmp_cleanup::spawn_background();
       if cfg!(debug_assertions) {
         app.handle().plugin(
           tauri_plugin_log::Builder::default()
