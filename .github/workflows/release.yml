@@ -80,6 +80,9 @@ jobs:
             npm run tauri:build:release 2>&1 | tee build.log
             code=${PIPESTATUS[0]}
             [ "$code" -eq 0 ] && exit 0
+            # 로그는 인증 없이 못 읽으므로 실패 원인(오류 줄과 끝부분)을 주석으로 남긴다.
+            msg=$( (grep -n -i -E "^error|error\[|error:|failed|panicked" build.log | head -8; echo ---; tail -n 14 build.log) | cut -c1-300 | paste -sd '|' - | sed 's/%/%25/g' )
+            echo "::error title=installer-build(시도 $attempt)::$msg"
             grep -q -E "http status: 5[0-9][0-9]" build.log || exit $code
             sleep 20
           done
