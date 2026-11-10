@@ -2071,7 +2071,7 @@ console.log('<script>(' + frameMain.toString() + ')()</script>');
 `;
 document.getElementById('ps-example-graph-team-btn').addEventListener('click', () => {
   if (psScript.value.trim() && !confirm('입력해 둔 스크립트를 예제로 바꿉니다. 계속할까요?')) return;
-  psInterp.value = 'node'; psFormat.value = 'html'; psAllowJs.checked = true; updatePsJsUi(); psTimeout.value = 15000; psScript.value = PS_EXAMPLE_GRAPH_TEAM_JS; clearPsTest();
+  psInterp.value = 'node'; psFormat.value = 'html'; psAllowJs.checked = true; updatePsJsUi(); psTimeout.value = 40000; psScript.value = PS_EXAMPLE_GRAPH_TEAM_JS; clearPsTest();
   if (!psName.value.trim()) psName.value = '깃 그래프(팀장+팀원)';
 });
 document.getElementById('ps-example-graph-js-btn').addEventListener('click', () => {
