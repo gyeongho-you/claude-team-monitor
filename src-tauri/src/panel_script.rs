@@ -31,7 +31,8 @@ pub(crate) const OUTPUT_FORMATS: [&str; 2] = ["markdown", "html"];
 pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 10_000;
 pub(crate) const MIN_TIMEOUT_MS: u64 = 500;
 pub(crate) const MAX_TIMEOUT_MS: u64 = 600_000;
-pub(crate) const MAX_SCRIPT_CHARS: usize = 20_000;
+// AI가 만든 그래프·표 스크립트는 금방 2만 자를 넘는다(실제로 git 그래프에 "팀원 프로젝트도 보기"를 더하면 넘음) — 100,000자까지 허용한다.
+pub(crate) const MAX_SCRIPT_CHARS: usize = 100_000;
 /// 출력 길이 제한(글자 수). 그래픽은 data: 이미지(base64)나 SVG가 길어지므로 넉넉하게 둔다.
 pub(crate) const MAX_OUTPUT_CHARS: usize = 200_000;
 

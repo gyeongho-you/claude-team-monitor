@@ -215,7 +215,7 @@ pub(crate) fn slot_from_input(input: &PanelSlotInput, id: String, created_at: i6
             return Err("스크립트를 입력하세요.".to_string());
         }
         if input.script.chars().count() > crate::panel_script::MAX_SCRIPT_CHARS {
-            return Err(format!("스크립트는 {}자 이하로 입력하세요.", crate::panel_script::MAX_SCRIPT_CHARS));
+            return Err(format!("스크립트가 너무 깁니다({}자) — {}자 이하로 줄여 주세요.", input.script.chars().count(), crate::panel_script::MAX_SCRIPT_CHARS));
         }
         if !(crate::panel_script::MIN_TIMEOUT_MS..=crate::panel_script::MAX_TIMEOUT_MS).contains(&input.timeout_ms) {
             return Err(format!("제한 시간은 {}~{}ms 사이로 입력하세요.", crate::panel_script::MIN_TIMEOUT_MS, crate::panel_script::MAX_TIMEOUT_MS));
@@ -1242,6 +1242,19 @@ pub fn open_external_url_command(url: String) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_thousand_line_script_is_accepted_and_only_a_huge_one_is_rejected() {
+        let mut i = input("script");
+        // 한 줄 약 60자 × 1,500줄 ≈ 9만 자 — AI가 만든 그래프 스크립트 규모
+        i.script = "console.log('## 한 줄짜리 출력 — 길이를 채우는 문장입니다 1234567890');
+".repeat(1500);
+        assert!(i.script.chars().count() > 20_000 && i.script.chars().count() < crate::panel_script::MAX_SCRIPT_CHARS);
+        assert!(slot_from_input(&i, "s1".into(), 1).is_ok(), "천 줄 넘는 스크립트도 저장돼야 한다");
+        i.script = "x".repeat(crate::panel_script::MAX_SCRIPT_CHARS + 1);
+        let err = slot_from_input(&i, "s2".into(), 1).unwrap_err();
+        assert!(err.contains("너무 깁니다"), "{err}");
+    }
 
     fn input(mode: &str) -> PanelSlotInput {
         PanelSlotInput { id: None, name: "보고서".into(), mode: mode.into(), scope: "all".into(), preset: "artifact-reports".into(), instruction: "".into(), auto_update: false, ai_model: "sonnet".into(), ai_include: "none".into(), enabled: true, interpreter: "node".into(), script: "".into(), timeout_ms: 10_000, output_format: "markdown".into(), allow_js: false }
