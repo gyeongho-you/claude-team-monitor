@@ -966,7 +966,9 @@ const JS_FRAME_BRIDGE = String.raw`(function(){
   window.ctm={
     open:function(u){post({t:'open-url',url:String(u)});},
     reveal:function(p){post({t:'reveal',path:String(p)});},
-    editor:function(p,l){post({t:'editor',path:String(p),line:l==null?null:Number(l)});}
+    editor:function(p,l){post({t:'editor',path:String(p),line:l==null?null:Number(l)});},
+    getState:function(){return window.__ctmInit===undefined?null:window.__ctmInit;},
+    setState:function(s){post({t:'state',s:s});}
   };
   document.addEventListener('click',function(e){var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(!a)return;e.preventDefault();var u=a.getAttribute('href')||'';if(/^https?:\/\//i.test(u))post({t:'open-url',url:u});},true);
   var last=0;
@@ -976,6 +978,8 @@ const JS_FRAME_BRIDGE = String.raw`(function(){
   post({t:'hb'});setInterval(function(){post({t:'hb'});},1000);
 })();`;
 let jsFrameSeq = 0;
+// 그래픽(JS 프레임)이 맡겨 둔 화면 상태(보던 탭·선택 등) — 패널이 내용을 다시 그려도 돌려준다. 키: 슬롯|팀장. 앱을 닫으면 사라진다.
+const jsFrameStates = new Map();
 let panelMetaText = '';
 let panelToastTimer = null;
 function showPanelToast(msg) {
@@ -1014,12 +1018,15 @@ setInterval(() => {
     }
   }
 }, 1000);
-async function renderJsFrame(container, fragment, leadId) {
+async function renderJsFrame(container, fragment, leadId, stateKey) {
   const seq = ++jsFrameSeq;
   container.dataset.jsSeq = String(seq);
   if (jsFramesBroken) { showJsHungFallback(container, fragment); return; }
   const base = "html,body{margin:0}body{padding:6px 2px;background:transparent;color:var(--text);font:12px/1.5 system-ui,-apple-system,'Segoe UI','Malgun Gothic',sans-serif;word-break:break-word}a{color:var(--accent)}img,svg{max-width:100%}table{border-collapse:collapse}button{font:inherit}";
-  const doc = `<!doctype html><html><head><meta charset="utf-8"><style>${panelThemeCss()}${base}</style></head><body><script>${JS_FRAME_BRIDGE}<\/script>${fragment}</body></html>`;
+  const fullKey = `${stateKey || ''}|${leadId || ''}`;
+  const saved = jsFrameStates.get(fullKey);
+  const initJson = saved === undefined ? 'null' : JSON.stringify(saved).replace(/</g, '\\u003c');
+  const doc = `<!doctype html><html><head><meta charset="utf-8"><style>${panelThemeCss()}${base}</style></head><body><script>window.__ctmInit=${initJson};<\/script><script>${JS_FRAME_BRIDGE}<\/script>${fragment}</body></html>`;
   let url;
   try { url = await window.api.registerPanelFrame(doc); }
   catch (err) { container.textContent = `그래픽을 띄우지 못했습니다: ${errMsg(err)}`; return; }
@@ -1028,6 +1035,7 @@ async function renderJsFrame(container, fragment, leadId) {
   frame.className = 'sp-html-frame';
   frame.dataset.js = '1';
   frame.dataset.leadId = leadId || '';
+  frame.dataset.stateKey = fullKey;
   frame.dataset.created = String(Date.now());
   jsFrameFragments.set(frame, fragment);
   frame.setAttribute('sandbox', 'allow-scripts'); // allow-same-origin을 주지 않는다 — 앱 화면과 다른 출처라 앱 화면·앱 기능에 닿지 못한다
@@ -1053,6 +1061,17 @@ window.addEventListener('message', async e => {
   if (!frame) return;
   frame.dataset.last = String(Date.now());
   if (d.t === 'hb') return;
+  if (d.t === 'state') { // 요청 횟수 제한 대상이 아님(사용자가 누를 때만 보낸다) — 크기만 제한한다
+    try {
+      const s = JSON.parse(JSON.stringify(d.s));
+      if (s && typeof s === 'object' && JSON.stringify(s).length <= 20000 && frame.dataset.stateKey) {
+        jsFrameStates.delete(frame.dataset.stateKey);
+        jsFrameStates.set(frame.dataset.stateKey, s);
+        while (jsFrameStates.size > 60) jsFrameStates.delete(jsFrameStates.keys().next().value);
+      }
+    } catch { /* 저장하지 못해도 그래픽은 그대로 동작한다 */ }
+    return;
+  }
   const leadId = frame.dataset.leadId || null;
   const report = msg => { if (typeof psTestPreview !== 'undefined' && psTestPreview.contains(frame)) psStatus.textContent = msg; else showPanelToast(msg); };
   if (d.t !== 'size' && !allowFrameAction(frame)) {
@@ -1086,7 +1105,7 @@ function renderPanelBody(slot, c) {
     renderPanelFilterBar(c.items);
     md = panelItemsMarkdown(filterPanelItems(c.items, panelFilter, selectedLeadId), c.items.length) || c.markdown;
   }
-  if (c.format === 'html' && md.trim()) { if (slot.allowJs) renderJsFrame(spBodyEl, md, selectedLeadId); else renderHtmlFrame(spBodyEl, md); }
+  if (c.format === 'html' && md.trim()) { if (slot.allowJs) renderJsFrame(spBodyEl, md, selectedLeadId, 'slot:' + slot.id); else renderHtmlFrame(spBodyEl, md); }
   else spBodyEl.innerHTML = md.trim() ? renderMarkdown(md) : '<p class="empty-hint">아직 내용이 없습니다.</p>';
   const when = c.updatedAt ? ` · ${formatAgo(c.updatedAt)} 갱신` : '';
   spMetaEl.textContent = `${PANEL_MODE_LABELS[slot.mode] || slot.mode} · ${c.note}${when}`;
@@ -1657,14 +1676,14 @@ console.log('<script>(' + frameMain.toString() + ')()</script>');
 const PS_EXAMPLE_GRAPH_TEAM_JS = String.raw`// git 그래프(상호작용): 커밋을 클릭하면 변경 파일이 나오고, 파일마다 탐색기·VS Code로 열 수 있습니다. 워크트리 표는 열 머리를 눌러 정렬하고, 행(브랜치)을 누르면 위 그래프가 그 브랜치 기준으로 바뀝니다.
 // 위쪽 탭에서 팀장 저장소(설계)와 허용한 팀원 저장소(구현)를 골라 볼 수 있습니다(팀원 저장소가 먼저, 기본 선택).
 // 이 슬롯은 "출력: HTML"과 "JavaScript 허용"을 켜야 합니다(읽기만 하는 git 명령, 상태를 바꾸지 않습니다).
-// 그래프는 데이터만 미리 넣고 화면 안에서 그립니다(출력이 200000자를 넘어 뒤쪽 스크립트·표가 잘리지 않도록).
+// 그래프는 데이터만 미리 넣고 화면 안에서 그립니다(출력이 한도(HTML 1000000자)를 넘어 뒤쪽 스크립트·표가 잘리지 않도록).
 const { execFile } = require('child_process');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const LIMIT = 40; // '전체 브랜치' 그래프에 그릴 커밋 수(많을수록 느려집니다)
-const BLIMIT = 20; // 브랜치(워크트리)별 그래프에 그릴 커밋 수 — 저장소가 여러 개여도 데이터 한도 안에 들도록 전체보다 적게
-const OUT_BUDGET = 180000; // 패널 출력 한도 200000자 − (화면 코드·스타일 약 1.3만자) − 여유 // 데이터(JSON) 최대 글자 수 — 넘으면 커밋별 변경 파일 수를 줄인다
+const BLIMIT = 40; // 브랜치(워크트리)별 그래프에 그릴 커밋 수 — 저장소가 여러 개여도 데이터 한도 안에 들도록 전체보다 적게
+const OUT_BUDGET = 900000; // HTML 출력 한도 1000000자 − (화면 코드·스타일 약 1.5만자) − 여유 // 데이터(JSON) 최대 글자 수 — 넘으면 커밋별 변경 파일 수를 줄인다
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const dir = process.env.CTM_LEAD_DIR;
 if (!dir) { console.log('<p style="color:var(--text-soft)">작업 탭에서 팀장을 선택하세요.</p>'); process.exit(0); }
@@ -1772,7 +1791,7 @@ async function collect(gr) {
   const heads = [...byHead.keys()];
   const [tsOut, ...logs] = await Promise.all([
     heads.length ? git('log', '--no-walk', '--format=%H' + S + '%ct', ...heads) : Promise.resolve(''),
-    ...defs.map(d => git('log', ...(d.rev ? [d.rev] : ['--all']), '--date-order', '-n', String(d.rev ? BLIMIT : LIMIT), '--format=%H' + S + '%P' + S + '%D' + S + '%s' + S + '%cr' + S + '%an')),
+    ...defs.map(d => git('log', ...(d.rev ? [d.rev] : ['--all']), '--date-order', '-n', String(d.rev ? BLIMIT : LIMIT), '--format=%H' + S + '%P' + S + '%D' + S + '%s' + S + '%ct' + S + '%an')),
   ]);
   const tsMap = new Map();
   if (tsOut != null) { for (const l of tsOut.split('\n')) { const p = l.split(S); if (p[0]) tsMap.set(p[0], Number(p[1]) || 0); } }
@@ -1788,7 +1807,7 @@ async function collect(gr) {
       return { sha, parents: parents ? parents.split(' ') : [], refs: refs ? refs.split(', ').filter(Boolean) : [], subject, when, author };
     });
     if (!commits.length) return null;
-    commits.forEach(c => { info[c.sha] = { short: c.sha.slice(0, 7), subject: c.subject, author: c.author, when: c.when }; });
+    commits.forEach(c => { info[c.sha] = { short: c.sha.slice(0, 7), subject: c.subject, author: c.author, ts: Number(c.when) || 0 }; });
     const idx = new Map(commits.map((c, i) => [c.sha, i]));
     const lanes = [];
     const edges = [];
@@ -1857,6 +1876,7 @@ function frameMain() {
   var wth = document.getElementById('wth');
   var R = null, curR = -1;
   var sel = null;
+  var selSha = null; var restoring = false;
   var curG = 'all';
   var ROW = 24, COL = 14, PAD = 10;
   var COLORS = ['#58a6ff', '#3fb950', '#d29922', '#f778ba', '#a371f7', '#39c5cf', '#ff7b72', '#8b949e'];
@@ -1865,6 +1885,11 @@ function frameMain() {
   function badge(txt, style) { return '<span style="flex:none;border-radius:4px;padding:0 5px;font-size:10px;line-height:16px;' + style + '">' + esc(txt) + '</span>'; }
   function join(a, b) { return a.replace(/[\\/]+$/, '') + '/' + b; }
   function iconBtn(label, title, fn) { var b = el('button', 'ib', label); b.title = title; b.addEventListener('click', function (e) { e.stopPropagation(); fn(); }); return b; }
+  // 패널이 3초마다 내용을 다시 가져와 화면을 새로 그려도(또는 다른 탭에 갔다 와도) 보던 저장소·브랜치·커밋·정렬을 되살린다 — 앱이 상태를 기억해 두었다가 돌려준다(ctm.getState/setState).
+  function saveState() {
+    if (restoring || !R || !window.ctm || !window.ctm.setState) return;
+    try { window.ctm.setState({ repo: R.name + '|' + R.dir, gt: (R.graphs && R.graphs[curG]) ? R.graphs[curG].title : '', sha: selSha, sk: sortKey, sd: dir }); } catch (e) { /* 저장 못 해도 화면은 그대로 */ }
+  }
   function resetPane() { pane.textContent = ''; pane.appendChild(el('span', 'empty', '아래 그래프에서 커밋을 클릭하세요.')); }
   function show(sha) {
     var c = R.commits[sha];
@@ -1874,7 +1899,7 @@ function frameMain() {
     h.appendChild(el('code', '', c.short));
     h.appendChild(el('b', '', ' ' + c.subject));
     pane.appendChild(h);
-    pane.appendChild(el('div', 'pm', R.name + ' · ' + c.author + ' · ' + c.when + ' · 변경 파일 ' + c.fn + '개' + (c.fn > c.files.length ? ' (' + c.files.length + '개만 표시)' : '')));
+    pane.appendChild(el('div', 'pm', R.name + ' · ' + c.author + ' · ' + ago(c.ts) + ' · 변경 파일 ' + c.fn + '개' + (c.fn > c.files.length ? ' (' + c.files.length + '개만 표시)' : '')));
     c.files.forEach(function (f) {
       var full = join(R.top, f.p);
       var r = el('div', 'fr');
@@ -1910,7 +1935,7 @@ function frameMain() {
         (c[2] ? '<circle cx="' + X(c[1]) + '" cy="' + Y(i) + '" r="1.8" fill="var(--bg)"/>' : '');
     }).join('');
     var rows = cs.map(function (c) {
-      var sha = c[0], info = R.commits[sha] || { subject: '', when: '' };
+      var sha = c[0], info = R.commits[sha] || { subject: '', ts: 0 };
       var refs = c[3].map(function (r) {
         if (r.indexOf('tag: ') === 0) return badge('🏷 ' + r.slice(5), 'background:#d2992233;color:#d29922');
         if (r.indexOf('HEAD -> ') === 0) return badge('● ' + r.slice(8), 'background:var(--accent);color:var(--bg);font-weight:600');
@@ -1925,7 +1950,7 @@ function frameMain() {
       }).join('');
       return '<div class="row" data-sha="' + sha + '" style="display:flex;align-items:center;gap:5px;height:' + ROW + 'px;font-size:11px;white-space:nowrap;cursor:pointer">' + here + shown +
         '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">' + esc(info.subject) + '</span>' +
-        '<span style="flex:none;color:var(--text-soft);font-size:10px">' + esc(info.when) + '</span></div>';
+        '<span style="flex:none;color:var(--text-soft);font-size:10px">' + esc(ago(info.ts)) + '</span></div>';
     }).join('');
     gbox.style.paddingLeft = GW + 'px';
     gbox.innerHTML = '<svg width="' + GW + '" height="' + H + '" viewBox="0 0 ' + GW + ' ' + H + '" style="position:absolute;left:0;top:0;pointer-events:none">' + lines + dots + '</svg>' + rows;
@@ -1933,6 +1958,7 @@ function frameMain() {
       r.addEventListener('click', function () {
         if (sel) sel.classList.remove('sel');
         sel = r; r.classList.add('sel');
+        selSha = r.getAttribute('data-sha'); saveState();
         show(r.getAttribute('data-sha'));
       });
     });
@@ -1943,12 +1969,13 @@ function frameMain() {
   function setGraph(g) {
     if (!R || !R.graphs || !R.graphs[g]) return;
     curG = g;
-    sel = null;
+    sel = null; selSha = null;
     renderGraph(R.graphs[g]);
     gtitle.textContent = '그래프: ' + R.graphs[g].title + ' · 커밋 ' + R.graphs[g].n + '개';
     gall.style.display = g === 'all' ? 'none' : '';
     resetPane();
     draw();
+    saveState();
   }
   gall.addEventListener('click', function () { setGraph('all'); });
   // 저장소 탭(팀원 구현 저장소 / 팀장 설계 저장소)
@@ -1993,7 +2020,7 @@ function frameMain() {
     var t = el('table', 'wtt'); var hr = el('tr');
     cols.forEach(function (c) {
       var th = el('th', 'sortable', c[1] + (sortKey === c[0] ? (dir > 0 ? ' ▲' : ' ▼') : ''));
-      th.addEventListener('click', function () { if (sortKey === c[0]) dir = -dir; else { sortKey = c[0]; dir = c[0] === 'ts' ? -1 : 1; } draw(); });
+      th.addEventListener('click', function () { if (sortKey === c[0]) dir = -dir; else { sortKey = c[0]; dir = c[0] === 'ts' ? -1 : 1; } draw(); saveState(); });
       hr.appendChild(th);
     });
     hr.appendChild(el('th', '', ''));
@@ -2010,11 +2037,23 @@ function frameMain() {
     });
     wrap.appendChild(t);
   }
-  setRepo(data.def);
+  var st = null;
+  try { st = window.ctm && window.ctm.getState ? window.ctm.getState() : null; } catch (e) { st = null; }
+  var startRepo = data.def;
+  if (st && typeof st === 'object') {
+    if (['name', 'branch', 'head', 'ts'].indexOf(st.sk) !== -1) { sortKey = st.sk; dir = st.sd === 1 ? 1 : -1; }
+    for (var ri = 0; ri < data.repos.length; ri++) { var rr = data.repos[ri]; if (!rr.err && rr.name + '|' + rr.dir === st.repo) { startRepo = ri; break; } }
+  }
+  restoring = true;
+  setRepo(startRepo);
+  if (st && st.gt && R && R.graphs) { for (var gk in R.graphs) { if (R.graphs[gk].title === st.gt) { setGraph(gk); break; } } }
+  if (st && st.sha) { var srow = gbox.querySelector('.row[data-sha="' + String(st.sha).replace(/[^0-9a-f]/gi, '') + '"]'); if (srow) srow.click(); }
+  restoring = false;
+  saveState();
 }
 
-// 5) 데이터 묶기 — 출력 한도(200000자)를 넘지 않도록 변경 파일 수를 단계적으로 줄인다
-// 데이터(JSON)가 너무 크면 패널 출력 한도(200000자)를 넘어 뒤쪽이 잘리므로 단계적으로 줄인다. 줄이는 순서(앞쪽이 풍부한 쪽):
+// 5) 데이터 묶기 — 출력 한도(1000000자)를 넘지 않도록 단계적으로 줄인다
+// 데이터(JSON)가 너무 크면 HTML 출력 한도(1000000자)를 넘어 뒤쪽이 잘리므로 단계적으로 줄인다. 줄이는 순서(앞쪽이 풍부한 쪽):
 //  ① 모든 저장소의 브랜치(워크트리)별 그래프 + 커밋당 변경 파일(최근 커밋은 많이, 오래된 커밋은 적게)
 //  ② 첫 저장소만 브랜치별 그래프, 나머지는 전체 그래프만 + 변경 파일 60→30→15→8개
 //  ③ 모든 저장소가 전체 그래프만 + 변경 파일 60→…→0개
@@ -2050,7 +2089,7 @@ function makeJson(fileCap, mode, restCap) {
   });
   return JSON.stringify({ def: defIdx, repos: out }).replace(/</g, '\\u003c');
 }
-const LADDER = [['full', 40, 10], ['full', 40, 6], ['full', 30, 6], ['full', 30, 4], ['full', 30, 2], ['full', 20, 2], ['full', 20, 0], ['first', 60, 8], ['first', 30, 4], ['first', 15, 2], ['first', 8, 0], ['first', 4, 0], ['first', 0, 0], ['all', 60, 30], ['all', 30, 15], ['all', 15, 8], ['all', 8, 4], ['all', 4, 0], ['all', 0, 0]];
+const LADDER = [['full', 60, 60], ['full', 60, 20], ['full', 40, 10], ['full', 40, 6], ['full', 30, 6], ['full', 30, 4], ['full', 30, 2], ['full', 20, 2], ['full', 20, 0], ['first', 60, 8], ['first', 30, 4], ['first', 15, 2], ['first', 8, 0], ['first', 4, 0], ['first', 0, 0], ['all', 60, 30], ['all', 30, 15], ['all', 15, 8], ['all', 8, 4], ['all', 4, 0], ['all', 0, 0]];
 let json = null; let usedMode = 'full', usedCap = 60;
 let usedRest = 0;
 for (const [mode, cap, rest] of LADDER) { json = makeJson(cap, mode, rest); usedMode = mode; usedCap = cap; usedRest = rest; if (json.length <= OUT_BUDGET) break; }
@@ -2103,7 +2142,7 @@ document.getElementById('ps-example-graph-js-btn').addEventListener('click', () 
 function showPsTestResult(res) {
   const stderrBlock = res.stderr ? `[표준 오류 출력 — 시험 실행에서만 보입니다]\n${res.stderr}` : '';
   psTestPreview.hidden = false;
-  if (res.format === 'html') { if (psJsOn()) renderJsFrame(psTestPreview, res.output, selectedLeadId); else renderHtmlFrame(psTestPreview, res.output); }
+  if (res.format === 'html') { if (psJsOn()) renderJsFrame(psTestPreview, res.output, selectedLeadId, 'test'); else renderHtmlFrame(psTestPreview, res.output); }
   else psTestPreview.innerHTML = renderMarkdown(res.output);
   psTestOut.hidden = !stderrBlock; psTestOut.textContent = stderrBlock;
   psLastProblem = `${res.format === 'html' ? '(HTML 출력 앞부분)\n' : ''}${res.output.slice(0, 3000)}${stderrBlock ? `\n\n${stderrBlock}` : ''}`;

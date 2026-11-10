@@ -33,8 +33,16 @@ pub(crate) const MIN_TIMEOUT_MS: u64 = 500;
 pub(crate) const MAX_TIMEOUT_MS: u64 = 600_000;
 // AI가 만든 그래프·표 스크립트는 금방 2만 자를 넘는다(실제로 git 그래프에 "팀원 프로젝트도 보기"를 더하면 넘음) — 100,000자까지 허용한다.
 pub(crate) const MAX_SCRIPT_CHARS: usize = 100_000;
-/// 출력 길이 제한(글자 수). 그래픽은 data: 이미지(base64)나 SVG가 길어지므로 넉넉하게 둔다.
+/// 출력 길이 제한(글자 수) — 마크다운. 길면 패널을 다시 그릴 때 느려지므로 그대로 둔다.
 pub(crate) const MAX_OUTPUT_CHARS: usize = 200_000;
+/// HTML(그래픽)은 데이터(JSON)·SVG·data: 이미지가 앞에 오고 화면 코드가 뒤에 붙는 구조라 중간에 잘리면 화면이 아예 안 그려진다. 마크다운보다 넉넉히 둔다.
+/// 앱이 격리 프레임에 올릴 수 있는 문서 크기(4MB)와 출력 중단선(6MB) 안쪽이다.
+pub(crate) const MAX_HTML_OUTPUT_CHARS: usize = 1_000_000;
+
+/// 출력 형식에 따른 길이 제한.
+pub(crate) fn max_output_chars(format: &str) -> usize {
+    if format == "html" { MAX_HTML_OUTPUT_CHARS } else { MAX_OUTPUT_CHARS }
+}
 
 // ---------------------------------------------------------------------------------------------
 // 스크립트에 앱이 주는 정보 — 이 표가 유일한 기준이다: 실제로 넘기는 환경 변수(script_env), 설정 화면의 안내, AI에게 주는 요청문이 모두 여기서 나온다.
@@ -103,7 +111,7 @@ pub(crate) fn reference_markdown() -> String {
         - 실행 환경: Node.js(`node`), Python(`python`; macOS·Linux는 `python3`), 셸(Windows는 PowerShell, 그 외는 `sh`). 외부 패키지 설치는 전제하지 않는다 — 내장 모듈만 쓴다.\n\
         - 표준 입력은 비어 있다(대화형 입력 불가). 이 앱을 띄운 사용자 계정의 환경변수·PATH를 그대로 물려받으므로 `git`, `gh` 같은 명령도 그 사용자 PC에 설치돼 있으면 쓸 수 있다.\n\
         - 종료 코드가 0이 아니면 실패로 보고, 표준 오류의 앞부분이 패널에 오류로 표시된다. 정상일 때 표준 오류는 패널에 표시되지 않지만 '최근 에러'에 기록된다.\n\
-        - 슬롯마다 정한 제한 시간(ms)을 넘으면 중단된다(기본 10000ms). 출력은 {max}자까지만 보이고, 표준 출력이 약 6MB를 넘게 쏟아지면 스크립트를 중단한다.\n\n\
+        - 슬롯마다 정한 제한 시간(ms)을 넘으면 중단된다(기본 10000ms). 출력은 마크다운 {max}자·HTML {max_html}자까지만 보이고, 표준 출력이 약 6MB를 넘게 쏟아지면 스크립트를 중단한다.\n\n\
         ## 출력 형식 — 슬롯마다 둘 중 하나(`CTM_OUTPUT_FORMAT`)\n\n\
         **표준 출력**에 낸 내용이 패널에 그대로 표시된다. 그 슬롯의 형식에 맞춰 낸다.\n\n\
         ### `markdown` (글 중심)\n\n\
@@ -132,7 +140,8 @@ pub(crate) fn reference_markdown() -> String {
         - 팀장을 고르지 않아 `CTM_LEAD_DIR`이 비어 있는 경우를 먼저 처리해 안내 문구를 출력하고 끝낸다.\n\
         - 외부 명령은 실패할 수 있으니 예외로 죽지 말고 읽을 수 있는 문구를 출력한다.\n\
         - `html`에서 사용자 데이터(폴더 이름, 커밋 메시지 등)를 넣을 때는 `&`, `<`, `>`를 이스케이프한다(그대로 넣으면 모양이 깨진다).\n",
-        max = MAX_OUTPUT_CHARS
+        max = MAX_OUTPUT_CHARS,
+        max_html = MAX_HTML_OUTPUT_CHARS
     )
 }
 
@@ -379,9 +388,10 @@ pub(crate) fn run_script_outcome(scripts_dir: &Path, file_stem: &str, interprete
         let md = format!("**스크립트가 실패했습니다**(종료 코드 {code})\n\n```\n{shown}\n```");
         return fail(md, "exit", format!("종료 코드 {code}\n{shown}"));
     }
-    let (text, cut) = truncate_chars(out.trim(), MAX_OUTPUT_CHARS);
+    let limit = max_output_chars(format);
+    let (text, cut) = truncate_chars(out.trim(), limit);
     let (err_text, _) = truncate_chars(err.trim(), 1500);
-    let hint = format!("출력이 길어서 {MAX_OUTPUT_CHARS}자까지만 보여 줍니다");
+    let hint = format!("출력이 길어서 {limit}자까지만 보여 줍니다");
     let output = if text.is_empty() {
         // 빈 출력 안내는 형식과 상관없이 읽을 수 있게 마크다운으로 둔다
         return Outcome {
@@ -616,6 +626,20 @@ mod tests {
     }
 
     #[test]
+    fn html_output_may_be_larger_than_markdown_output() {
+        let dir = scratch();
+        let big = "console.log('x'.repeat(600000))";
+        let md = run_script_outcome(&dir, "lim1", "node", big, 20000, None, "markdown", false);
+        assert!(md.output.contains("까지만 보여 줍니다") && md.output.chars().count() < MAX_OUTPUT_CHARS + 200, "마크다운은 20만 자에서 자른다");
+        let html = run_script_outcome(&dir, "lim2", "node", big, 20000, None, "html", false);
+        assert!(!html.output.contains("까지만 보여 줍니다") && html.output.chars().count() >= 600_000, "HTML은 60만 자도 자르지 않는다({}자)", html.output.chars().count());
+        let huge = "console.log('x'.repeat(1500000))";
+        let cut = run_script_outcome(&dir, "lim3", "node", huge, 20000, None, "html", false);
+        assert!(cut.output.contains("까지만 보여 줍니다") && cut.output.chars().count() < MAX_HTML_OUTPUT_CHARS + 200);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn output_flood_is_stopped_quickly_instead_of_eating_memory() {
         let dir = scratch();
         // 끝이 있는 폭탄(약 40MB 쓰고 종료)
@@ -766,7 +790,9 @@ mod tests {
         let script = "console.log('가'.repeat(210000))";
         let md = run_script_outcome(&dir, "t5", "node", script, 15000, None, "markdown", false);
         assert!(md.output.contains("까지만 보여 줍니다") && md.output.chars().count() < MAX_OUTPUT_CHARS + 200, "len {}", md.output.chars().count());
-        let html = run_script_outcome(&dir, "t5h", "node", script, 15000, None, "html", false);
+        // HTML은 한도가 더 크므로(100만 자) 그보다 길게 내야 잘리고, 그때의 안내도 html이어야 한다
+        let big = "console.log('가'.repeat(1100000))";
+        let html = run_script_outcome(&dir, "t5h", "node", big, 15000, None, "html", false);
         assert!(html.output.ends_with(")</p>"), "html에서는 안내도 html이어야 한다");
         let _ = std::fs::remove_dir_all(&dir);
     }

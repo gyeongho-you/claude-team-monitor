@@ -126,7 +126,7 @@ test('팀장을 고르지 않으면 안내만 출력한다', () => {
   assert.ok(out.includes('팀장을 선택하세요'));
 });
 
-test('저장소와 브랜치가 많아도 출력이 한도(200000자) 안에 들고, 모든 저장소의 브랜치 그래프가 연결돼 있다', () => {
+test('저장소와 브랜치가 많아도 출력이 한도(HTML 1000000자) 안에 들고, 모든 저장소의 브랜치 그래프가 연결돼 있다', () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ctm-gg-big-'));
   const REPOS = 6, BRANCHES = 8, PER = 30, FILES = 25;
   const dirs = [];
@@ -166,7 +166,7 @@ x
   const ctx = { tmp: path.join(base, 'tmp'), lead, leadsFile, scriptFile };
   const { r, data, out } = run(ctx);
   assert.strictEqual(r.status, 0, r.stderr);
-  assert.ok(out.length < 200000, `출력 ${out.length}자가 한도를 넘는다`);
+  assert.ok(out.length < 1000000, `출력 ${out.length}자가 한도를 넘는다`);
   assert.ok(out.includes('</script>') && out.trimEnd().endsWith('</script>'), '끝의 화면 코드가 잘리면 안 된다');
   assert.strictEqual(data.repos.filter(x => !x.err).length, REPOS);
   // 이 정도 규모는 한도를 넘으므로 단계적으로 줄어든다: 첫(기본 선택) 저장소는 브랜치 그래프를 끝까지 유지하고, 줄였다면 화면에 안내문이 있어야 한다.
