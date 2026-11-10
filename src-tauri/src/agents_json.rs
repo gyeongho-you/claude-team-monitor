@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Read;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use wait_timeout::ChildExt;
 
@@ -33,7 +34,105 @@ pub struct AgentEntry {
 // 흉내낸다.
 const AGENTS_JSON_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// 이 앱이 `claude agents --json`을 부른 횟수와 그 호출 직후 `~/.claude`에 OAuth 갱신 잠금의 임시 파일(`.oauth_refresh.lock.owner.tmp.*`)이 늘었는지 센다.
+/// 이 파일은 앱이 아니라 claude CLI가 토큰 갱신 때 남기는 것인데, 앱이 3초마다 claude를 새로 띄우므로 "내 호출 직후에 생기는가"를 직접 보려는 계측이다(원인 확정용 — 앱 동작은 바꾸지 않는다).
+/// 같은 순간 다른 claude 프로세스가 만든 파일도 섞일 수 있어서, 한 번의 증가는 증거가 아니고 "여러 번 반복되는 패턴"을 본다.
+struct CallStats {
+    calls: AtomicU64,
+    total_ms: AtomicU64,
+    max_ms: AtomicU64,
+    failures: AtomicU64,
+    slow: AtomicU64,
+    tmp_increases: AtomicU64,
+    last_increase_unix_ms: AtomicU64,
+    last_tmp_count: AtomicU64,
+    last_slow_log_unix_ms: AtomicU64,
+    first_logged: AtomicBool,
+}
+static STATS: CallStats = CallStats {
+    calls: AtomicU64::new(0),
+    total_ms: AtomicU64::new(0),
+    max_ms: AtomicU64::new(0),
+    failures: AtomicU64::new(0),
+    slow: AtomicU64::new(0),
+    tmp_increases: AtomicU64::new(0),
+    last_increase_unix_ms: AtomicU64::new(0),
+    last_tmp_count: AtomicU64::new(0),
+    last_slow_log_unix_ms: AtomicU64::new(0),
+    first_logged: AtomicBool::new(false),
+};
+const OAUTH_OWNER_TMP_PREFIX: &str = ".oauth_refresh.lock.owner.tmp.";
+const SLOW_CALL_MS: u64 = 3000;
+const SLOW_LOG_MIN_GAP_MS: u64 = 30_000;
+
+/// 폴더 안의 OAuth 갱신 잠금 임시 파일 개수(시험용으로 폴더를 받는다).
+pub(crate) fn count_oauth_owner_tmp_files_in(dir: &std::path::Path) -> u64 {
+    std::fs::read_dir(dir).map(|rd| rd.filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with(OAUTH_OWNER_TMP_PREFIX)).count() as u64).unwrap_or(0)
+}
+
+/// 느리거나 실패한 호출을 로그에 남길지 — 앞 기록과 최소 간격(30초)을 둬서 로그가 쌓이지 않게 한다.
+pub(crate) fn should_log_rate_limited(last_unix_ms: u64, now_unix_ms: u64, min_gap_ms: u64) -> bool {
+    last_unix_ms == 0 || now_unix_ms.saturating_sub(last_unix_ms) >= min_gap_ms
+}
+
+/// 진단 정보에 넣을 요약(앱을 켠 뒤 지금까지).
+pub(crate) fn call_stats_summary() -> String {
+    let calls = STATS.calls.load(Ordering::Relaxed);
+    let avg = if calls == 0 { 0 } else { STATS.total_ms.load(Ordering::Relaxed) / calls };
+    let last = STATS.last_increase_unix_ms.load(Ordering::Relaxed);
+    let last_txt = if last == 0 { "없음".to_string() } else { format!("{}", chrono::DateTime::from_timestamp_millis(last as i64).map(|d| d.with_timezone(&chrono::Local).format("%m-%d %H:%M:%S").to_string()).unwrap_or_default()) };
+    format!(
+        "- `claude agents --json` 호출(앱을 켠 뒤): {calls}회, 평균 {avg}ms, 최대 {}ms, 실패 {}회, {SLOW_CALL_MS}ms 넘게 걸린 호출 {}회\n- 호출 직후 OAuth 갱신 잠금 임시 파일이 늘어난 횟수: {}회(마지막: {last_txt}) / 지금 ~/.claude의 임시 파일: {}개",
+        STATS.max_ms.load(Ordering::Relaxed),
+        STATS.failures.load(Ordering::Relaxed),
+        STATS.slow.load(Ordering::Relaxed),
+        STATS.tmp_increases.load(Ordering::Relaxed),
+        STATS.last_tmp_count.load(Ordering::Relaxed),
+    )
+}
+
 fn run_claude_agents_json() -> Result<String, String> {
+    let home = crate::paths::claude_home();
+    let before = count_oauth_owner_tmp_files_in(&home);
+    let started = std::time::Instant::now();
+    let result = run_claude_agents_json_inner();
+    let ms = started.elapsed().as_millis() as u64;
+    let after = count_oauth_owner_tmp_files_in(&home);
+    record_call(ms, result.as_ref().err().map(String::as_str), before, after);
+    result
+}
+
+fn record_call(ms: u64, err: Option<&str>, before: u64, after: u64) {
+    let now = crate::timing::now_ms().max(0) as u64;
+    STATS.calls.fetch_add(1, Ordering::Relaxed);
+    STATS.total_ms.fetch_add(ms, Ordering::Relaxed);
+    STATS.max_ms.fetch_max(ms, Ordering::Relaxed);
+    STATS.last_tmp_count.store(after, Ordering::Relaxed);
+    if err.is_some() {
+        STATS.failures.fetch_add(1, Ordering::Relaxed);
+    }
+    if ms >= SLOW_CALL_MS {
+        STATS.slow.fetch_add(1, Ordering::Relaxed);
+    }
+    if !STATS.first_logged.swap(true, Ordering::Relaxed) {
+        crate::logging::log_critical(&format!("[agents 계측] 시작 — 이 앱이 부르는 claude agents --json의 소요 시간과, 호출 직후 ~/.claude의 OAuth 갱신 잠금 임시 파일(.oauth_refresh.lock.owner.tmp.*) 증가를 기록합니다(현재 {after}개)."));
+    }
+    if after > before {
+        STATS.tmp_increases.fetch_add(1, Ordering::Relaxed);
+        STATS.last_increase_unix_ms.store(now, Ordering::Relaxed);
+        crate::logging::log_critical(&format!(
+            "[agents 계측] 호출 직후 OAuth 임시 파일이 {before}→{after}개로 늘었습니다(소요 {ms}ms, 결과 {}, 누적 증가 {}회 / 호출 {}회). 같은 순간의 다른 claude 프로세스가 만든 것일 수도 있어 반복되는 패턴으로 판단하세요.",
+            match err { Some(e) => format!("오류: {e}"), None => "정상".to_string() },
+            STATS.tmp_increases.load(Ordering::Relaxed),
+            STATS.calls.load(Ordering::Relaxed),
+        ));
+    } else if (err.is_some() || ms >= SLOW_CALL_MS) && should_log_rate_limited(STATS.last_slow_log_unix_ms.load(Ordering::Relaxed), now, SLOW_LOG_MIN_GAP_MS) {
+        STATS.last_slow_log_unix_ms.store(now, Ordering::Relaxed);
+        crate::logging::log_critical(&format!("[agents 계측] 호출이 {} — {ms}ms (임시 파일 {after}개)", match err { Some(e) => format!("실패했습니다({e})"), None => "느렸습니다".to_string() }));
+    }
+}
+
+fn run_claude_agents_json_inner() -> Result<String, String> {
     let mut cmd = Command::new("claude");
     cmd.args(["agents", "--json"]);
     cmd.stdout(Stdio::piped());
@@ -185,3 +284,33 @@ mod tests {
         assert!(value.is_array(), "claude agents --json은 배열을 돌려줘야 한다");
     }
 }
+
+#[cfg(test)]
+mod instrument_tests {
+    use super::*;
+
+    #[test]
+    fn counts_only_oauth_owner_tmp_files() {
+        let d = std::env::temp_dir().join(format!("ctm_instr_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        for n in [".oauth_refresh.lock.owner.tmp.0075b450", ".oauth_refresh.lock.owner.tmp.ffff0000", ".oauth_refresh.lock.owner", ".oauth_refresh.lock", "other.tmp.0075b450", "settings.json"] {
+            std::fs::write(d.join(n), b"x").unwrap();
+        }
+        assert_eq!(count_oauth_owner_tmp_files_in(&d), 2, "임시 파일(.tmp.*)만 센다 — 진짜 소유자 기록·잠금은 세지 않는다");
+        assert_eq!(count_oauth_owner_tmp_files_in(&d.join("없는폴더")), 0);
+    }
+
+    #[test]
+    fn slow_or_failed_calls_are_logged_at_most_once_per_gap() {
+        assert!(should_log_rate_limited(0, 1_000, 30_000), "처음은 남긴다");
+        assert!(!should_log_rate_limited(1_000, 20_000, 30_000), "30초 안에는 또 남기지 않는다");
+        assert!(should_log_rate_limited(1_000, 31_000, 30_000));
+    }
+
+    #[test]
+    fn summary_text_reports_counts_without_panicking() {
+        let s = call_stats_summary();
+        assert!(s.contains("claude agents --json") && s.contains("임시 파일"), "{s}");
+    }
+}
+
