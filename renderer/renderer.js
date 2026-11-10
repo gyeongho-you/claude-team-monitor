@@ -1662,8 +1662,9 @@ const { execFile } = require('child_process');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
-const LIMIT = 40; // 그래프마다 그릴 커밋 수(많을수록 느려집니다)
-const OUT_BUDGET = 160000; // 데이터(JSON) 최대 글자 수 — 넘으면 커밋별 변경 파일 수를 줄인다
+const LIMIT = 40; // '전체 브랜치' 그래프에 그릴 커밋 수(많을수록 느려집니다)
+const BLIMIT = 20; // 브랜치(워크트리)별 그래프에 그릴 커밋 수 — 저장소가 여러 개여도 데이터 한도 안에 들도록 전체보다 적게
+const OUT_BUDGET = 180000; // 패널 출력 한도 200000자 − (화면 코드·스타일 약 1.3만자) − 여유 // 데이터(JSON) 최대 글자 수 — 넘으면 커밋별 변경 파일 수를 줄인다
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const dir = process.env.CTM_LEAD_DIR;
 if (!dir) { console.log('<p style="color:var(--text-soft)">작업 탭에서 팀장을 선택하세요.</p>'); process.exit(0); }
@@ -1771,7 +1772,7 @@ async function collect(gr) {
   const heads = [...byHead.keys()];
   const [tsOut, ...logs] = await Promise.all([
     heads.length ? git('log', '--no-walk', '--format=%H' + S + '%ct', ...heads) : Promise.resolve(''),
-    ...defs.map(d => git('log', ...(d.rev ? [d.rev] : ['--all']), '--date-order', '-n', String(LIMIT), '--format=%H' + S + '%P' + S + '%D' + S + '%s' + S + '%cr' + S + '%an')),
+    ...defs.map(d => git('log', ...(d.rev ? [d.rev] : ['--all']), '--date-order', '-n', String(d.rev ? BLIMIT : LIMIT), '--format=%H' + S + '%P' + S + '%D' + S + '%s' + S + '%cr' + S + '%an')),
   ]);
   const tsMap = new Map();
   if (tsOut != null) { for (const l of tsOut.split('\n')) { const p = l.split(S); if (p[0]) tsMap.set(p[0], Number(p[1]) || 0); } }
@@ -2013,32 +2014,50 @@ function frameMain() {
 }
 
 // 5) 데이터 묶기 — 출력 한도(200000자)를 넘지 않도록 변경 파일 수를 단계적으로 줄인다
-function makeJson(fileCap, onlyAll) {
+// 데이터(JSON)가 너무 크면 패널 출력 한도(200000자)를 넘어 뒤쪽이 잘리므로 단계적으로 줄인다. 줄이는 순서(앞쪽이 풍부한 쪽):
+//  ① 모든 저장소의 브랜치(워크트리)별 그래프 + 커밋당 변경 파일(최근 커밋은 많이, 오래된 커밋은 적게)
+//  ② 첫 저장소만 브랜치별 그래프, 나머지는 전체 그래프만 + 변경 파일 60→30→15→8개
+//  ③ 모든 저장소가 전체 그래프만 + 변경 파일 60→…→0개
+// 커밋 id는 앞 12자만 쓴다(데이터 크기의 큰 몫이라 — 한 저장소 안에서 12자가 겹칠 일은 사실상 없다).
+const sid = x => String(x).slice(0, 12);
+function makeJson(fileCap, mode, restCap) {
+  if (restCap === undefined) restCap = fileCap;
+  const firstOk = repos.find(r => !r.err);
   const out = repos.map(r => {
     if (r.err) return { name: r.name, role: r.role, dir: r.dir, err: r.err, last: 0 };
     const gs = {};
-    for (const [k, g] of Object.entries(r.graphs)) { if (!onlyAll || k === 'all') gs[k] = g; }
-    const used = new Set();
-    Object.values(gs).forEach(g => g.c.forEach(c => used.add(c[0])));
+    for (const [k, g] of Object.entries(r.graphs)) {
+      if (k === 'all' || mode === 'full' || (mode === 'first' && r === firstOk)) gs[k] = Object.assign({}, g, { c: g.c.map(c => [sid(c[0])].concat(c.slice(1))) });
+    }
+    // 실제로 담긴 그래프에 나오는 커밋만 남긴다
+    const keep = new Set();
+    for (const k of Object.keys(gs)) r.graphs[k].c.forEach(c => keep.add(c[0]));
+    // 변경 파일은 가장 많이 보게 되는 커밋(전체 그래프 위쪽 15개, 각 브랜치 그래프 맨 위 3개)에 넉넉히, 나머지는 restCap까지만 담는다
+    const top = new Set();
+    if (r.graphs.all) r.graphs.all.c.slice(0, 15).forEach(c => top.add(c[0]));
+    for (const k of Object.keys(gs)) if (k !== 'all') r.graphs[k].c.slice(0, 3).forEach(c => top.add(c[0]));
     const commitData = {};
-    used.forEach(sha => {
+    keep.forEach(sha => {
       const f = r.files[sha] || [];
-      commitData[sha] = Object.assign({}, r.info[sha], { files: f.slice(0, fileCap), fn: f.length });
+      commitData[sid(sha)] = Object.assign({}, r.info[sha], { files: f.slice(0, top.has(sha) ? fileCap : restCap), fn: f.length });
     });
     return {
       name: r.name, role: r.role, dir: r.dir, top: r.top, last: r.last, err: null,
       commits: commitData,
       graphs: gs,
-      wts: r.wts.map(w => ({ name: w.name, path: w.path, branch: w.branch, head: w.head.slice(0, 7), sha: w.head, ts: w.ts, mine: w.mine, member: w.member, g: w.g && gs[w.g] ? w.g : null })),
+      wts: r.wts.map(w => ({ name: w.name, path: w.path, branch: w.branch, head: w.head.slice(0, 7), sha: sid(w.head), ts: w.ts, mine: w.mine, member: w.member, g: w.g && gs[w.g] ? w.g : null })),
     };
   });
   return JSON.stringify({ def: defIdx, repos: out }).replace(/</g, '\\u003c');
 }
-let json = null;
-for (const onlyAll of [false, true]) {
-  for (const cap of [60, 30, 15, 5, 0]) { json = makeJson(cap, onlyAll); if (json.length <= OUT_BUDGET) break; }
-  if (json.length <= OUT_BUDGET) break;
-}
+const LADDER = [['full', 40, 10], ['full', 40, 6], ['full', 30, 6], ['full', 30, 4], ['full', 30, 2], ['full', 20, 2], ['full', 20, 0], ['first', 60, 8], ['first', 30, 4], ['first', 15, 2], ['first', 8, 0], ['first', 4, 0], ['first', 0, 0], ['all', 60, 30], ['all', 30, 15], ['all', 15, 8], ['all', 8, 4], ['all', 4, 0], ['all', 0, 0]];
+let json = null; let usedMode = 'full', usedCap = 60;
+let usedRest = 0;
+for (const [mode, cap, rest] of LADDER) { json = makeJson(cap, mode, rest); usedMode = mode; usedCap = cap; usedRest = rest; if (json.length <= OUT_BUDGET) break; }
+let degradeNote = '';
+if (usedMode === 'first') degradeNote = '저장소가 많아 데이터 한도 때문에 브랜치별 그래프는 첫 저장소(' + esc(repos[defIdx].name) + ')만 담았습니다. 다른 저장소는 전체 그래프만 보입니다.';
+else if (usedMode === 'all') degradeNote = '저장소가 많아 데이터 한도 때문에 브랜치별 그래프를 담지 못했습니다(전체 그래프만). 팀원 폴더를 줄이면 다시 보입니다.';
+if (usedRest < 10) degradeNote += (degradeNote ? ' ' : '') + '데이터 한도 때문에 커밋당 변경 파일은 최근 커밋 ' + usedCap + '개, 오래된 커밋 ' + usedRest + '개까지만 담았습니다.';
 
 const css = '.row:hover{background:var(--surface-2)}.row.sel{background:var(--surface-2);box-shadow:inset 2px 0 0 var(--accent)}'
   + '#pane{border:1px solid var(--border);border-radius:6px;padding:6px 8px;margin:6px 0;height:150px;overflow:auto;font-size:11px;background:var(--surface-2)}'
@@ -2059,6 +2078,7 @@ const nMem = repos.filter(r => r.role.indexOf('팀원') !== -1).length;
 const first = repos[defIdx];
 console.log('<style>' + css + '</style>');
 console.log('<div style="font-size:11px;color:var(--text-soft);margin-bottom:4px">' + esc(process.env.CTM_LEAD_LABEL || '팀장') + ' · 저장소 ' + repos.length + '개 (팀원 ' + nMem + ') · 커밋을 클릭하면 변경 파일이 나옵니다</div>');
+if (degradeNote) console.log('<div style="font-size:10px;color:#d29922;margin-bottom:4px">⚠ ' + degradeNote + '</div>');
 console.log('<div id="repos"></div>');
 console.log('<div id="pane"><span class="empty">아래 그래프에서 커밋을 클릭하세요.</span></div>');
 console.log('<div id="gbar"><b id="gtitle">그래프: ' + esc(first.name) + ' · ' + esc(first.graphs.all.title) + ' · 커밋 ' + first.graphs.all.n + '개</b><button id="gall" class="ib" style="display:none">전체 보기</button></div>');

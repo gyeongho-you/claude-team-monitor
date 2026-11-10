@@ -74,6 +74,8 @@ test('팀장·팀원 저장소를 모두 모으고, 오류 폴더는 오류로 �
   assert.ok(member.wts.length === 2, '워크트리 목록: ' + member.wts.length);
   assert.ok(Object.keys(member.graphs).length >= 2, '전체 그래프 + 워크트리 그래프');
   assert.strictEqual(member.graphs.all.n, 3, '전체 브랜치 커밋 수(구현 2 + 워크트리 1)');
+  assert.ok(member.wts.every(w => w.g), '모든 워크트리(브랜치) 행이 클릭해서 볼 그래프와 연결돼 있어야 한다');
+  assert.ok(member.wts.every(w => member.graphs[w.g] && member.graphs[w.g].n >= 1));
   const leadRepo = good.find(x => x.role.includes('설계'));
   assert.strictEqual(leadRepo.graphs.all.n, 3);
 });
@@ -122,4 +124,57 @@ test('팀장을 고르지 않으면 안내만 출력한다', () => {
   const { r, out } = run(ctx, { CTM_LEAD_DIR: '' });
   assert.strictEqual(r.status, 0);
   assert.ok(out.includes('팀장을 선택하세요'));
+});
+
+test('저장소와 브랜치가 많아도 출력이 한도(200000자) 안에 들고, 모든 저장소의 브랜치 그래프가 연결돼 있다', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'ctm-gg-big-'));
+  const REPOS = 6, BRANCHES = 8, PER = 30, FILES = 25;
+  const dirs = [];
+  for (let r = 0; r < REPOS; r++) {
+    const d = path.join(base, 'repo' + r); mk(d); dirs.push(d);
+    git(d, 'init', '-q', '-b', 'main');
+    // fast-import로 커밋을 빠르게 만든다: 브랜치마다 PER개, 커밋마다 파일 FILES개를 바꾼다
+    let stream = '';
+    let mark = 1;
+    for (let b = 0; b < BRANCHES; b++) {
+      const ref = b === 0 ? 'refs/heads/main' : 'refs/heads/feat' + b;
+      for (let c = 0; c < PER; c++) {
+        stream += `commit ${ref}
+mark :${mark}
+committer t <t@t> ${1700000000 + b * 1000 + c} +0000
+data <<EOM
+긴 커밋 제목 ${b}-${c} — 데이터 크기를 키우기 위한 문장입니다 abcdefghijklmnopqrstuvwxyz
+EOM
+`;
+        if (c > 0) stream += `from :${mark - 1}
+`;
+        for (let f = 0; f < FILES; f++) stream += `M 100644 inline src/module${b}/dir${f % 5}/파일_${f}_${c}.js
+data 2
+x
+`;
+        mark++;
+      }
+    }
+    execFileSync('git', ['fast-import', '--quiet'], { cwd: d, input: stream, stdio: ['pipe', 'ignore', 'pipe'] });
+    git(d, 'checkout', '-q', '-f', 'main');
+    for (let b = 1; b < BRANCHES; b++) git(d, 'worktree', 'add', '-q', path.join(base, `wt${r}_${b}`), 'feat' + b);
+  }
+  const lead = dirs[0];
+  const leadsFile = path.join(base, 'leads.json');
+  fs.writeFileSync(leadsFile, JSON.stringify([{ id: 'L1', sessionId: 's1', targetDir: lead, approvedMembers: dirs.slice(1) }]));
+  const scriptFile = path.join(base, 'graph.js'); fs.writeFileSync(scriptFile, SCRIPT);
+  const ctx = { tmp: path.join(base, 'tmp'), lead, leadsFile, scriptFile };
+  const { r, data, out } = run(ctx);
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.ok(out.length < 200000, `출력 ${out.length}자가 한도를 넘는다`);
+  assert.ok(out.includes('</script>') && out.trimEnd().endsWith('</script>'), '끝의 화면 코드가 잘리면 안 된다');
+  assert.strictEqual(data.repos.filter(x => !x.err).length, REPOS);
+  // 이 정도 규모는 한도를 넘으므로 단계적으로 줄어든다: 첫(기본 선택) 저장소는 브랜치 그래프를 끝까지 유지하고, 줄였다면 화면에 안내문이 있어야 한다.
+  const degraded = /브랜치별 그래프는 첫 저장소/.test(out);
+  const noBranches = /브랜치별 그래프를 담지 못했습니다/.test(out);
+  data.repos.forEach((repo, i) => {
+    assert.ok(repo.graphs.all && repo.graphs.all.n > 0);
+    if (!noBranches && (i === 0 || !degraded)) assert.ok(repo.wts.every(w => w.g && repo.graphs[w.g]), repo.name + ': 브랜치 행이 그래프와 연결돼야 한다');
+  });
+  assert.ok(/⚠/.test(out) || data.repos.every(x => x.wts.every(w => w.g)), '줄였다면 안내문이 있어야 한다');
 });
