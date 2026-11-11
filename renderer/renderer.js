@@ -1717,33 +1717,44 @@ console.log('<script type="application/json" id="data">' + json + '</script>');
 console.log('<script>(' + frameMain.toString() + ')()</script>');
 `;
 // 두 번째 예제: 팀장(설계) 저장소와 허용한 팀원(구현) 저장소를 탭으로 골라 보는 git 그래프(팀원 저장소가 먼저·기본 선택).
-const PS_EXAMPLE_GRAPH_TEAM_JS = String.raw`// git 그래프(상호작용): 커밋을 클릭하면 변경 파일이 나오고, 파일마다 탐색기·VS Code로 열 수 있습니다. 워크트리 표는 열 머리를 눌러 정렬하고, 행(브랜치)을 누르면 위 그래프가 그 브랜치 기준으로 바뀝니다.
-// 위쪽 탭에서 팀장 저장소(설계)와 허용한 팀원 저장소(구현)를 골라 볼 수 있습니다(팀원 저장소가 먼저, 기본 선택).
+const PS_EXAMPLE_GRAPH_TEAM_JS = String.raw`// git 그래프(팀장+팀원 · 질의 방식): 처음에는 가벼운 정보(저장소별 전체 브랜치 목록과 "전체 브랜치" 그래프)만 그리고, 브랜치를 누르면 그 브랜치의 그래프를 화면이 이 스크립트를 다시 불러(ctm.call) 받아 옵니다.
+// 위쪽 탭에서 팀장 저장소(설계)와 허용한 팀원 저장소(구현)를 고르고, 아래 "브랜치" 목록(검색 가능)이나 "워크트리" 표의 행을 누르면 그래프가 그 브랜치 기준으로 바뀝니다. "더 보기"로 더 옛날 커밋까지, "↻"로 최신 상태로 다시 불러옵니다.
 // 이 슬롯은 "출력: HTML"과 "JavaScript 허용"을 켜야 합니다(읽기만 하는 git 명령, 상태를 바꾸지 않습니다).
-// 그래프는 데이터만 미리 넣고 화면 안에서 그립니다(출력이 한도(HTML 1000000자)를 넘어 뒤쪽 스크립트·표가 잘리지 않도록).
+// 동작 방식: 환경 변수 CTM_REQUEST가 비어 있으면 페이지 전체를 출력하고, 채워져 있으면(화면이 ctm.call로 부른 것) 요청에 맞는 데이터만 JSON으로 출력합니다.
+// 캐시: 커밋 하나의 내용(변경 파일)은 해시가 같으면 영원히 같으므로 임시 폴더에 기억하고, 브랜치 목록·브랜치 끝 커밋처럼 바뀌는 것은 매번 새로 읽습니다.
 const { execFile } = require('child_process');
-const os = require('os');
+const crypto = require('crypto');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
-const LIMIT = 100; // '전체 브랜치' 그래프에 그릴 커밋 수(많을수록 느려집니다)
-const BLIMIT = 100; // 브랜치(워크트리)별 그래프에 그릴 커밋 수(올리면 더 옛날 기록까지 보이지만 데이터가 커집니다 — 저장소 6개·200개까지 한도 안에서 확인)
-const OUT_BUDGET = 900000; // HTML 출력 한도 1000000자 − (화면 코드·스타일 약 1.5만자) − 여유 // 데이터(JSON) 최대 글자 수 — 넘으면 커밋별 변경 파일 수를 줄인다
+const LIMIT = 100; // 처음 그리는 "전체 브랜치" 그래프의 커밋 수
+const PAGE = 100; // "더 보기" 한 번에 늘어나는 커밋 수
+const MAX_LIMIT = 2000; // 요청 한 번에 가져올 최대 커밋 수
+const FILE_CAP = 60; // 커밋당 변경 파일 최대 표시 수
+const OUT_BUDGET = 900000; // 데이터(JSON) 최대 글자 수 — 넘으면 변경 파일 수를 줄인다(HTML 출력 한도 1000000자 안쪽)
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const REQ = process.env.CTM_REQUEST || '';
 const dir = process.env.CTM_LEAD_DIR;
-if (!dir) { console.log('<p style="color:var(--text-soft)">작업 탭에서 팀장을 선택하세요.</p>'); process.exit(0); }
+if (!dir) {
+  console.log(REQ ? JSON.stringify({ ok: false, error: '작업 탭에서 팀장을 선택하세요.' }) : '<p style="color:var(--text-soft)">작업 탭에서 팀장을 선택하세요.</p>');
+  process.exit(0);
+}
 const norm = p => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-// git은 프로세스를 새로 띄우는 비용이 커서(Windows에서 한 번에 수십~수백 ms) 순서대로 부르면 느리다 — 동시에 최대 8개까지 병렬로 부른다.
+const sid = x => String(x).slice(0, 12); // 커밋 id는 앞 12자만 쓴다(데이터 크기를 줄이려고 — 한 저장소 안에서 겹칠 일은 사실상 없다)
+
+// git은 프로세스를 새로 띄우는 비용이 커서 순서대로 부르면 느리다 — 동시에 최대 8개까지 병렬로 부른다.
 let running = 0; const waitq = [];
 const take = () => new Promise(r => { if (running < 8) { running++; r(); } else waitq.push(r); });
 const give = () => { const n = waitq.shift(); if (n) n(); else running--; };
 const mkGit = cwd => async (...a) => {
   await take();
-  try { return await new Promise(res => execFile('git', ['-c', 'core.quotePath=false', '--no-optional-locks', ...a], { cwd, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024, windowsHide: true }, (e, out) => res(e ? null : out))); }
+  try { return await new Promise(res => execFile('git', ['-c', 'core.quotePath=false', '--no-optional-locks', ...a], { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true }, (e, out) => res(e ? null : out))); }
   finally { give(); }
 };
-// 커밋의 변경 파일 목록은 커밋이 만들어진 뒤로 절대 바뀌지 않는다 — 임시 폴더에 기억해 두면 다시 그릴 때는 새로 생긴 커밋만 git에 묻는다.
+
+// 커밋 하나의 변경 파일 목록은 만들어진 뒤로 절대 바뀌지 않는다 — 임시 폴더에 기억해 두면 다음부터는 새 커밋만 git에 묻는다.
 const FCACHE_PATH = path.join(os.tmpdir(), 'ctm-git-graph-files.json');
-const FCACHE_MAX = 6000;
+const FCACHE_MAX = 8000;
 let fcache = {}; let fcacheDirty = false;
 try { const j = JSON.parse(fs.readFileSync(FCACHE_PATH, 'utf8')); if (j && typeof j === 'object' && !Array.isArray(j)) fcache = j; } catch { /* 처음이거나 깨졌으면 새로 시작 */ }
 function saveFcache() {
@@ -1754,6 +1765,21 @@ function saveFcache() {
     const tmp = FCACHE_PATH + '.' + process.pid + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(fcache)); fs.renameSync(tmp, FCACHE_PATH);
   } catch { /* 캐시를 못 써도 결과에는 영향 없다 */ }
+}
+async function ensureFiles(git, shas) {
+  const need = shas.filter(s => !Object.prototype.hasOwnProperty.call(fcache, s));
+  const chunks = [];
+  for (let i = 0; i < need.length; i += 100) chunks.push(need.slice(i, i + 100));
+  const outs = await Promise.all(chunks.map(c => git('log', '--no-walk', '--name-status', '--format=@@%H', ...c)));
+  const got = {};
+  for (const out of outs) {
+    let fc = null;
+    for (const l of (out || '').split('\n')) {
+      if (l.startsWith('@@')) { const s = l.slice(2); fc = got[s] ? null : (got[s] = []); }
+      else if (fc && l.trim() && fc.length < 60) { const parts = l.split('\t'); fc.push({ s: parts[0][0], p: parts[parts.length - 1] }); }
+    }
+  }
+  for (const s of need) { if (got[s]) { fcache[s] = got[s]; fcacheDirty = true; } }
 }
 
 // 0) 이 팀장이 허용한 팀원 폴더(CTM_LEADS_FILE에서 읽기만 한다)
@@ -1769,9 +1795,9 @@ try {
 } catch { /* 목록을 못 읽으면 팀장 저장소만 보여 준다 */ }
 { const seen = new Set([norm(dir)]); members = members.filter(m => { const k = norm(m); if (seen.has(k)) return false; seen.add(k); return true; }); }
 const memberSet = new Set(members.map(norm));
+const candidates = members.map(m => ({ dir: m, role: '팀원' })).concat([{ dir: dir, role: '팀장' }]); // 화면이 요청할 수 있는 저장소는 이 목록뿐이다
 
-// 저장소 묶기: 같은 저장소(워크트리 포함)는 하나로 — 팀원 먼저, 팀장(설계) 마지막. 후보마다 git을 한 번만(병렬로) 부른다.
-const groups = []; const byKey = new Map();
+// 저장소 확인: 폴더가 있는지, git 저장소인지, 같은 저장소(워크트리 포함)의 공통 키
 async function probe(d) {
   if (!fs.existsSync(d)) return { dir: d, err: '폴더가 없습니다' };
   const out = await mkGit(d)('rev-parse', '--is-inside-work-tree', '--git-common-dir', '--show-toplevel');
@@ -1779,29 +1805,24 @@ async function probe(d) {
   if (l[0] !== 'true') return { dir: d, err: 'git 저장소가 아닙니다' };
   return { dir: d, key: l[1] ? norm(path.resolve(d, l[1])) : norm(d), top: l[2] || d };
 }
-async function buildGroups() {
-  const cands = members.map(m => [m, '팀원']).concat([[dir, '팀장']]);
-  const probes = await Promise.all(cands.map(c => probe(c[0])));
-  probes.forEach((p, i) => {
-    const role = cands[i][1];
-    if (p.err) { groups.push({ dir: p.dir, roles: [role], err: p.err }); return; }
-    if (byKey.has(p.key)) { const gr = byKey.get(p.key); if (gr.roles.indexOf(role) === -1) gr.roles.push(role); return; }
-    const gr = { dir: p.dir, roles: [role], err: null, top: p.top };
-    byKey.set(p.key, gr); groups.push(gr);
-  });
+
+// 모든 브랜치(로컬+원격)와 각 브랜치 끝 커밋 정보 — 가볍다(저장소당 수십 ms)
+async function listRefs(git) {
+  const out = await git('for-each-ref', '--format=%(refname)%1f%(objectname)%1f%(committerdate:unix)%1f%(authorname)%1f%(subject)', 'refs/heads', 'refs/remotes');
+  const list = [];
+  for (const l of (out || '').split('\n')) {
+    if (!l) continue;
+    const [full, sha, ts, author, subject] = l.split('\x1f');
+    if (/^refs\/remotes\/[^/]+\/HEAD$/.test(full)) continue;
+    list.push({ full, sha, ts: Number(ts) || 0, author: author || '', subject: subject || '', kind: full.indexOf('refs/heads/') === 0 ? 'l' : 'r', name: full.replace(/^refs\/(heads|remotes)\//, '') });
+  }
+  list.sort((a, b) => b.ts - a.ts);
+  return list;
 }
+const compactRef = r => ({ n: r.name, f: r.full, k: r.kind, t: r.ts, a: r.author, s: r.subject.slice(0, 120) });
 
-// 저장소 하나 모으기. 필요한 git 호출을 한꺼번에 병렬로 보낸다: 워크트리 목록 → (시각 1번 + 그래프별 커밋 목록) 병렬 → 변경 파일은 겹치는 커밋을 한 번만 묶어서.
-async function collect(gr) {
-  const rdir = gr.dir;
-  const name0 = rdir.split(/[\\/]/).filter(Boolean).pop() || rdir;
-  const role = gr.roles.join('·') + (gr.roles.length === 1 && gr.roles[0] === '팀장' ? '(설계)' : '');
-  if (gr.err) return { name: name0, role, dir: rdir, err: gr.err };
-  const git = mkGit(rdir);
-  const top = (gr.top || rdir).trim();
-  const isSha = h => /^[0-9a-f]{7,64}$/.test(h);
-
-  // 1) 워크트리 목록
+// 워크트리 목록(+마지막 커밋 시각)
+async function listWorktrees(git, top) {
   const wts = []; let cur = null;
   for (const l of ((await git('worktree', 'list', '--porcelain')) || '').split('\n')) {
     if (l.startsWith('worktree ')) { cur = { path: l.slice(9), head: '', branch: '' }; wts.push(cur); }
@@ -1809,119 +1830,135 @@ async function collect(gr) {
     else if (cur && l.startsWith('branch ')) cur.branch = l.slice(7).replace('refs/heads/', '');
     else if (cur && l === 'detached') cur.branch = '(분리된 HEAD)';
   }
-  wts.forEach((w, i) => {
-    w.name = i === 0 ? '메인' : w.path.split(/[\\/]/).filter(Boolean).pop();
-    w.mine = norm(w.path) === norm(dir);
-    w.member = memberSet.has(norm(w.path));
-    w.ts = 0;
-  });
-  const repoName = (wts[0] ? wts[0].path : top).split(/[\\/]/).filter(Boolean).pop() || name0;
-
-  // 2) 그래프 목록: 전체 + 워크트리마다(같은 커밋을 가리키면 하나로 묶음)
-  const defs = [{ key: 'all', title: '전체 브랜치', rev: null }];
-  const byHead = new Map();
-  wts.forEach((w, i) => {
-    w.g = null;
-    if (!isSha(w.head)) return;
-    if (byHead.has(w.head)) { w.g = byHead.get(w.head); return; }
-    const key = 'w' + i;
-    byHead.set(w.head, key);
-    defs.push({ key, title: (w.branch || '(분리된 HEAD)') + ' · 📁 ' + w.name, rev: w.head });
-    w.g = key;
-  });
-
-  // 3) 병렬: 워크트리 시각(한 번에) + 그래프마다 커밋 목록(변경 파일은 빼서 가볍게)
-  const S = '\x1f';
-  const heads = [...byHead.keys()];
-  const [tsOut, ...logs] = await Promise.all([
-    heads.length ? git('log', '--no-walk', '--format=%H' + S + '%ct', ...heads) : Promise.resolve(''),
-    ...defs.map(d => git('log', ...(d.rev ? [d.rev] : ['--all']), '--date-order', '-n', String(d.rev ? BLIMIT : LIMIT), '--format=%H' + S + '%P' + S + '%D' + S + '%s' + S + '%ct' + S + '%an')),
-  ]);
+  const isSha = h => /^[0-9a-f]{7,64}$/.test(h);
+  const heads = [...new Set(wts.map(w => w.head).filter(isSha))];
   const tsMap = new Map();
-  if (tsOut != null) { for (const l of tsOut.split('\n')) { const p = l.split(S); if (p[0]) tsMap.set(p[0], Number(p[1]) || 0); } }
-  else await Promise.all(heads.map(async h => tsMap.set(h, Number((((await git('log', '-1', '--format=%ct', h)) || '0')).trim()) || 0)));
-  wts.forEach(w => { w.ts = isSha(w.head) ? (tsMap.get(w.head) || 0) : 0; });
+  if (heads.length) {
+    const tsOut = await git('log', '--no-walk', '--format=%H\x1f%ct', ...heads);
+    for (const l of (tsOut || '').split('\n')) { const p = l.split('\x1f'); if (p[0]) tsMap.set(p[0], Number(p[1]) || 0); }
+  }
+  return wts.map((w, i) => ({
+    name: i === 0 ? '메인' : w.path.split(/[\\/]/).filter(Boolean).pop(),
+    path: w.path, branch: w.branch, bf: (w.branch && w.branch.indexOf('(') !== 0) ? 'refs/heads/' + w.branch : '',
+    head: w.head.slice(0, 7), hf: isSha(w.head) ? w.head : '', ts: tsMap.get(w.head) || 0,
+    mine: norm(w.path) === norm(dir), member: memberSet.has(norm(w.path)),
+  }));
+}
 
-  // 4) 그래프마다 줄(lane) 배치 — 디스크를 보지 않는 계산
-  const files = {};
+// 그래프 하나: rev(전체 이름의 브랜치 또는 커밋 해시, null이면 모든 브랜치)에서 limit개의 커밋과 줄(lane) 배치. 변경 파일은 캐시를 거쳐 가져온다.
+async function loadGraph(git, rev, limit, fileCap) {
+  const S = '\x1f';
+  const raw = await git('log', ...(rev ? [rev] : ['--all']), '--date-order', '-n', String(limit + 1), '--format=%H' + S + '%P' + S + '%D' + S + '%s' + S + '%ct' + S + '%an');
+  let commits = (raw || '').split('\n').filter(Boolean).map(l => {
+    const [sha, parents, refs, subject, ts, author] = l.split(S);
+    return { sha, parents: parents ? parents.split(' ') : [], refs: refs ? refs.split(', ').filter(Boolean) : [], subject, ts: Number(ts) || 0, author };
+  });
+  const more = commits.length > limit;
+  if (more) commits = commits.slice(0, limit);
+  await ensureFiles(git, commits.map(c => c.sha));
+  const idx = new Map(commits.map((c, i) => [c.sha, i]));
+  const lanes = []; const edges = [];
+  commits.forEach((c, i) => {
+    let col = lanes.indexOf(c.sha);
+    if (col === -1) { col = lanes.indexOf(null); if (col === -1) { col = lanes.length; lanes.push(null); } }
+    c.row = i; c.col = col;
+    lanes.forEach((s, k) => { if (s === c.sha && k !== col) lanes[k] = null; });
+    lanes[col] = null;
+    c.parents.forEach((p, n) => {
+      let lane = lanes.indexOf(p);
+      if (lane === -1) {
+        lane = n === 0 ? col : lanes.indexOf(null);
+        if (lane === -1) { lane = lanes.length; lanes.push(null); }
+        lanes[lane] = p;
+      }
+      edges.push({ from: c, to: p, lane });
+    });
+  });
   const info = {};
-  function buildGraph(raw) {
-    const commits = (raw || '').split('\n').filter(Boolean).map(l => {
-      const [sha, parents, refs, subject, when, author] = l.split(S);
-      return { sha, parents: parents ? parents.split(' ') : [], refs: refs ? refs.split(', ').filter(Boolean) : [], subject, when, author };
-    });
-    if (!commits.length) return null;
-    commits.forEach(c => { info[c.sha] = { short: c.sha.slice(0, 7), subject: c.subject, author: c.author, ts: Number(c.when) || 0 }; });
-    const idx = new Map(commits.map((c, i) => [c.sha, i]));
-    const lanes = [];
-    const edges = [];
-    commits.forEach((c, i) => {
-      let col = lanes.indexOf(c.sha);
-      if (col === -1) { col = lanes.indexOf(null); if (col === -1) { col = lanes.length; lanes.push(null); } }
-      c.row = i; c.col = col;
-      lanes.forEach((s, k) => { if (s === c.sha && k !== col) lanes[k] = null; });
-      lanes[col] = null;
-      c.parents.forEach((p, n) => {
-        let lane = lanes.indexOf(p);
-        if (lane === -1) {
-          lane = n === 0 ? col : lanes.indexOf(null);
-          if (lane === -1) { lane = lanes.length; lanes.push(null); }
-          lanes[lane] = p;
-        }
-        edges.push({ from: c, to: p, lane });
-      });
-    });
-    return {
-      n: commits.length,
-      c: commits.map(c => [c.sha, c.col, c.parents.length > 1 ? 1 : 0, c.refs]),
-      e: edges.map(e => [e.from.row, e.lane, idx.has(e.to) ? idx.get(e.to) : -1]),
-    };
+  commits.forEach(c => { const f = fcache[c.sha] || []; info[sid(c.sha)] = { short: c.sha.slice(0, 7), subject: c.subject, author: c.author, ts: c.ts, files: f.slice(0, fileCap), fn: f.length }; });
+  return {
+    n: commits.length, more,
+    c: commits.map(c => [sid(c.sha), c.col, c.parents.length > 1 ? 1 : 0, c.refs]),
+    e: edges.map(e => [e.from.row, e.lane, idx.has(e.to) ? idx.get(e.to) : -1]),
+    commits: info,
+  };
+}
+// 응답이 너무 크면 변경 파일 수를 줄여 한도 안에 맞춘다
+async function graphFit(git, rev, limit) {
+  let out = null;
+  for (const cap of [FILE_CAP, 30, 15, 8, 4, 0]) {
+    out = await loadGraph(git, rev, limit, cap);
+    if (JSON.stringify(out).length <= OUT_BUDGET) return Object.assign(out, { cap });
   }
-  const graphs = {};
-  defs.forEach((d, i) => { const g = buildGraph(logs[i]); if (g) graphs[d.key] = Object.assign({ title: d.title }, g); });
-  if (!graphs.all) return { name: repoName, role, dir: rdir, err: '커밋이 없습니다' };
-  wts.forEach(w => { if (w.g && !graphs[w.g]) w.g = null; });
+  return Object.assign(out, { cap: 0 });
+}
+const refsFingerprint = refs => crypto.createHash('sha1').update(refs.map(r => r.full + ' ' + r.sha).join('\n')).digest('hex').slice(0, 12);
 
-  // 5) 변경 파일: 그래프마다 같은 커밋이 겹치므로 한 번만, 여러 커밋을 한 번에 묻는다(--no-walk). 인자가 너무 길어지지 않게 나눠서 병렬로.
-  const need = Object.keys(info).filter(s => !Object.prototype.hasOwnProperty.call(fcache, s));
-  const chunks = [];
-  for (let i = 0; i < need.length; i += 100) chunks.push(need.slice(i, i + 100));
-  const outs = await Promise.all(chunks.map(c => git('log', '--no-walk', '--name-status', '--format=@@%H', ...c)));
-  for (const out of outs) {
-    let fc = null;
-    for (const l of (out || '').split('\n')) {
-      if (l.startsWith('@@')) { const s = l.slice(2); fc = files[s] ? null : (files[s] = []); }
-      else if (fc && l.trim() && fc.length < 60) { const parts = l.split('\t'); fc.push({ s: parts[0][0], p: parts[parts.length - 1] }); }
-    }
+// ---------------------------------------------------------------------------------------------------
+// 질의 방식: 화면이 ctm.call로 보낸 요청에 맞는 데이터만 JSON으로 낸다. 요청은 화면이 만든 믿을 수 없는 입력이라 허용 목록과 대조해서 쓴다.
+// ---------------------------------------------------------------------------------------------------
+async function answer(reqText) {
+  let req;
+  try { req = JSON.parse(reqText); } catch { return { ok: false, error: '요청을 읽을 수 없습니다' }; }
+  if (!req || typeof req !== 'object') return { ok: false, error: '요청 형식이 올바르지 않습니다' };
+  const hit = candidates.find(c => norm(c.dir) === norm(String(req.repo || ''))); // 허용된 저장소(팀장 폴더 + 허용한 팀원 폴더)만
+  if (!hit) return { ok: false, error: '허용되지 않은 저장소입니다' };
+  const p = await probe(hit.dir);
+  if (p.err) return { ok: false, error: p.err };
+  const git = mkGit(hit.dir);
+  const refs = await listRefs(git);
+  if (req.op === 'refs') {
+    const wts = await listWorktrees(git, p.top);
+    return { ok: true, op: 'refs', repo: hit.dir, at: Date.now(), fp: refsFingerprint(refs), branches: refs.map(compactRef), wts };
   }
-  for (const s of Object.keys(files)) { fcache[s] = files[s]; fcacheDirty = true; }
-  for (const s of Object.keys(info)) { if (!files[s] && Object.prototype.hasOwnProperty.call(fcache, s)) files[s] = fcache[s]; }
-  const last = wts.reduce((m, w) => Math.max(m, w.ts), 0);
-  return { name: repoName, role, dir: rdir, top, wts, graphs, files, info, last, err: null };
+  if (req.op === 'graph') {
+    const limit = Math.max(10, Math.min(MAX_LIMIT, parseInt(req.limit, 10) || LIMIT));
+    let rev = null; let tip = '';
+    if (req.rev) {
+      const r = String(req.rev);
+      const ref = refs.find(x => x.full === r); // 브랜치는 방금 읽은 목록의 전체 이름과 정확히 같을 때만
+      if (ref) { rev = ref.full; tip = ref.sha; }
+      else if (/^[0-9a-f]{7,40}$/.test(r) && (await git('cat-file', '-e', r + '^{commit}')) !== null) { rev = r; tip = r; }
+      else return { ok: false, error: '알 수 없는 브랜치입니다(삭제됐거나 이름이 바뀌었을 수 있습니다). 목록을 새로고침하세요.' };
+    } else tip = refsFingerprint(refs);
+    const g = await graphFit(git, rev, limit);
+    saveFcache();
+    return Object.assign({ ok: true, op: 'graph', repo: hit.dir, rev: req.rev ? String(req.rev) : '', limit, tip, at: Date.now(), nb: refs.length }, g);
+  }
+  return { ok: false, error: '알 수 없는 요청입니다' };
 }
 
-(async () => {
-await buildGroups();
-const repos = await Promise.all(groups.map(collect));
-saveFcache();
-const okRepos = repos.filter(r => !r.err);
-if (!okRepos.length) {
-  console.log(repos.map(r => '<p>' + esc(r.role) + ' · ' + esc(r.err) + ': <code>' + esc(r.dir) + '</code></p>').join(''));
-  process.exit(0);
+// ---------------------------------------------------------------------------------------------------
+// 페이지 방식: 저장소마다 전체 브랜치 목록·워크트리·"전체 브랜치" 그래프(최근 LIMIT개)만 담는다. 브랜치별 그래프는 누를 때 불러온다.
+// ---------------------------------------------------------------------------------------------------
+async function collectRepo(c, p) {
+  const name0 = c.dir.split(/[\\/]/).filter(Boolean).pop() || c.dir;
+  const role = c.roles.join('·') + (c.roles.length === 1 && c.roles[0] === '팀장' ? '(설계)' : '');
+  if (p.err) return { name: name0, role, dir: c.dir, err: p.err, last: 0 };
+  const git = mkGit(c.dir);
+  const [refs, wts, g] = await Promise.all([listRefs(git), listWorktrees(git, p.top), graphFit(git, null, LIMIT)]);
+  if (!g.n) return { name: name0, role, dir: c.dir, err: '커밋이 없습니다', last: 0 };
+  const repoName = (wts[0] ? wts[0].path : p.top).split(/[\\/]/).filter(Boolean).pop() || name0;
+  const last = Math.max(0, ...wts.map(w => w.ts), ...refs.slice(0, 1).map(r => r.ts));
+  return { name: repoName, role, dir: c.dir, top: p.top, last, err: null, branches: refs.map(compactRef), wts, fp: refsFingerprint(refs), all: { n: g.n, more: g.more, c: g.c, e: g.e, tip: refsFingerprint(refs) }, commits: g.commits };
 }
-const defIdx = repos.findIndex(r => !r.err); // 팀원 저장소가 먼저 오므로 정상인 첫 저장소를 기본으로
 
-// 4) 화면 안 상호작용 코드(함수를 글자로 바꿔 넣는다 — 프레임 안에서만 실행된다)
+// 화면 안 상호작용 코드(함수를 글자로 바꿔 넣는다 — 프레임 안에서만 실행된다)
 function frameMain() {
   var data = JSON.parse(document.getElementById('data').textContent);
   var pane = document.getElementById('pane');
   var gbox = document.getElementById('graph');
   var rbox = document.getElementById('repos');
-  var wth = document.getElementById('wth');
-  var R = null, curR = -1;
-  var sel = null;
-  var selSha = null; var restoring = false;
-  var curG = 'all';
+  var gtitle = document.getElementById('gtitle');
+  var gall = document.getElementById('gall');
+  var gmore = document.getElementById('gmore');
+  var gre = document.getElementById('gre');
+  var gmeta = document.getElementById('gmeta');
+  var btabs = document.getElementById('btabs');
+  var below = document.getElementById('below');
+  var R = null, curR = -1, curRev = '';
+  var sel = null, selSha = null, restoring = false, busy = false, pendingSha = null;
+  var tab = 'b', filterText = '', sortKey = 'ts', dir = -1;
   var ROW = 24, COL = 14, PAD = 10;
   var COLORS = ['#58a6ff', '#3fb950', '#d29922', '#f778ba', '#a371f7', '#39c5cf', '#ff7b72', '#8b949e'];
   function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
@@ -1929,10 +1966,16 @@ function frameMain() {
   function badge(txt, style) { return '<span style="flex:none;border-radius:4px;padding:0 5px;font-size:10px;line-height:16px;' + style + '">' + esc(txt) + '</span>'; }
   function join(a, b) { return a.replace(/[\\/]+$/, '') + '/' + b; }
   function iconBtn(label, title, fn) { var b = el('button', 'ib', label); b.title = title; b.addEventListener('click', function (e) { e.stopPropagation(); fn(); }); return b; }
-  // 패널이 3초마다 내용을 다시 가져와 화면을 새로 그려도(또는 다른 탭에 갔다 와도) 보던 저장소·브랜치·커밋·정렬을 되살린다 — 앱이 상태를 기억해 두었다가 돌려준다(ctm.getState/setState).
+  function ago(ts) { if (!ts) return '-'; var s = Math.max(0, Date.now() / 1000 - ts); return s < 3600 ? Math.floor(s / 60) + '분 전' : s < 86400 ? Math.floor(s / 3600) + '시간 전' : Math.floor(s / 86400) + '일 전'; }
+  function clock(ms) { var d = new Date(ms); function z(n) { return (n < 10 ? '0' : '') + n; } return z(d.getHours()) + ':' + z(d.getMinutes()) + ':' + z(d.getSeconds()); }
+  function setMsg(text, isErr) { gmeta.textContent = text || ''; gmeta.className = 'meta' + (isErr ? ' err' : ''); }
+  function call(req) {
+    return window.ctm.call(req).then(function (text) { var r = JSON.parse(text); if (!r.ok) throw new Error(r.error || '요청 실패'); return r; });
+  }
+  // 패널이 다시 그려져도(다른 탭에 갔다 와도) 보던 저장소·브랜치·커밋·정렬·검색어를 되살린다 — 앱이 상태를 기억해 두었다가 돌려준다(ctm.getState/setState).
   function saveState() {
     if (restoring || !R || !window.ctm || !window.ctm.setState) return;
-    try { window.ctm.setState({ repo: R.name + '|' + R.dir, gt: (R.graphs && R.graphs[curG]) ? R.graphs[curG].title : '', sha: selSha, sk: sortKey, sd: dir }); } catch (e) { /* 저장 못 해도 화면은 그대로 */ }
+    try { window.ctm.setState({ repo: R.name + '|' + R.dir, rev: curRev, sha: selSha, sk: sortKey, sd: dir, tab: tab, q: filterText }); } catch (e) { /* 저장 못 해도 화면은 그대로 */ }
   }
   function resetPane() { pane.textContent = ''; pane.appendChild(el('span', 'empty', '아래 그래프에서 커밋을 클릭하세요.')); }
   function show(sha) {
@@ -1954,7 +1997,7 @@ function frameMain() {
       pane.appendChild(r);
     });
   }
-  // 그래프 그리기(선택한 그래프 하나만)
+  // 그래프 그리기(보고 있는 그래프 하나만)
   function renderGraph(g) {
     var cs = g.c, es = g.e, maxLane = 0;
     cs.forEach(function (c) { if (c[1] > maxLane) maxLane = c[1]; });
@@ -1988,7 +2031,7 @@ function frameMain() {
         return badge(r, 'background:#3fb95033;color:#3fb950');
       });
       var shown = refs.slice(0, 3).join('') + (refs.length > 3 ? badge('+' + (refs.length - 3), 'color:var(--text-soft)') : '');
-      var here = R.wts.filter(function (w) { return w.sha === sha; }).map(function (w) {
+      var here = R.wts.filter(function (w) { return w.hf && w.hf.slice(0, 12) === sha; }).map(function (w) {
         var tag = w.mine ? ' ◀ 여기' : w.member ? ' ◀ 팀원' : '';
         return badge('📁 ' + w.name + tag, 'border:1px dashed var(--accent);color:var(--accent)' + (tag ? ';font-weight:600' : ''));
       }).join('');
@@ -2007,21 +2050,55 @@ function frameMain() {
       });
     });
   }
-  // 그래프 전환(워크트리 표의 행을 누르거나 '전체 보기')
-  var gtitle = document.getElementById('gtitle');
-  var gall = document.getElementById('gall');
-  function setGraph(g) {
-    if (!R || !R.graphs || !R.graphs[g]) return;
-    curG = g;
+  function branchName(rev) {
+    if (!rev) return '전체 브랜치';
+    for (var i = 0; i < R.branches.length; i++) if (R.branches[i].f === rev) return R.branches[i].n;
+    return rev.slice(0, 7);
+  }
+  function setButtons() {
+    var v = R && R.views ? R.views[curRev] : null;
+    gall.style.display = curRev ? '' : 'none';
+    gmore.style.display = v && v.more ? '' : 'none';
+    gmore.disabled = gre.disabled = gall.disabled = busy;
+  }
+  // 보고 있는 그래프를 그린다(이미 불러온 것은 그대로, 없으면 showView가 먼저 불러온다)
+  function renderView() {
+    var v = R.views[curRev];
+    if (!v) return;
     sel = null; selSha = null;
-    renderGraph(R.graphs[g]);
-    gtitle.textContent = '그래프: ' + R.graphs[g].title + ' · 커밋 ' + R.graphs[g].n + '개';
-    gall.style.display = g === 'all' ? 'none' : '';
+    renderGraph(v);
+    gtitle.textContent = '그래프: ' + branchName(curRev) + ' · 커밋 ' + v.n + (v.more ? '개 이상' : '개');
     resetPane();
-    draw();
+    setButtons();
+    renderBelow();
     saveState();
   }
-  gall.addEventListener('click', function () { setGraph('all'); });
+  // 브랜치(전체 이름) 또는 '' (전체)의 그래프를 보여 준다. 처음 보는 것은 앱을 거쳐 스크립트에 요청해서 가져온다.
+  function showView(rev) {
+    if (busy || !R || R.err) return;
+    if (R.views[rev]) { curRev = rev; setMsg('불러온 시각 ' + clock(R.views[rev].at) + ' (↻ 로 최신 상태 확인)'); renderView(); return; }
+    loadView(rev, data.limit, false);
+  }
+  function loadView(rev, limit, isReload) {
+    if (busy || !R || R.err) return;
+    var repo = R, prev = repo.views[rev] || null;
+    busy = true; setMsg('불러오는 중…'); setButtons();
+    call({ op: 'graph', repo: repo.dir, rev: rev, limit: limit }).then(function (r) {
+      Object.keys(r.commits).forEach(function (k) { repo.commits[k] = r.commits[k]; });
+      repo.views[rev] = { n: r.n, more: r.more, c: r.c, e: r.e, tip: r.tip, at: r.at, limit: r.limit };
+      busy = false;
+      if (R !== repo) return; // 그 사이 다른 저장소로 옮겼다 — 결과만 저장해 둔다
+      curRev = rev;
+      var note = '';
+      if (isReload && prev) note = prev.tip !== r.tip ? ' · 새 커밋이 있어 갱신했습니다' : ' · 바뀐 것이 없습니다';
+      setMsg('불러온 시각 ' + clock(r.at) + note);
+      renderView();
+      if (pendingSha) { var row = gbox.querySelector('.row[data-sha="' + pendingSha + '"]'); pendingSha = null; if (row) row.click(); }
+    }, function (e) { busy = false; setMsg('⚠ ' + e.message, true); setButtons(); });
+  }
+  gall.addEventListener('click', function () { showView(''); });
+  gmore.addEventListener('click', function () { var v = R.views[curRev]; if (v) loadView(curRev, Math.min(v.limit + data.page, data.maxLimit), true); });
+  gre.addEventListener('click', function () { var v = R.views[curRev]; loadView(curRev, v ? v.limit : data.limit, true); });
   // 저장소 탭(팀원 구현 저장소 / 팀장 설계 저장소)
   function drawTabs() {
     rbox.textContent = '';
@@ -2032,7 +2109,7 @@ function frameMain() {
       b.appendChild(el('span', 'rr ' + (isMember ? 'rm' : 'rl'), r.role));
       b.appendChild(el('span', '', ' ' + r.name));
       b.appendChild(el('span', 'ra', r.err ? ' · ' + r.err : ' · ' + ago(r.last)));
-      b.addEventListener('click', function () { setRepo(i); });
+      b.addEventListener('click', function () { if (!busy) setRepo(i); });
       rbox.appendChild(b);
     });
   }
@@ -2040,137 +2117,170 @@ function frameMain() {
     curR = i; R = data.repos[i];
     drawTabs();
     if (R.err) {
-      gbox.style.paddingLeft = '0';
-      gbox.textContent = '';
+      gbox.style.paddingLeft = '0'; gbox.textContent = '';
       gbox.appendChild(el('span', 'empty', R.err + ': ' + R.dir));
       gtitle.textContent = R.role + ' · ' + R.name;
-      gall.style.display = 'none';
-      wth.textContent = '워크트리';
-      wrap.textContent = '';
+      gall.style.display = gmore.style.display = 'none';
+      btabs.textContent = ''; below.textContent = ''; setMsg('');
       resetPane();
       return;
     }
-    wth.textContent = '워크트리 ' + R.wts.length + '개 · ' + R.name;
-    setGraph('all');
+    if (!R.views) { R.views = { '': { n: R.all.n, more: R.all.more, c: R.all.c, e: R.all.e, tip: R.all.tip, at: data.at, limit: data.limit } }; }
+    curRev = ''; setMsg('');
+    renderView();
   }
-  // 워크트리 표(열 머리를 누르면 정렬, 행을 누르면 그 브랜치 그래프)
+  // 아래 영역: 브랜치 목록(검색)과 워크트리 표
+  function renderBelow() {
+    btabs.textContent = '';
+    [['b', '브랜치 ' + R.branches.length + '개'], ['w', '워크트리 ' + R.wts.length + '개']].forEach(function (t) {
+      var b = el('button', 'rt' + (tab === t[0] ? ' on' : ''), t[1]);
+      b.addEventListener('click', function () { tab = t[0]; renderBelow(); saveState(); });
+      btabs.appendChild(b);
+    });
+    below.textContent = '';
+    if (tab === 'b') renderBranches(); else renderWts();
+  }
+  function renderBranches() {
+    var bar = el('div', 'bbar');
+    var inp = el('input'); inp.type = 'text'; inp.placeholder = '브랜치 검색(이름·작성자·제목)'; inp.value = filterText;
+    var rows = el('div');
+    inp.addEventListener('input', function () { filterText = inp.value; fillBranchRows(rows); saveState(); });
+    bar.appendChild(inp);
+    var rf = el('button', 'ib', '↻ 목록 새로고침'); rf.title = '브랜치 목록과 워크트리를 다시 읽습니다(새 브랜치가 생겼는지 확인)';
+    rf.addEventListener('click', function () {
+      if (busy) return; var repo = R; busy = true; setMsg('브랜치 목록을 다시 읽는 중…'); setButtons();
+      call({ op: 'refs', repo: repo.dir }).then(function (r) {
+        busy = false; var n0 = repo.branches.length;
+        repo.branches = r.branches; repo.wts = r.wts;
+        var d = r.branches.length - n0;
+        setMsg('목록을 ' + clock(r.at) + '에 다시 읽었습니다' + (d > 0 ? ' · 새 브랜치 ' + d + '개' : d < 0 ? ' · 브랜치 ' + (-d) + '개 사라짐' : ' · 브랜치 수는 같습니다'));
+        setButtons(); if (R === repo) renderBelow();
+      }, function (e) { busy = false; setMsg('⚠ ' + e.message, true); setButtons(); });
+    });
+    bar.appendChild(rf);
+    below.appendChild(bar); below.appendChild(rows);
+    fillBranchRows(rows);
+  }
+  function fillBranchRows(host) {
+    var q = filterText.toLowerCase();
+    var list = R.branches.filter(function (b) { return !q || (b.n + ' ' + b.a + ' ' + b.s).toLowerCase().indexOf(q) !== -1; });
+    var MAXROWS = 300;
+    host.textContent = '';
+    var t = el('table', 'wtt'); var hr = el('tr');
+    ['브랜치', '작성자', '마지막 커밋'].forEach(function (h) { hr.appendChild(el('th', '', h)); });
+    t.appendChild(hr);
+    list.slice(0, MAXROWS).forEach(function (b) {
+      var tr = el('tr', 'pick' + (b.f === curRev ? ' on' : ''));
+      tr.title = b.s + '\n눌러서 위 그래프를 이 브랜치 기준으로 보기';
+      var td = el('td'); td.appendChild(el('span', 'kd ' + (b.k === 'l' ? 'kl' : 'kr'), b.k === 'l' ? '로컬' : '원격')); td.appendChild(el('span', 'blink', ' ' + b.n)); tr.appendChild(td);
+      tr.appendChild(el('td', '', b.a));
+      tr.appendChild(el('td', '', ago(b.t)));
+      tr.addEventListener('click', function () { showView(b.f); });
+      t.appendChild(tr);
+    });
+    host.appendChild(t);
+    if (list.length > MAXROWS) host.appendChild(el('div', 'meta', '… ' + (list.length - MAXROWS) + '개 더 있습니다 — 검색으로 좁혀 보세요'));
+    if (!list.length) host.appendChild(el('div', 'meta', '검색 결과가 없습니다'));
+  }
   var cols = [['name', '이름'], ['branch', '브랜치'], ['head', '커밋'], ['ts', '마지막 커밋']];
-  var sortKey = 'ts', dir = -1;
-  var wrap = document.getElementById('wt');
-  function ago(ts) { if (!ts) return '-'; var s = Math.max(0, Date.now() / 1000 - ts); return s < 3600 ? Math.floor(s / 60) + '분 전' : s < 86400 ? Math.floor(s / 3600) + '시간 전' : Math.floor(s / 86400) + '일 전'; }
-  function draw() {
+  function renderWts() {
     var list = R.wts.slice().sort(function (a, b) { var x = a[sortKey], y = b[sortKey]; return (x < y ? -1 : x > y ? 1 : 0) * dir; });
-    wrap.textContent = '';
     var t = el('table', 'wtt'); var hr = el('tr');
     cols.forEach(function (c) {
       var th = el('th', 'sortable', c[1] + (sortKey === c[0] ? (dir > 0 ? ' ▲' : ' ▼') : ''));
-      th.addEventListener('click', function () { if (sortKey === c[0]) dir = -dir; else { sortKey = c[0]; dir = c[0] === 'ts' ? -1 : 1; } draw(); saveState(); });
+      th.addEventListener('click', function () { if (sortKey === c[0]) dir = -dir; else { sortKey = c[0]; dir = c[0] === 'ts' ? -1 : 1; } renderBelow(); saveState(); });
       hr.appendChild(th);
     });
     hr.appendChild(el('th', '', ''));
     t.appendChild(hr);
     list.forEach(function (w) {
-      var tr = el('tr', w.g ? ('pick' + (w.g === curG ? ' on' : '')) : '');
-      if (w.g) { tr.title = '눌러서 위 그래프를 이 브랜치 기준으로 보기'; tr.addEventListener('click', function () { setGraph(w.g); }); }
+      var rev = w.bf || w.hf;
+      var tr = el('tr', rev ? ('pick' + (rev === curRev ? ' on' : '')) : '');
+      if (rev) { tr.title = '눌러서 위 그래프를 이 워크트리의 브랜치 기준으로 보기'; tr.addEventListener('click', function () { showView(rev); }); }
       tr.appendChild(el('td', '', w.name + (w.mine ? ' ◀' : '') + (w.member ? ' 👥' : '')));
-      tr.appendChild(el('td', w.g ? 'blink' : '', w.branch || '-'));
+      tr.appendChild(el('td', rev ? 'blink' : '', w.branch || '-'));
       tr.appendChild(el('td', 'mono', w.head));
       tr.appendChild(el('td', '', ago(w.ts)));
       var td = el('td'); td.appendChild(iconBtn('📂', '탐색기에서 이 워크트리 폴더 보기', function () { ctm.reveal(w.path); })); tr.appendChild(td);
       t.appendChild(tr);
     });
-    wrap.appendChild(t);
+    below.appendChild(t);
   }
+  // 시작: 저장해 둔 상태가 있으면 그 저장소·브랜치·커밋으로 되돌린다
   var st = null;
   try { st = window.ctm && window.ctm.getState ? window.ctm.getState() : null; } catch (e) { st = null; }
   var startRepo = data.def;
   if (st && typeof st === 'object') {
     if (['name', 'branch', 'head', 'ts'].indexOf(st.sk) !== -1) { sortKey = st.sk; dir = st.sd === 1 ? 1 : -1; }
+    if (st.tab === 'b' || st.tab === 'w') tab = st.tab;
+    if (typeof st.q === 'string') filterText = st.q.slice(0, 200);
     for (var ri = 0; ri < data.repos.length; ri++) { var rr = data.repos[ri]; if (!rr.err && rr.name + '|' + rr.dir === st.repo) { startRepo = ri; break; } }
   }
   restoring = true;
   setRepo(startRepo);
-  if (st && st.gt && R && R.graphs) { for (var gk in R.graphs) { if (R.graphs[gk].title === st.gt) { setGraph(gk); break; } } }
-  if (st && st.sha) { var srow = gbox.querySelector('.row[data-sha="' + String(st.sha).replace(/[^0-9a-f]/gi, '') + '"]'); if (srow) srow.click(); }
   restoring = false;
+  var wantSha = st && st.sha ? String(st.sha).replace(/[^0-9a-f]/gi, '') : '';
+  if (st && typeof st.rev === 'string' && st.rev && R && !R.err) {
+    pendingSha = wantSha || null;
+    loadView(st.rev, data.limit, false); // 보던 브랜치는 다시 불러온다(그 사이 바뀌었을 수 있으므로 저장해 둔 그래프를 쓰지 않는다)
+  } else if (wantSha) {
+    var srow = gbox.querySelector('.row[data-sha="' + wantSha + '"]'); if (srow) srow.click();
+  }
   saveState();
 }
 
-// 5) 데이터 묶기 — 출력 한도(1000000자)를 넘지 않도록 단계적으로 줄인다
-// 데이터(JSON)가 너무 크면 HTML 출력 한도(1000000자)를 넘어 뒤쪽이 잘리므로 단계적으로 줄인다. 줄이는 순서(앞쪽이 풍부한 쪽):
-//  ① 모든 저장소의 브랜치(워크트리)별 그래프 + 커밋당 변경 파일(최근 커밋은 많이, 오래된 커밋은 적게)
-//  ② 첫 저장소만 브랜치별 그래프, 나머지는 전체 그래프만 + 변경 파일 60→30→15→8개
-//  ③ 모든 저장소가 전체 그래프만 + 변경 파일 60→…→0개
-// 커밋 id는 앞 12자만 쓴다(데이터 크기의 큰 몫이라 — 한 저장소 안에서 12자가 겹칠 일은 사실상 없다).
-const sid = x => String(x).slice(0, 12);
-function makeJson(fileCap, mode, restCap) {
-  if (restCap === undefined) restCap = fileCap;
-  const firstOk = repos.find(r => !r.err);
-  const out = repos.map(r => {
-    if (r.err) return { name: r.name, role: r.role, dir: r.dir, err: r.err, last: 0 };
-    const gs = {};
-    for (const [k, g] of Object.entries(r.graphs)) {
-      if (k === 'all' || mode === 'full' || (mode === 'first' && r === firstOk)) gs[k] = Object.assign({}, g, { c: g.c.map(c => [sid(c[0])].concat(c.slice(1))) });
-    }
-    // 실제로 담긴 그래프에 나오는 커밋만 남긴다
-    const keep = new Set();
-    for (const k of Object.keys(gs)) r.graphs[k].c.forEach(c => keep.add(c[0]));
-    // 변경 파일은 가장 많이 보게 되는 커밋(전체 그래프 위쪽 15개, 각 브랜치 그래프 맨 위 3개)에 넉넉히, 나머지는 restCap까지만 담는다
-    const top = new Set();
-    if (r.graphs.all) r.graphs.all.c.slice(0, 15).forEach(c => top.add(c[0]));
-    for (const k of Object.keys(gs)) if (k !== 'all') r.graphs[k].c.slice(0, 3).forEach(c => top.add(c[0]));
-    const commitData = {};
-    keep.forEach(sha => {
-      const f = r.files[sha] || [];
-      commitData[sid(sha)] = Object.assign({}, r.info[sha], { files: f.slice(0, top.has(sha) ? fileCap : restCap), fn: f.length });
-    });
-    return {
-      name: r.name, role: r.role, dir: r.dir, top: r.top, last: r.last, err: null,
-      commits: commitData,
-      graphs: gs,
-      wts: r.wts.map(w => ({ name: w.name, path: w.path, branch: w.branch, head: w.head.slice(0, 7), sha: sid(w.head), ts: w.ts, mine: w.mine, member: w.member, g: w.g && gs[w.g] ? w.g : null })),
-    };
+// ---------------------------------------------------------------------------------------------------
+(async () => {
+  if (REQ) { console.log(JSON.stringify(await answer(REQ))); return; }
+  const probes = await Promise.all(candidates.map(c => probe(c.dir)));
+  const groups = []; const byKey = new Map();
+  probes.forEach((p, i) => {
+    const role = candidates[i].role;
+    if (p.err) { groups.push({ dir: p.dir, roles: [role], p }); return; }
+    if (byKey.has(p.key)) { const g = byKey.get(p.key); if (g.roles.indexOf(role) === -1) g.roles.push(role); return; }
+    const g = { dir: p.dir, roles: [role], p }; byKey.set(p.key, g); groups.push(g);
   });
-  return JSON.stringify({ def: defIdx, repos: out }).replace(/</g, '\\u003c');
-}
-const LADDER = [['full', 60, 60], ['full', 60, 20], ['full', 40, 10], ['full', 40, 6], ['full', 30, 6], ['full', 30, 4], ['full', 30, 2], ['full', 20, 2], ['full', 20, 0], ['first', 60, 8], ['first', 30, 4], ['first', 15, 2], ['first', 8, 0], ['first', 4, 0], ['first', 0, 0], ['all', 60, 30], ['all', 30, 15], ['all', 15, 8], ['all', 8, 4], ['all', 4, 0], ['all', 0, 0]];
-let json = null; let usedMode = 'full', usedCap = 60;
-let usedRest = 0;
-for (const [mode, cap, rest] of LADDER) { json = makeJson(cap, mode, rest); usedMode = mode; usedCap = cap; usedRest = rest; if (json.length <= OUT_BUDGET) break; }
-let degradeNote = '';
-if (usedMode === 'first') degradeNote = '저장소가 많아 데이터 한도 때문에 브랜치별 그래프는 첫 저장소(' + esc(repos[defIdx].name) + ')만 담았습니다. 다른 저장소는 전체 그래프만 보입니다.';
-else if (usedMode === 'all') degradeNote = '저장소가 많아 데이터 한도 때문에 브랜치별 그래프를 담지 못했습니다(전체 그래프만). 팀원 폴더를 줄이면 다시 보입니다.';
-if (usedRest < 10) degradeNote += (degradeNote ? ' ' : '') + '데이터 한도 때문에 커밋당 변경 파일은 최근 커밋 ' + usedCap + '개, 오래된 커밋 ' + usedRest + '개까지만 담았습니다.';
-
-const css = '.row:hover{background:var(--surface-2)}.row.sel{background:var(--surface-2);box-shadow:inset 2px 0 0 var(--accent)}'
-  + '#pane{border:1px solid var(--border);border-radius:6px;padding:6px 8px;margin:6px 0;height:150px;overflow:auto;font-size:11px;background:var(--surface-2)}'
-  + '#pane .ph code{color:var(--accent)}#pane .pm{color:var(--text-soft);margin:2px 0 6px}.empty{color:var(--text-soft)}'
-  + '.fr{display:flex;gap:6px;align-items:center;padding:1px 0}.fp{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
-  + '.st{flex:none;width:14px;text-align:center;font-weight:700}.stM{color:#d29922}.stA{color:#3fb950}.stD{color:#f85149}.stR{color:#a371f7}'
-  + '.ib{flex:none;background:transparent;border:1px solid var(--border-2);color:var(--text);border-radius:4px;cursor:pointer;font-size:11px;padding:0 4px;line-height:16px}.ib:hover{border-color:var(--accent)}'
-  + '.wtt{width:100%;font-size:11px}.wtt th,.wtt td{border-bottom:1px solid var(--border);padding:3px 4px;text-align:left}.wtt th.sortable{cursor:pointer;color:var(--text-soft)}.wtt th.sortable:hover{color:var(--accent)}.mono{font-family:Consolas,monospace}'
-  + '.wtt tr.pick{cursor:pointer}.wtt tr.pick:hover td{background:var(--surface-2)}.wtt tr.on td{background:var(--surface-2)}.wtt tr.on td:first-child{box-shadow:inset 2px 0 0 var(--accent)}'
-  + '.blink{color:var(--accent);text-decoration:underline dotted}'
-  + '#gbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:2px 0 4px;font-size:11px}#gtitle{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
-  + '#repos{display:flex;flex-wrap:wrap;gap:4px;margin:0 0 4px}'
-  + '.rt{display:flex;align-items:center;max-width:100%;background:transparent;border:1px solid var(--border-2);color:var(--text);border-radius:6px;cursor:pointer;font-size:11px;padding:2px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
-  + '.rt:hover{border-color:var(--accent)}.rt.on{border-color:var(--accent);background:var(--surface-2);font-weight:600}.rt.bad{opacity:.7}'
-  + '.rr{border-radius:4px;padding:0 4px;font-size:10px;line-height:15px;font-weight:600}.rm{background:#3fb95033;color:#3fb950}.rl{background:var(--border-2);color:var(--text)}.ra{color:var(--text-soft);font-weight:400;font-size:10px}';
-
-const nMem = repos.filter(r => r.role.indexOf('팀원') !== -1).length;
-const first = repos[defIdx];
-console.log('<style>' + css + '</style>');
-console.log('<div style="font-size:11px;color:var(--text-soft);margin-bottom:4px">' + esc(process.env.CTM_LEAD_LABEL || '팀장') + ' · 저장소 ' + repos.length + '개 (팀원 ' + nMem + ') · 커밋을 클릭하면 변경 파일이 나옵니다</div>');
-if (degradeNote) console.log('<div style="font-size:10px;color:#d29922;margin-bottom:4px">⚠ ' + degradeNote + '</div>');
-console.log('<div id="repos"></div>');
-console.log('<div id="pane"><span class="empty">아래 그래프에서 커밋을 클릭하세요.</span></div>');
-console.log('<div id="gbar"><b id="gtitle">그래프: ' + esc(first.name) + ' · ' + esc(first.graphs.all.title) + ' · 커밋 ' + first.graphs.all.n + '개</b><button id="gall" class="ib" style="display:none">전체 보기</button></div>');
-console.log('<div id="graph" class="graph" style="position:relative"><span style="color:var(--text-soft)">그래프를 그리는 중… (보이지 않으면 이 슬롯의 "JavaScript 허용"을 켜세요)</span></div>');
-console.log('<div style="margin:10px 0 4px;font-weight:600"><span id="wth">워크트리 ' + first.wts.length + '개 · ' + esc(first.name) + '</span> <span style="font-weight:400;color:var(--text-soft);font-size:10px">(열 머리를 누르면 정렬 · 행을 누르면 위 그래프가 그 브랜치로 바뀜)</span></div>');
-console.log('<div id="wt"></div>');
-console.log('<script type="application/json" id="data">' + json + '</script>');
-console.log('<script>(' + frameMain.toString() + ')()</script>');
-})().catch(e => { console.log('<pre style="color:#f85149;white-space:pre-wrap">' + esc((e && e.stack) || e) + '</pre>'); });
+  const repos = await Promise.all(groups.map(g => collectRepo(g, g.p)));
+  saveFcache();
+  const okRepos = repos.filter(r => !r.err);
+  if (!okRepos.length) {
+    console.log(repos.map(r => '<p>' + esc(r.role) + ' · ' + esc(r.err) + ': <code>' + esc(r.dir) + '</code></p>').join(''));
+    return;
+  }
+  const defIdx = repos.findIndex(r => !r.err); // 팀원 저장소가 먼저 오므로 정상인 첫 저장소를 기본으로
+  const payload = { def: defIdx, at: Date.now(), limit: LIMIT, page: PAGE, maxLimit: MAX_LIMIT, repos };
+  const json = JSON.stringify(payload).replace(/</g, '\\u003c');
+  const nMem = repos.filter(r => r.role.indexOf('팀원') !== -1).length;
+  const nBr = okRepos.reduce((s, r) => s + r.branches.length, 0);
+  const cssBase = '.row:hover{background:var(--surface-2)}.row.sel{background:var(--surface-2);box-shadow:inset 2px 0 0 var(--accent)}'
+    + '#pane{border:1px solid var(--border);border-radius:6px;padding:6px 8px;margin:6px 0;height:150px;overflow:auto;font-size:11px;background:var(--surface-2)}'
+    + '#pane .ph code{color:var(--accent)}#pane .pm{color:var(--text-soft);margin:2px 0 6px}.empty{color:var(--text-soft)}'
+    + '.fr{display:flex;gap:6px;align-items:center;padding:1px 0}.fp{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
+    + '.st{flex:none;width:14px;text-align:center;font-weight:700}.stM{color:#d29922}.stA{color:#3fb950}.stD{color:#f85149}.stR{color:#a371f7}'
+    + '.ib{flex:none;background:transparent;border:1px solid var(--border-2);color:var(--text);border-radius:4px;cursor:pointer;font-size:11px;padding:0 4px;line-height:16px}.ib:hover{border-color:var(--accent)}'
+    + '.wtt{width:100%;font-size:11px}.wtt th,.wtt td{border-bottom:1px solid var(--border);padding:3px 4px;text-align:left}.wtt th.sortable{cursor:pointer;color:var(--text-soft)}.wtt th.sortable:hover{color:var(--accent)}.mono{font-family:Consolas,monospace}'
+    + '.wtt tr.pick{cursor:pointer}.wtt tr.pick:hover td{background:var(--surface-2)}.wtt tr.on td{background:var(--surface-2)}.wtt tr.on td:first-child{box-shadow:inset 2px 0 0 var(--accent)}'
+    + '.blink{color:var(--accent);text-decoration:underline dotted}'
+    + '#gbar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:2px 0 4px;font-size:11px}#gtitle{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}'
+    + '#repos{display:flex;flex-wrap:wrap;gap:4px;margin:0 0 4px}'
+    + '.rt{display:flex;align-items:center;max-width:100%;background:transparent;border:1px solid var(--border-2);color:var(--text);border-radius:6px;cursor:pointer;font-size:11px;padding:2px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'
+    + '.rt:hover{border-color:var(--accent)}.rt.on{border-color:var(--accent);background:var(--surface-2);font-weight:600}.rt.bad{opacity:.7}'
+    + '.rr{border-radius:4px;padding:0 4px;font-size:10px;line-height:15px;font-weight:600}.rm{background:#3fb95033;color:#3fb950}.rl{background:var(--border-2);color:var(--text)}.ra{color:var(--text-soft);font-weight:400;font-size:10px}';
+  const css2 = '.bbar{display:flex;gap:6px;align-items:center;margin:4px 0}.bbar input{flex:1;min-width:0;background:var(--surface-2);border:1px solid var(--border-2);color:var(--text);border-radius:4px;padding:2px 6px;font-size:11px}'
+    + '.kd{border-radius:4px;padding:0 5px;font-size:10px;line-height:15px;font-weight:600}.kl{background:#3fb95033;color:#3fb950}.kr{background:var(--border-2);color:var(--text)}'
+    + '.meta{color:var(--text-soft);font-size:10px;margin-left:6px}.meta.err{color:#f85149}.ib:disabled{opacity:.5;cursor:default}#btabs .rt,#repos .rt{margin:0}';
+  const css = cssBase + css2;
+  console.log('<style>' + css + '</style>');
+  console.log('<div style="font-size:11px;color:var(--text-soft);margin-bottom:4px">' + esc(process.env.CTM_LEAD_LABEL || '팀장') + ' · 저장소 ' + repos.length + '개 (팀원 ' + nMem + ') · 브랜치 ' + nBr + '개 · 브랜치나 워크트리를 누르면 그 그래프를 불러옵니다</div>');
+  console.log('<div id="repos"></div>');
+  console.log('<div id="pane"><span class="empty">아래 그래프에서 커밋을 클릭하세요.</span></div>');
+  console.log('<div id="gbar"><b id="gtitle">그래프를 그리는 중…</b><button id="gall" class="ib" style="display:none">전체 보기</button><button id="gmore" class="ib" style="display:none">더 보기</button><button id="gre" class="ib" title="이 그래프를 다시 불러와 최신 상태로 만듭니다">↻</button><span id="gmeta" class="meta"></span></div>');
+  console.log('<div id="graph" class="graph" style="position:relative"><span style="color:var(--text-soft)">그래프를 그리는 중… (보이지 않으면 이 슬롯의 "JavaScript 허용"을 켜세요)</span></div>');
+  console.log('<div id="btabs" style="display:flex;gap:4px;margin:10px 0 4px"></div>');
+  console.log('<div id="below"></div>');
+  console.log('<script type="application/json" id="data">' + json + '</script>');
+  console.log('<script>(' + frameMain.toString() + ')()</script>');
+})().catch(e => { console.log(REQ ? JSON.stringify({ ok: false, error: String((e && e.message) || e) }) : '<pre style="color:#f85149;white-space:pre-wrap">' + esc((e && e.stack) || e) + '</pre>'); });
 `;
 document.getElementById('ps-example-graph-team-btn').addEventListener('click', () => {
   if (psScript.value.trim() && !confirm('입력해 둔 스크립트를 예제로 바꿉니다. 계속할까요?')) return;
