@@ -979,10 +979,17 @@ const JS_FRAME_BRIDGE = String.raw`(function(){
     });}
   };
   var callSeq=0,pendingCalls={};
-  window.addEventListener('message',function(e){var d=e.data;if(!d||d.ctm!==1||d.t!=='result')return;var c=pendingCalls[d.id];if(!c)return;delete pendingCalls[d.id];if(d.ok)c.res(d.text);else c.rej(new Error(d.err||'요청 실패'));});
+  var vp=(typeof window.__ctmVp0==='number'&&window.__ctmVp0>0)?window.__ctmVp0:null,vpFns=[];
+  window.addEventListener('message',function(e){var d=e.data;if(!d||d.ctm!==1)return;
+    if(d.t==='viewport'){vp=Number(d.h)||null;if(d.ts)window.__ctmVpLatency=Date.now()-d.ts;if(vp!==null)for(var i=0;i<vpFns.length;i++){try{vpFns[i](vp);}catch(x){}}return;}
+    if(d.t!=='result')return;var c=pendingCalls[d.id];if(!c)return;delete pendingCalls[d.id];if(d.ok)c.res(d.text);else c.rej(new Error(d.err||'요청 실패'));});
+  window.ctm.getViewport=function(){return vp;};
+  window.ctm.onViewport=function(fn){if(typeof fn!=='function')return;vpFns.push(fn);if(vp!==null){try{fn(vp);}catch(x){}}};
   document.addEventListener('click',function(e){var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(!a)return;e.preventDefault();var u=a.getAttribute('href')||'';if(/^https?:\/\//i.test(u))post({t:'open-url',url:u});},true);
   var last=0;
-  function size(){var h=Math.max(document.documentElement.scrollHeight,document.body?document.body.scrollHeight:0);if(h!==last){last=h;post({t:'size',h:h});}}
+  // 내용 높이: scrollHeight는 프레임 자신의 창 높이보다 작아질 수 없어서(내용이 줄어도 그대로) 프레임이 한 번 커지면 줄지 못한다 — 내용이 창 안에 다 들어올 때는 실제 내용 상자의 높이를 잰다.
+  function contentH(){var de=document.documentElement,b=document.body;var sh=Math.max(de.scrollHeight,b?b.scrollHeight:0);if(sh>de.clientHeight+1)return sh;var r=Math.ceil(Math.max(de.getBoundingClientRect().height,b?b.getBoundingClientRect().bottom+(window.pageYOffset||0):0));return r>0?r:sh;}
+  function size(){var h=contentH();if(h!==last){last=h;post({t:'size',h:h});}}
   if(window.ResizeObserver)new ResizeObserver(size).observe(document.documentElement);
   window.addEventListener('load',size);setTimeout(size,100);setTimeout(size,500);
   post({t:'hb'});setInterval(function(){post({t:'hb'});},1000);
@@ -1036,7 +1043,8 @@ async function renderJsFrame(container, fragment, leadId, stateKey) {
   const fullKey = `${stateKey || ''}|${leadId || ''}`;
   const saved = jsFrameStates.get(fullKey);
   const initJson = saved === undefined ? 'null' : JSON.stringify(saved).replace(/</g, '\\u003c');
-  const doc = `<!doctype html><html><head><meta charset="utf-8"><style>${panelThemeCss()}${base}</style></head><body><script>window.__ctmInit=${initJson};<\/script><script>${JS_FRAME_BRIDGE}<\/script>${fragment}</body></html>`;
+  const vp0 = Math.max(0, Math.floor(viewportHeightFor(stateKey === 'test'))); // 패널에서 보이는 높이(정수) — 그래픽이 첫 화면부터 맞는 높이로 그릴 수 있게
+  const doc = `<!doctype html><html><head><meta charset="utf-8"><style>${panelThemeCss()}${base}</style></head><body><script>window.__ctmInit=${initJson};window.__ctmVp0=${vp0};<\/script><script>${JS_FRAME_BRIDGE}<\/script>${fragment}</body></html>`;
   let url;
   try { url = await window.api.registerPanelFrame(doc); }
   catch (err) { container.textContent = `그래픽을 띄우지 못했습니다: ${errMsg(err)}`; return; }
@@ -1071,6 +1079,7 @@ window.addEventListener('message', async e => {
   const frame = [...document.querySelectorAll('iframe.sp-html-frame[data-js]')].find(f => f.contentWindow === e.source);
   if (!frame) return;
   frame.dataset.last = String(Date.now());
+  if (!frameViewportSent.has(frame)) sendFrameViewport(frame);
   if (d.t === 'hb') return;
   if (d.t === 'call') { handleFrameCall(frame, d); return; }
   if (d.t === 'state') { // 요청 횟수 제한 대상이 아님(사용자가 누를 때만 보낸다) — 크기만 제한한다
@@ -1109,6 +1118,39 @@ ${url.length > 600 ? url.slice(0, 600) + '…(길어서 잘림)' : url}`)) await
   } catch (err) { report(errMsg(err)); }
 });
 let frameUrlConfirming = false;
+// ---- 패널에서 보이는 높이를 그래픽에 알려 준다(ctm.onViewport): 그래픽이 그 높이에 맞는 스크롤 영역을 만들어 위쪽 박스를 고정할 수 있게 ----
+const frameViewportSent = new WeakMap(); // frame -> 마지막으로 보낸 높이
+function frameViewportHeight(frame) { return viewportHeightFor(frame.dataset.callKey === 'test'); }
+function viewportHeightFor(isTest) {
+  if (isTest) return Math.max(240, Math.min(700, window.innerHeight - 300)); // 설정 화면의 시험 미리보기
+  // 패널은 화면 높이 − 92px까지 커질 수 있다: 거기서 머리글(탭·메타)과 본문 위아래 여백을 뺀 것이 그래픽이 쓸 수 있는 높이다.
+  const cs = getComputedStyle(spBodyEl);
+  const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  let others = 0;
+  for (const c of spEl.children) {
+    if (c === spBodyEl || c.hidden) continue;
+    const pos = getComputedStyle(c).position;
+    if (pos === 'absolute' || pos === 'fixed') continue; // 크기 조절 손잡이 같은 겹쳐 놓은 요소는 높이를 차지하지 않는다
+    others += c.offsetHeight;
+  }
+  const h = (window.innerHeight - 92) - 2 - others - pad - 8; // 마지막 8px: 프레임이 내용 높이 + 4px로 커지므로 바깥 스크롤바가 생기지 않게 여유를 둔다
+  return Math.max(200, Math.floor(h));
+}
+function sendFrameViewport(frame) {
+  if (!document.contains(frame) || !frame.contentWindow) return;
+  const h = frameViewportHeight(frame);
+  if (frameViewportSent.get(frame) === h) return;
+  frameViewportSent.set(frame, h);
+  try { frame.contentWindow.postMessage({ ctm: 1, t: 'viewport', h, ts: Date.now() }, '*'); } catch { /* 프레임이 사라졌다 */ }
+}
+function sendAllFrameViewports() { document.querySelectorAll('iframe.sp-html-frame[data-js]').forEach(sendFrameViewport); }
+let viewportTimer = null;
+window.addEventListener('resize', () => { clearTimeout(viewportTimer); viewportTimer = setTimeout(sendAllFrameViewports, 120); });
+if (window.ResizeObserver) {
+  const vpObserver = new ResizeObserver(() => { clearTimeout(viewportTimer); viewportTimer = setTimeout(sendAllFrameViewports, 60); });
+  vpObserver.observe(spEl);
+  for (const c of spEl.children) vpObserver.observe(c);
+}
 // ---- ctm.call: 그래픽이 자기 슬롯의 스크립트를 요청과 함께 다시 불러 결과를 받는 통로(앱은 요청의 뜻을 모른다) ----
 const FRAME_CALL_MAX_CHARS = 20000;
 const FRAME_CALL_WINDOW_MS = 10000;
@@ -1718,6 +1760,7 @@ console.log('<script>(' + frameMain.toString() + ')()</script>');
 `;
 // 두 번째 예제: 팀장(설계) 저장소와 허용한 팀원(구현) 저장소를 탭으로 골라 보는 git 그래프(팀원 저장소가 먼저·기본 선택).
 const PS_EXAMPLE_GRAPH_TEAM_JS = String.raw`// git 그래프(팀장+팀원 · 질의 방식): 처음에는 가벼운 정보(저장소별 전체 브랜치 목록과 "전체 브랜치" 그래프)만 그리고, 브랜치를 누르면 그 브랜치의 그래프를 화면이 이 스크립트를 다시 불러(ctm.call) 받아 옵니다.
+// 화면 구성: 맨 위(저장소 탭·그래프 제목줄·커밋 설명 박스)는 고정되고, 그 아래의 그래프와 브랜치 목록만 스크롤됩니다(패널이 알려 주는 보이는 높이 ctm.onViewport에 맞춤). 커밋 설명 박스는 접을 수 있습니다.
 // 위쪽 탭에서 팀장 저장소(설계)와 허용한 팀원 저장소(구현)를 고르고, 아래 "브랜치" 목록(검색 가능)이나 "워크트리" 표의 행을 누르면 그래프가 그 브랜치 기준으로 바뀝니다. "더 보기"로 더 옛날 커밋까지, "↻"로 최신 상태로 다시 불러옵니다.
 // 이 슬롯은 "출력: HTML"과 "JavaScript 허용"을 켜야 합니다(읽기만 하는 git 명령, 상태를 바꾸지 않습니다).
 // 동작 방식: 환경 변수 CTM_REQUEST가 비어 있으면 페이지 전체를 출력하고, 채워져 있으면(화면이 ctm.call로 부른 것) 요청에 맞는 데이터만 JSON으로 출력합니다.
@@ -1955,6 +1998,10 @@ function frameMain() {
   var gre = document.getElementById('gre');
   var gmeta = document.getElementById('gmeta');
   var btabs = document.getElementById('btabs');
+  var scrollEl = document.getElementById('scroll');
+  var appEl = document.getElementById('app');
+  var ptoggle = document.getElementById('ptoggle');
+  var paneOff = false, scrollTimer = null, pendingScroll = null;
   var below = document.getElementById('below');
   var R = null, curR = -1, curRev = '';
   var sel = null, selSha = null, restoring = false, busy = false, pendingSha = null;
@@ -1975,12 +2022,29 @@ function frameMain() {
   // 패널이 다시 그려져도(다른 탭에 갔다 와도) 보던 저장소·브랜치·커밋·정렬·검색어를 되살린다 — 앱이 상태를 기억해 두었다가 돌려준다(ctm.getState/setState).
   function saveState() {
     if (restoring || !R || !window.ctm || !window.ctm.setState) return;
-    try { window.ctm.setState({ repo: R.name + '|' + R.dir, rev: curRev, sha: selSha, sk: sortKey, sd: dir, tab: tab, q: filterText }); } catch (e) { /* 저장 못 해도 화면은 그대로 */ }
+    try { window.ctm.setState({ repo: R.name + '|' + R.dir, rev: curRev, sha: selSha, sk: sortKey, sd: dir, tab: tab, q: filterText, pc: paneOff, sy: scrollEl.scrollTop }); } catch (e) { /* 저장 못 해도 화면은 그대로 */ }
+  }
+  function setPane(off) {
+    paneOff = !!off;
+    pane.style.display = paneOff ? 'none' : '';
+    ptoggle.textContent = paneOff ? '커밋 설명 ▸' : '커밋 설명 ▾';
+    saveState();
+  }
+  ptoggle.addEventListener('click', function () { setPane(!paneOff); });
+  // 스크롤 위치도 기억한다(너무 자주 저장하지 않게 잠깐 모아서)
+  scrollEl.addEventListener('scroll', function () { clearTimeout(scrollTimer); scrollTimer = setTimeout(saveState, 400); });
+  // 패널에서 보이는 높이(앱이 알려 준다)에 맞춰 스크롤 영역의 높이를 정한다 — 높이를 받기 전에는 기본 높이로 그려 둔다
+  if (window.ctm && window.ctm.onViewport) {
+    window.ctm.onViewport(function (h) {
+      appEl.style.setProperty('--vh', Math.max(320, Math.min(2000, Math.floor(h))) + 'px');
+      appEl.className = h < 520 ? 'compact' : '';
+    });
   }
   function resetPane() { pane.textContent = ''; pane.appendChild(el('span', 'empty', '아래 그래프에서 커밋을 클릭하세요.')); }
   function show(sha) {
     var c = R.commits[sha];
     if (!c) return;
+    if (paneOff) setPane(false); // 커밋을 눌렀는데 설명 박스가 접혀 있으면 펼친다
     pane.textContent = '';
     var h = el('div', 'ph');
     h.appendChild(el('code', '', c.short));
@@ -2062,11 +2126,13 @@ function frameMain() {
     gmore.disabled = gre.disabled = gall.disabled = busy;
   }
   // 보고 있는 그래프를 그린다(이미 불러온 것은 그대로, 없으면 showView가 먼저 불러온다)
-  function renderView() {
+  function renderView(keepScroll) {
     var v = R.views[curRev];
     if (!v) return;
+    var y = scrollEl.scrollTop;
     sel = null; selSha = null;
     renderGraph(v);
+    scrollEl.scrollTop = keepScroll ? y : 0;
     gtitle.textContent = '그래프: ' + branchName(curRev) + ' · 커밋 ' + v.n + (v.more ? '개 이상' : '개');
     resetPane();
     setButtons();
@@ -2092,7 +2158,8 @@ function frameMain() {
       var note = '';
       if (isReload && prev) note = prev.tip !== r.tip ? ' · 새 커밋이 있어 갱신했습니다' : ' · 바뀐 것이 없습니다';
       setMsg('불러온 시각 ' + clock(r.at) + note);
-      renderView();
+      renderView(isReload && !!prev);
+      if (pendingScroll !== null) { scrollEl.scrollTop = pendingScroll; pendingScroll = null; }
       if (pendingSha) { var row = gbox.querySelector('.row[data-sha="' + pendingSha + '"]'); pendingSha = null; if (row) row.click(); }
     }, function (e) { busy = false; setMsg('⚠ ' + e.message, true); setButtons(); });
   }
@@ -2214,17 +2281,21 @@ function frameMain() {
     if (['name', 'branch', 'head', 'ts'].indexOf(st.sk) !== -1) { sortKey = st.sk; dir = st.sd === 1 ? 1 : -1; }
     if (st.tab === 'b' || st.tab === 'w') tab = st.tab;
     if (typeof st.q === 'string') filterText = st.q.slice(0, 200);
+    if (st.pc === true) paneOff = true;
     for (var ri = 0; ri < data.repos.length; ri++) { var rr = data.repos[ri]; if (!rr.err && rr.name + '|' + rr.dir === st.repo) { startRepo = ri; break; } }
   }
   restoring = true;
   setRepo(startRepo);
+  if (paneOff) setPane(true);
   restoring = false;
+  var wantScroll = st && typeof st.sy === 'number' && st.sy > 0 ? st.sy : null;
   var wantSha = st && st.sha ? String(st.sha).replace(/[^0-9a-f]/gi, '') : '';
   if (st && typeof st.rev === 'string' && st.rev && R && !R.err) {
-    pendingSha = wantSha || null;
+    pendingSha = wantSha || null; pendingScroll = wantScroll;
     loadView(st.rev, data.limit, false); // 보던 브랜치는 다시 불러온다(그 사이 바뀌었을 수 있으므로 저장해 둔 그래프를 쓰지 않는다)
-  } else if (wantSha) {
-    var srow = gbox.querySelector('.row[data-sha="' + wantSha + '"]'); if (srow) srow.click();
+  } else {
+    if (wantScroll !== null) scrollEl.scrollTop = wantScroll;
+    if (wantSha) { var srow = gbox.querySelector('.row[data-sha="' + wantSha + '"]'); if (srow) srow.click(); }
   }
   saveState();
 }
@@ -2268,16 +2339,25 @@ function frameMain() {
     + '.rr{border-radius:4px;padding:0 4px;font-size:10px;line-height:15px;font-weight:600}.rm{background:#3fb95033;color:#3fb950}.rl{background:var(--border-2);color:var(--text)}.ra{color:var(--text-soft);font-weight:400;font-size:10px}';
   const css2 = '.bbar{display:flex;gap:6px;align-items:center;margin:4px 0}.bbar input{flex:1;min-width:0;background:var(--surface-2);border:1px solid var(--border-2);color:var(--text);border-radius:4px;padding:2px 6px;font-size:11px}'
     + '.kd{border-radius:4px;padding:0 5px;font-size:10px;line-height:15px;font-weight:600}.kl{background:#3fb95033;color:#3fb950}.kr{background:var(--border-2);color:var(--text)}'
-    + '.meta{color:var(--text-soft);font-size:10px;margin-left:6px}.meta.err{color:#f85149}.ib:disabled{opacity:.5;cursor:default}#btabs .rt,#repos .rt{margin:0}';
+    + '.meta{color:var(--text-soft);font-size:10px;margin-left:6px}.meta.err{color:#f85149}.ib:disabled{opacity:.5;cursor:default}#btabs .rt,#repos .rt{margin:0}'
+    + 'html,body{overflow:hidden}body{margin:0;padding:0 !important}'
+    + '#app{display:flex;flex-direction:column;height:var(--vh,560px);min-height:0}'
+    + '#top{flex:none;position:relative;z-index:5;background:var(--bg);padding:2px 0 4px;border-bottom:1px solid var(--border)}'
+    + '#scroll{flex:1;min-height:0;overflow:auto;padding-top:6px}'
+    + '#info{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text-soft);margin-bottom:4px}'
+    + '#app.compact #pane{height:84px;margin:4px 0}#app.compact #repos{margin-bottom:2px}';
   const css = cssBase + css2;
   console.log('<style>' + css + '</style>');
-  console.log('<div style="font-size:11px;color:var(--text-soft);margin-bottom:4px">' + esc(process.env.CTM_LEAD_LABEL || '팀장') + ' · 저장소 ' + repos.length + '개 (팀원 ' + nMem + ') · 브랜치 ' + nBr + '개 · 브랜치나 워크트리를 누르면 그 그래프를 불러옵니다</div>');
+  console.log('<div id="app"><div id="top">');
+  console.log('<div id="info"><span style="flex:1;min-width:0">' + esc(process.env.CTM_LEAD_LABEL || '팀장') + ' · 저장소 ' + repos.length + '개 (팀원 ' + nMem + ') · 브랜치 ' + nBr + '개 · 브랜치나 워크트리를 누르면 그 그래프를 불러옵니다</span><button id="ptoggle" class="ib" title="커밋 설명 박스를 접거나 폅니다">커밋 설명 ▾</button></div>');
   console.log('<div id="repos"></div>');
   console.log('<div id="pane"><span class="empty">아래 그래프에서 커밋을 클릭하세요.</span></div>');
   console.log('<div id="gbar"><b id="gtitle">그래프를 그리는 중…</b><button id="gall" class="ib" style="display:none">전체 보기</button><button id="gmore" class="ib" style="display:none">더 보기</button><button id="gre" class="ib" title="이 그래프를 다시 불러와 최신 상태로 만듭니다">↻</button><span id="gmeta" class="meta"></span></div>');
+  console.log('</div><div id="scroll">');
   console.log('<div id="graph" class="graph" style="position:relative"><span style="color:var(--text-soft)">그래프를 그리는 중… (보이지 않으면 이 슬롯의 "JavaScript 허용"을 켜세요)</span></div>');
   console.log('<div id="btabs" style="display:flex;gap:4px;margin:10px 0 4px"></div>');
   console.log('<div id="below"></div>');
+  console.log('</div></div>');
   console.log('<script type="application/json" id="data">' + json + '</script>');
   console.log('<script>(' + frameMain.toString() + ')()</script>');
 })().catch(e => { console.log(REQ ? JSON.stringify({ ok: false, error: String((e && e.message) || e) }) : '<pre style="color:#f85149;white-space:pre-wrap">' + esc((e && e.stack) || e) + '</pre>'); });
