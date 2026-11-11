@@ -1003,6 +1003,77 @@ pub struct ScriptTestResult {
     pub stderr: String,
 }
 
+/// 그래픽 프레임의 요청 한도 — 요청 글자 수와 동시에 하나만.
+const CALL_REQUEST_MAX_CHARS: usize = 20_000;
+
+fn call_running() -> &'static Mutex<HashSet<String>> {
+    static R: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// 같은 슬롯에서 ctm.call이 동시에 둘 이상 돌지 않게 하는 표시 — 끝나면(Drop) 풀린다.
+struct CallGuard(String);
+impl Drop for CallGuard {
+    fn drop(&mut self) {
+        call_running().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
+/// 그래픽(html + JavaScript 허용 슬롯)이 `ctm.call(요청)`으로 자기 슬롯의 스크립트를 다시 부를 때 — 요청은 `CTM_REQUEST`로 넘기고 출력을 글자 그대로 돌려준다.
+/// 앱은 요청의 뜻을 모르고 결과를 저장하지 않는다(캐시는 스크립트가 정한다). 그 슬롯의 스크립트만, 같은 제한 시간·권한으로 돈다.
+#[tauri::command]
+pub async fn call_panel_script_command(slot_id: String, lead_id: Option<String>, request: String) -> Result<String, String> {
+    require_scripts_allowed(&load_panel_config())?;
+    if request.chars().count() > CALL_REQUEST_MAX_CHARS {
+        return Err(format!("요청이 너무 깁니다({}자 이하로 보내세요).", CALL_REQUEST_MAX_CHARS));
+    }
+    let config = load_panel_config();
+    let Some(slot) = config.slots.iter().find(|s| s.id == slot_id).cloned() else { return Err("슬롯을 찾지 못했습니다.".to_string()) };
+    if slot.mode != "script" || !slot.enabled || !slot.allow_js || slot.output_format != "html" {
+        return Err("이 슬롯은 ctm.call을 쓸 수 없습니다 — 출력 형식이 html이고 JavaScript 허용이 켜진 스크립트 슬롯이어야 합니다.".to_string());
+    }
+    if !call_running().lock().unwrap_or_else(|e| e.into_inner()).insert(slot.id.clone()) {
+        return Err("이전 요청을 아직 처리하는 중입니다. 잠시 후 다시 시도하세요.".to_string());
+    }
+    let _guard = CallGuard(slot.id.clone());
+    let lead = crate::panel_script::lead_by_id(&load_leads(), lead_id.as_deref());
+    let (id, interpreter, script, timeout_ms) = (slot.id.clone(), slot.interpreter.clone(), slot.script.clone(), slot.timeout_ms);
+    let name = slot.name.clone();
+    let result = tokio::task::spawn_blocking(move || crate::panel_script::run_script_call(&panel_dir().join("scripts"), &format!("{id}-call"), &interpreter, &script, timeout_ms, lead.as_ref(), true, &request))
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Err(detail) = &result {
+        crate::panel_script::record_error_at(&script_errors_path(), &slot.id, &name, "call", &crate::panel_script::ScriptProblem { kind: "call", detail: detail.clone() }, now_ms());
+    }
+    result
+}
+
+/// 설정 화면의 "시험 실행" 미리보기 안의 그래픽이 `ctm.call`을 부를 때 — 저장하지 않은 스크립트로 같은 일을 한다.
+#[tauri::command]
+pub async fn test_panel_script_call_command(interpreter: String, script: String, timeout_ms: u64, lead_id: Option<String>, request: String) -> Result<String, String> {
+    require_scripts_allowed(&load_panel_config())?;
+    if !crate::panel_script::INTERPRETERS.contains(&interpreter.as_str()) {
+        return Err("스크립트 실행 환경이 올바르지 않습니다.".to_string());
+    }
+    if script.trim().is_empty() || script.chars().count() > crate::panel_script::MAX_SCRIPT_CHARS {
+        return Err("스크립트가 비었거나 너무 깁니다.".to_string());
+    }
+    if !(crate::panel_script::MIN_TIMEOUT_MS..=crate::panel_script::MAX_TIMEOUT_MS).contains(&timeout_ms) {
+        return Err(format!("제한 시간은 {}~{}ms 사이로 입력하세요.", crate::panel_script::MIN_TIMEOUT_MS, crate::panel_script::MAX_TIMEOUT_MS));
+    }
+    if request.chars().count() > CALL_REQUEST_MAX_CHARS {
+        return Err(format!("요청이 너무 깁니다({}자 이하로 보내세요).", CALL_REQUEST_MAX_CHARS));
+    }
+    if !call_running().lock().unwrap_or_else(|e| e.into_inner()).insert("_test".to_string()) {
+        return Err("이전 요청을 아직 처리하는 중입니다. 잠시 후 다시 시도하세요.".to_string());
+    }
+    let _guard = CallGuard("_test".to_string());
+    let lead = crate::panel_script::lead_by_id(&load_leads(), lead_id.as_deref());
+    tokio::task::spawn_blocking(move || crate::panel_script::run_script_call(&panel_dir().join("scripts"), "_test-call", &interpreter, &script, timeout_ms, lead.as_ref(), true, &request))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// 설정 화면의 "시험 실행": 저장하지 않은 스크립트를 지금 돌려 결과를 보여 준다.
 #[tauri::command]
 pub async fn test_panel_script_command(interpreter: String, script: String, timeout_ms: u64, lead_id: Option<String>, output_format: Option<String>, allow_js: Option<bool>) -> Result<ScriptTestResult, String> {

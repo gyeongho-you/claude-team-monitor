@@ -152,6 +152,9 @@
   async function getPanelConfig() { return invoke('get_panel_config_command'); }
   async function setPanelEnabled(enabled) { return invoke('set_panel_enabled_command', { enabled }); }
   async function cancelAi() { return invoke('cancel_ai_command'); }
+  // 그래픽의 ctm.call 중계: 저장된 슬롯의 스크립트를 요청과 함께 다시 실행하고 출력을 글자 그대로 돌려받는다 / 시험 실행 미리보기용(저장 전 스크립트)
+  async function callPanelScript(slotId, leadId, request) { return invoke('call_panel_script_command', { slotId, leadId: leadId || null, request }); }
+  async function testPanelScriptCall(interpreter, script, timeoutMs, leadId, request) { return invoke('test_panel_script_call_command', { interpreter, script, timeoutMs, leadId: leadId || null, request }); }
   async function setScriptsEnabled(enabled) { return invoke('set_scripts_enabled_command', { enabled }); }
   async function savePanelSlot(input) { return invoke('save_panel_slot_command', { input }); }
   async function deletePanelSlot(id) { return invoke('delete_panel_slot_command', { id }); }
@@ -381,6 +384,8 @@
     setPanelEnabled,
     setScriptsEnabled,
     cancelAi,
+    callPanelScript,
+    testPanelScriptCall,
     savePanelSlot,
     deletePanelSlot,
     getPanelContent,

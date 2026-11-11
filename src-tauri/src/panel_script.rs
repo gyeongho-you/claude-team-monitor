@@ -57,7 +57,7 @@ pub(crate) struct EnvVarDoc {
     pub when_empty: &'static str,
 }
 
-pub(crate) const ENV_VAR_DOCS: [EnvVarDoc; 11] = [
+pub(crate) const ENV_VAR_DOCS: [EnvVarDoc; 12] = [
     EnvVarDoc { name: "CTM_OUTPUT_FORMAT", what: "이 슬롯이 기대하는 출력 형식: `markdown` 또는 `html`. 아래 '출력 형식'을 보고 그 형식으로 낸다", when_empty: "항상 채워진다" },
     EnvVarDoc { name: "CTM_ALLOW_JS", what: "이 슬롯이 `html` 출력에서 JavaScript 실행을 허용했는지: `true` 또는 `false`. `true`일 때만 출력 HTML 안의 `<script>`가 돈다(아래 '출력 형식'의 JavaScript 허용 부분)", when_empty: "항상 채워진다" },
     EnvVarDoc { name: "CTM_LEAD_ID", what: "선택한 팀장의 앱 내부 id (예: `ed09bf70`)", when_empty: "팀장을 고르지 않았을 때" },
@@ -69,10 +69,11 @@ pub(crate) const ENV_VAR_DOCS: [EnvVarDoc; 11] = [
     EnvVarDoc { name: "CTM_LEADS_FILE", what: "이 앱에 등록된 **모든** 팀장 목록 파일 경로(JSON 배열). 항목: `id`, `label`(선택), `aiTitle`(선택), `targetDir`, `sessionId`, `launchedAt`(시작 시각, epoch ms), `internalId`, `approvedMembers`(허용한 팀원 폴더 배열). 종료된(히스토리) 팀장도 들어 있다. 읽기 전용으로만 쓸 것(고치면 앱이 망가진다)", when_empty: "항상 채워진다(팀장 선택과 무관)" },
     EnvVarDoc { name: "CTM_CLAUDE_HOME", what: "claude 홈 폴더 절대 경로(보통 사용자 홈의 `.claude`). 아래에 `projects/`(대화 기록), `jobs/`(백그라운드 세션 상태) 등이 있다", when_empty: "항상 채워진다" },
     EnvVarDoc { name: "CTM_APP_VERSION", what: "이 앱의 버전 문자열 (예: `0.1.1`)", when_empty: "항상 채워진다" },
+    EnvVarDoc { name: "CTM_REQUEST", what: "그래픽(html + JavaScript 허용)이 `ctm.call(요청)`으로 이 스크립트를 불렀을 때 넘긴 요청(글자, 보통 JSON). 이 값이 있으면 **페이지 전체가 아니라 요청에 맞는 데이터만** 표준 출력에 낸다(아래 '화면이 스크립트를 다시 부르기'). 요청은 화면이 정한 **믿을 수 없는 입력**이므로 반드시 검사해서 쓴다", when_empty: "페이지를 그릴 때(일반 실행) — 이때는 지금까지처럼 화면 전체를 출력한다" },
 ];
 
 /// 스크립트에 넘길 환경 변수 전부(팀장이 없으면 팀장 관련 값은 빈 문자열). 이름은 ENV_VAR_DOCS와 같아야 한다.
-pub(crate) fn script_env(lead: Option<&LeadRecord>, output_format: &str, allow_js: bool) -> Vec<(&'static str, String)> {
+pub(crate) fn script_env(lead: Option<&LeadRecord>, output_format: &str, allow_js: bool, request: Option<&str>) -> Vec<(&'static str, String)> {
     let (id, label, title, dir, session_id, session_file) = match lead {
         Some(l) => (
             l.id.clone(),
@@ -96,6 +97,7 @@ pub(crate) fn script_env(lead: Option<&LeadRecord>, output_format: &str, allow_j
         ("CTM_LEADS_FILE", crate::paths::leads_path().to_string_lossy().to_string()),
         ("CTM_CLAUDE_HOME", crate::paths::claude_home().to_string_lossy().to_string()),
         ("CTM_APP_VERSION", env!("CARGO_PKG_VERSION").to_string()),
+        ("CTM_REQUEST", request.unwrap_or("").to_string()),
     ]
 }
 
@@ -129,12 +131,19 @@ pub(crate) fn reference_markdown() -> String {
         - 출력 HTML 안에 **인라인 `<script>`**를 써서 정렬(표 머리 클릭), 접기·펼치기, 탭 전환, 필터, 마우스를 올렸을 때 값 보여 주기 같은 **화면 안 상호작용**을 만들 수 있다. 데이터는 스크립트가 HTML에 미리 넣어 두고(예: `<script type=\"application/json\">`나 JS 배열), 화면 안의 JavaScript가 그걸 다룬다.\n\
         - 막혀 있는 것: 네트워크 접속(`fetch`·`XMLHttpRequest`·WebSocket), 외부 스크립트·이미지·CSS 불러오기(`<script src>` 포함), 폼 전송, 팝업, `localStorage`·쿠키, 앱 화면의 변수·함수 접근, 프레임 자신의 주소를 바꾸는 것. 보안 규칙(CSP)이 막으므로 시도하지 마라. 필요한 데이터는 전부 스크립트(Node 등)가 모아서 HTML에 넣는다.\n\
         - 앱에 요청할 수 있는 동작(전역 객체 `window.ctm`): `ctm.open(url)`(http/https 주소를 기본 브라우저로), `ctm.reveal(경로)`(탐색기·Finder에서 그 파일/폴더 위치 보여 주기), `ctm.editor(경로, 줄번호)`(VS Code로 열기, 줄번호는 선택). 경로는 **절대 경로**여야 하고 선택한 팀장의 작업 폴더·허용한 팀원 폴더·그 저장소의 git 워크트리 폴더 **안**의 존재하는 것만 된다. 반환값은 없고 실패하면 앱이 패널 위쪽에 오류를 잠깐 보여 준다. `<a href=\"https://...\">` 링크는 자동으로 `ctm.open`처럼 동작한다.\n\
-        - **상태를 바꾸는 동작(파일 수정·삭제, git 커밋·체크아웃 등)을 요청하는 방법은 없다.** `ctm`에는 위 세 가지뿐이다.\n\
+        - **상태를 바꾸는 동작(파일 수정·삭제, git 커밋·체크아웃 등)을 요청하는 방법은 없다.** `ctm`에는 위 세 가지 외에 아래 `ctm.call`과 화면 상태 저장(`ctm.setState`/`ctm.getState`)뿐이다.\n\
+        ### 화면이 스크립트를 다시 부르기 (`ctm.call`) — 필요할 때만 가져오기\n\n\
+        - 처음 그릴 때 모든 데이터를 HTML에 넣기엔 너무 크거나 느릴 때(브랜치마다 커밋, 검색, \"더 보기\" 등) **사용자가 누른 순간에 화면이 이 슬롯의 스크립트를 다시 불러** 필요한 것만 받아 온다.\n\
+        - 화면: `ctm.call(요청).then((글자) => ...)`. 요청은 글자이거나 JSON으로 바꿀 수 있는 값(20000자 이하)이다. 결과는 스크립트가 표준 출력에 낸 글자 그대로(보통 JSON, 1000000자 이하)이고, 실패하면 거부(reject)된다. 한 번에 하나씩만 부를 수 있고 너무 잦으면 거절된다.\n\
+        - 스크립트: 환경 변수 `CTM_REQUEST`가 **비어 있지 않으면** 화면이 부른 것이다. 이때는 페이지를 그리지 말고 요청에 맞는 데이터만 표준 출력에 낸다. 비어 있으면 지금까지처럼 페이지 전체를 낸다. 같은 스크립트 하나가 두 역할을 한다.\n\
+        - 부를 때마다 **새 프로세스**로 돈다(상태가 남지 않는다). 앱은 응답을 저장하지 않는다 — 캐시가 필요하면 스크립트가 직접 둔다(바뀌지 않는 것만 두어라. 예: 커밋 해시별 내용. 브랜치 목록처럼 바뀌는 것은 매번 새로 읽어라).\n\
+        - 같은 슬롯의 스크립트만 같은 제한 시간·같은 권한으로 돈다. 다른 스크립트나 임의의 명령을 부를 수는 없다.\n\
+        - **요청은 화면이 만든 믿을 수 없는 입력이다.** 브랜치 이름·경로 같은 값을 명령 문자열에 그대로 이어 붙이지 마라. 허용 목록과 대조하거나 형식을 검사하고, 외부 명령은 **인자를 배열로** 넘겨 실행해라(셸 문자열 금지).\n\
         - **무한 루프(`while(true)`)나 몇 초씩 걸리는 동기 계산을 쓰지 마라.** 프레임이 멈추면 앱이 6초 뒤에 감지해 상호작용 없는 화면으로 바꾸지만, 멈춘 프로세스는 앱을 다시 시작해야 정리된다. 반복은 `setInterval`/`setTimeout`으로 쪼개고, 데이터를 많이 다루는 일은 스크립트(Node 등) 쪽에서 미리 끝내서 HTML에 넣는다.\n\
         - 높이는 내용에 맞춰 자동으로 늘어난다. `<button>`·`<input>`·`<select>`는 쓸 수 있지만 `<form>` 전송은 안 된다(`onclick` 등 JavaScript로 처리).\n\
         ## 앱이 주지 않는 것\n\n\
         - 팀장의 실시간 상태(작업 중/대기), 팀원 목록, 토큰·비용 사용량, 다른 패널 슬롯의 내용은 환경 변수로 주지 않는다. 필요하면 `CTM_SESSION_FILE`(대화 기록)이나 `CTM_LEADS_FILE`을 직접 읽어서 계산하거나, 이 PC의 명령(`git`, `gh` 등)을 실행해서 알아낸다.\n\
-        - 앱이나 팀장 세션을 조작하는 기능(메시지 보내기, 종료 등)과 PC의 상태를 바꾸는 요청은 없다. 스크립트는 **보여 주기 전용**이고, 요청할 수 있는 건 링크 열기·파일 위치 보기·VS Code로 열기뿐이다.\n\n\
+        - 앱이나 팀장 세션을 조작하는 기능(메시지 보내기, 종료 등)과 PC의 상태를 바꾸는 요청은 없다. 스크립트는 **보여 주기 전용**이고, 화면이 앱에 요청할 수 있는 건 링크 열기·파일 위치 보기·VS Code로 열기와, 자기 슬롯의 스크립트를 다시 불러 데이터 받기(`ctm.call`)뿐이다.\n\n\
         ## 쓸 때 권장\n\n\
         - 읽기만 하는 명령을 쓴다(상태를 바꾸는 `git commit`·`checkout`, 파일 삭제·수정은 하지 않는다).\n\
         - 팀장을 고르지 않아 `CTM_LEAD_DIR`이 비어 있는 경우를 먼저 처리해 안내 문구를 출력하고 끝낸다.\n\
@@ -314,6 +323,21 @@ fn fail(markdown: String, kind: &'static str, detail: String) -> Outcome {
 }
 
 pub(crate) fn run_script_outcome(scripts_dir: &Path, file_stem: &str, interpreter: &str, script: &str, timeout_ms: u64, lead: Option<&LeadRecord>, output_format: &str, allow_js: bool) -> Outcome {
+    run_script_inner(scripts_dir, file_stem, interpreter, script, timeout_ms, lead, output_format, allow_js, None)
+}
+
+/// 화면이 `ctm.call`로 스크립트를 다시 부를 때의 실행 — 요청을 `CTM_REQUEST`로 넘기고, 출력은 **가공 없이 글자 그대로**(보통 JSON) 돌려준다.
+/// 실패(종료 코드·시간 초과·너무 큰 출력·실행 불가)는 Err(원인)이고, 정상 종료면 빈 출력도 Ok("")다(표준 오류 출력은 무시).
+pub(crate) fn run_script_call(scripts_dir: &Path, file_stem: &str, interpreter: &str, script: &str, timeout_ms: u64, lead: Option<&LeadRecord>, allow_js: bool, request: &str) -> Result<String, String> {
+    let o = run_script_inner(scripts_dir, file_stem, interpreter, script, timeout_ms, lead, "html", allow_js, Some(request));
+    match o.problem {
+        Some(p) if p.kind != "stderr" => Err(p.detail),
+        _ => Ok(o.output),
+    }
+}
+
+fn run_script_inner(scripts_dir: &Path, file_stem: &str, interpreter: &str, script: &str, timeout_ms: u64, lead: Option<&LeadRecord>, output_format: &str, allow_js: bool, request: Option<&str>) -> Outcome {
+    let raw = request.is_some();
     let format: &'static str = if output_format == "html" { "html" } else { "markdown" };
     let Some((program, ext, pre_args)) = interpreter_spec(interpreter) else { return fail("**알 수 없는 실행 환경입니다.**".to_string(), "spawn", format!("알 수 없는 실행 환경: {interpreter}")) };
     if let Err(e) = std::fs::create_dir_all(scripts_dir) {
@@ -329,7 +353,7 @@ pub(crate) fn run_script_outcome(scripts_dir: &Path, file_stem: &str, interprete
     cmd.env("PYTHONIOENCODING", "utf-8").env("PYTHONUTF8", "1");
     let work_dir = lead.map(|l| PathBuf::from(&l.target_dir)).filter(|p| p.is_dir()).unwrap_or_else(std::env::temp_dir);
     cmd.current_dir(&work_dir);
-    for (name, value) in script_env(lead, format, allow_js) {
+    for (name, value) in script_env(lead, format, allow_js, request) {
         cmd.env(name, value);
     }
     #[cfg(windows)]
@@ -391,6 +415,13 @@ pub(crate) fn run_script_outcome(scripts_dir: &Path, file_stem: &str, interprete
     let limit = max_output_chars(format);
     let (text, cut) = truncate_chars(out.trim(), limit);
     let (err_text, _) = truncate_chars(err.trim(), 1500);
+    if raw {
+        // 화면이 부른 요청의 응답: 잘린 응답은 데이터가 깨져 있으므로 오류로 알리고, 빈 응답은 그대로 빈 글자로 돌려준다.
+        if cut {
+            return fail(too_big_message(), "overflow", format!("응답이 {limit}자를 넘어 중단했습니다 — 요청한 양을 줄이세요"));
+        }
+        return Outcome { output: text, format, stderr: err_text.clone(), problem: if err_text.is_empty() { None } else { Some(ScriptProblem { kind: "stderr", detail: err_text }) } };
+    }
     let hint = format!("출력이 길어서 {limit}자까지만 보여 줍니다");
     let output = if text.is_empty() {
         // 빈 출력 안내는 형식과 상관없이 읽을 수 있게 마크다운으로 둔다
@@ -481,7 +512,7 @@ fn lang_label(interpreter: &str) -> &'static str {
 
 fn format_rule(output_format: &str, allow_js: bool) -> &'static str {
     if output_format == "html" && allow_js {
-        "- 출력 형식은 **html**이고 JavaScript가 허용돼 있다(CTM_OUTPUT_FORMAT=html, CTM_ALLOW_JS=true). 표준 출력에 HTML 조각만 낸다(<html>·<head>·<body> 없이). 상호작용(정렬·접기·탭·필터 등)은 인라인 <script>로 만들고, 필요한 데이터는 스크립트가 모아 HTML에 미리 넣는다. 네트워크·외부 파일은 막혀 있다. 파일/링크를 열려면 앱 안내의 window.ctm.open/reveal/editor만 쓴다(상태를 바꾸는 동작은 없다). 색은 앱 안내의 CSS 변수를 쓴다.\n"
+        "- 출력 형식은 **html**이고 JavaScript가 허용돼 있다(CTM_OUTPUT_FORMAT=html, CTM_ALLOW_JS=true). 표준 출력에 HTML 조각만 낸다(<html>·<head>·<body> 없이). 상호작용(정렬·접기·탭·필터 등)은 인라인 <script>로 만들고, 필요한 데이터는 스크립트가 모아 HTML에 미리 넣는다. 네트워크·외부 파일은 막혀 있다. 파일/링크를 열려면 앱 안내의 window.ctm.open/reveal/editor만 쓴다(상태를 바꾸는 동작은 없다). 데이터가 크거나 느려서 한꺼번에 못 넣을 때는 화면이 window.ctm.call(요청)으로 이 스크립트를 다시 불러 필요한 것만 받을 수 있다(그때는 환경 변수 CTM_REQUEST가 채워진다 — 앱 안내 참고). 색은 앱 안내의 CSS 변수를 쓴다.\n"
     } else if output_format == "html" {
         "- 출력 형식은 **html**이다(CTM_OUTPUT_FORMAT=html, CTM_ALLOW_JS=false). 표준 출력에 HTML 조각만 낸다(<html>·<head>·<body>·<script> 없이). 그래프는 인라인 SVG나 CSS로 직접 그리고, 색은 앱 안내의 CSS 변수(var(--text), var(--accent) 등)를 쓴다. JavaScript·외부 파일은 동작하지 않는다.\n"
     } else {
@@ -563,7 +594,7 @@ mod tests {
 
     #[test]
     fn documented_variables_are_exactly_the_ones_passed_and_ai_prompt_carries_the_reference() {
-        let passed: Vec<&str> = script_env(None, "markdown", false).iter().map(|(n, _)| *n).collect();
+        let passed: Vec<&str> = script_env(None, "markdown", false, None).iter().map(|(n, _)| *n).collect();
         let documented: Vec<&str> = ENV_VAR_DOCS.iter().map(|d| d.name).collect();
         assert_eq!(passed, documented, "안내 표와 실제로 넘기는 환경 변수가 어긋났다");
         let reference = reference_markdown();
@@ -606,7 +637,7 @@ mod tests {
 
     #[test]
     fn allow_js_is_passed_only_for_html_and_documented_with_the_ctm_api() {
-        let get = |fmt: &str, js: bool| script_env(None, fmt, js).into_iter().find(|(n, _)| *n == "CTM_ALLOW_JS").unwrap().1;
+        let get = |fmt: &str, js: bool| script_env(None, fmt, js, None).into_iter().find(|(n, _)| *n == "CTM_ALLOW_JS").unwrap().1;
         assert_eq!((get("html", true).as_str(), get("html", false).as_str(), get("markdown", true).as_str()), ("true", "false", "false"));
         let r = reference_markdown();
         for must in ["window.ctm", "ctm.open", "ctm.reveal", "ctm.editor", "상태를 바꾸는 동작", "CTM_ALLOW_JS"] {
@@ -623,6 +654,33 @@ mod tests {
         assert_eq!(extract_code_block("설명\n```js\nconsole.log(1)\n```\n끝"), "console.log(1)");
         assert_eq!(extract_code_block("```\na\nb\n```"), "a\nb");
         assert_eq!(extract_code_block("console.log(2)"), "console.log(2)");
+    }
+
+    #[test]
+    fn call_mode_passes_the_request_returns_raw_output_and_reports_failures() {
+        let dir = scratch();
+        // 요청을 받아 그대로 되돌려 준다(JSON)
+        let echo = "const r = process.env.CTM_REQUEST; console.log(JSON.stringify({ got: r, parsed: JSON.parse(r) }))";
+        let ok = run_script_call(&dir, "call1", "node", echo, 8000, None, true, r#"{"op":"graph","limit":5,"rev":"feat/한글 x"}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&ok).unwrap();
+        assert_eq!(v["parsed"]["op"], "graph");
+        assert_eq!(v["parsed"]["rev"], "feat/한글 x", "특수문자·한글이 그대로 전달된다");
+        // 일반 실행에서는 CTM_REQUEST가 비어 있다
+        let page = run(&dir, "call2", "console.log(process.env.CTM_REQUEST === '' ? 'EMPTY' : 'SET:' + process.env.CTM_REQUEST)", 8000).output;
+        assert!(page.contains("EMPTY"), "{page}");
+        // 정상 종료 + 빈 출력은 오류가 아니라 빈 글자
+        assert_eq!(run_script_call(&dir, "call3", "node", "", 8000, None, true, "x").unwrap(), "");
+        // 표준 오류가 있어도 정상 종료면 출력을 돌려준다
+        assert_eq!(run_script_call(&dir, "call4", "node", "console.error('경고'); console.log('데이터')", 8000, None, true, "x").unwrap(), "데이터");
+        // 실패: 종료 코드, 시간 초과
+        let e = run_script_call(&dir, "call5", "node", "console.error('boom'); process.exit(3)", 8000, None, true, "x").unwrap_err();
+        assert!(e.contains("종료 코드 3") && e.contains("boom"), "{e}");
+        let e = run_script_call(&dir, "call6", "node", "setTimeout(() => console.log('late'), 20000)", 700, None, true, "x").unwrap_err();
+        assert!(e.contains("제한 시간"), "{e}");
+        // 응답이 한도를 넘으면 잘라서 주지 않고 오류로 알린다(잘린 JSON이 화면으로 가면 안 된다)
+        let e = run_script_call(&dir, "call7", "node", "console.log('x'.repeat(1100000))", 20000, None, true, "x").unwrap_err();
+        assert!(e.contains("넘어"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

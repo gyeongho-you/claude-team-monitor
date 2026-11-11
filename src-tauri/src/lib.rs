@@ -123,6 +123,8 @@ pub fn run() {
       side_panel::fix_panel_script_command,
       side_panel::set_scripts_enabled_command,
       side_panel::cancel_ai_command,
+      side_panel::call_panel_script_command,
+      side_panel::test_panel_script_call_command,
       side_panel::modify_panel_script_command,
       side_panel::get_panel_script_errors_command,
       env_check::check_environment_command,

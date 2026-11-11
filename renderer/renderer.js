@@ -969,8 +969,17 @@ const JS_FRAME_BRIDGE = String.raw`(function(){
     reveal:function(p){post({t:'reveal',path:String(p)});},
     editor:function(p,l){post({t:'editor',path:String(p),line:l==null?null:Number(l)});},
     getState:function(){return window.__ctmInit===undefined?null:window.__ctmInit;},
-    setState:function(s){post({t:'state',s:s});}
+    setState:function(s){post({t:'state',s:s});},
+    call:function(req){return new Promise(function(res,rej){
+      var s;try{s=typeof req==='string'?req:JSON.stringify(req);}catch(x){rej(new Error('요청을 글자로 바꿀 수 없습니다'));return;}
+      if(typeof s!=='string'){rej(new Error('요청을 글자로 바꿀 수 없습니다'));return;}
+      var id=++callSeq;pendingCalls[id]={res:res,rej:rej};
+      post({t:'call',id:id,req:s});
+      setTimeout(function(){if(pendingCalls[id]){delete pendingCalls[id];rej(new Error('응답 시간 초과'));}},180000);
+    });}
   };
+  var callSeq=0,pendingCalls={};
+  window.addEventListener('message',function(e){var d=e.data;if(!d||d.ctm!==1||d.t!=='result')return;var c=pendingCalls[d.id];if(!c)return;delete pendingCalls[d.id];if(d.ok)c.res(d.text);else c.rej(new Error(d.err||'요청 실패'));});
   document.addEventListener('click',function(e){var a=e.target&&e.target.closest?e.target.closest('a[href]'):null;if(!a)return;e.preventDefault();var u=a.getAttribute('href')||'';if(/^https?:\/\//i.test(u))post({t:'open-url',url:u});},true);
   var last=0;
   function size(){var h=Math.max(document.documentElement.scrollHeight,document.body?document.body.scrollHeight:0);if(h!==last){last=h;post({t:'size',h:h});}}
@@ -1037,6 +1046,7 @@ async function renderJsFrame(container, fragment, leadId, stateKey) {
   frame.dataset.js = '1';
   frame.dataset.leadId = leadId || '';
   frame.dataset.stateKey = fullKey;
+  frame.dataset.callKey = stateKey || '';
   frame.dataset.created = String(Date.now());
   jsFrameFragments.set(frame, fragment);
   frame.setAttribute('sandbox', 'allow-scripts'); // allow-same-origin을 주지 않는다 — 앱 화면과 다른 출처라 앱 화면·앱 기능에 닿지 못한다
@@ -1062,6 +1072,7 @@ window.addEventListener('message', async e => {
   if (!frame) return;
   frame.dataset.last = String(Date.now());
   if (d.t === 'hb') return;
+  if (d.t === 'call') { handleFrameCall(frame, d); return; }
   if (d.t === 'state') { // 요청 횟수 제한 대상이 아님(사용자가 누를 때만 보낸다) — 크기만 제한한다
     try {
       const s = JSON.parse(JSON.stringify(d.s));
@@ -1098,6 +1109,38 @@ ${url.length > 600 ? url.slice(0, 600) + '…(길어서 잘림)' : url}`)) await
   } catch (err) { report(errMsg(err)); }
 });
 let frameUrlConfirming = false;
+// ---- ctm.call: 그래픽이 자기 슬롯의 스크립트를 요청과 함께 다시 불러 결과를 받는 통로(앱은 요청의 뜻을 모른다) ----
+const FRAME_CALL_MAX_CHARS = 20000;
+const FRAME_CALL_WINDOW_MS = 10000;
+const FRAME_CALL_MAX_IN_WINDOW = 30;
+const frameCallLog = new WeakMap(); // frame -> { times: number[], inFlight: number }
+async function handleFrameCall(frame, d) {
+  const id = Number(d.id);
+  const reply = (ok, payload) => {
+    if (!document.contains(frame) || !frame.contentWindow) return; // 그 사이 프레임이 새로 그려졌다 — 이 응답은 버린다
+    try { frame.contentWindow.postMessage(Object.assign({ ctm: 1, t: 'result', id, ok }, payload), '*'); } catch { /* 프레임이 사라졌다 */ }
+  };
+  if (!Number.isFinite(id)) return;
+  const req = typeof d.req === 'string' ? d.req : '';
+  if (!req || req.length > FRAME_CALL_MAX_CHARS) { reply(false, { err: `요청이 비었거나 ${FRAME_CALL_MAX_CHARS}자를 넘습니다` }); return; }
+  const log = frameCallLog.get(frame) || { times: [], inFlight: 0 };
+  frameCallLog.set(frame, log);
+  const now = Date.now();
+  log.times = log.times.filter(x => now - x < FRAME_CALL_WINDOW_MS);
+  if (log.inFlight >= 1 || log.times.length >= FRAME_CALL_MAX_IN_WINDOW) { reply(false, { err: '요청이 너무 잦습니다 — 이전 요청이 끝난 뒤 다시 보내세요' }); return; }
+  log.times.push(now); log.inFlight++;
+  try {
+    const leadId = frame.dataset.leadId || null;
+    const key = frame.dataset.callKey || '';
+    let text;
+    if (key.startsWith('slot:')) text = await window.api.callPanelScript(key.slice(5), leadId, req);
+    else if (key === 'test') text = await window.api.testPanelScriptCall(psInterp.value, psScript.value, Number(psTimeout.value), leadId, req);
+    else throw new Error('이 프레임은 스크립트를 부를 수 없습니다');
+    reply(true, { text });
+  } catch (err) {
+    reply(false, { err: errMsg(err) });
+  } finally { log.inFlight--; }
+}
 function renderPanelBody(slot, c) {
   const auto = slot.mode === 'auto' && Array.isArray(c.items);
   spFilterEl.hidden = !auto;

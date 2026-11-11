@@ -204,6 +204,63 @@ async function main() {
     ok(hits.length === 0, `프레임이 바깥 주소로 요청을 보냈습니다: ${JSON.stringify(hits)}`);
   });
 
+  console.log('\n그래픽이 스크립트를 다시 부르기(ctm.call)');
+  await check('ctm.call: 요청이 CTM_REQUEST로 가고 출력이 돌아오며, 실패·큰 응답·동시 요청·허용 안 된 슬롯은 거절된다', async () => {
+    await app.eval('(async () => { const c = await window.api.getPanelConfig(); for (const sl of c.slots) await window.api.deletePanelSlot(sl.id); })()');
+    const callScript = [
+      "if (process.env.CTM_REQUEST) {",
+      "  const r = JSON.parse(process.env.CTM_REQUEST);",
+      "  if (r.op === 'fail') { console.error('boom'); process.exit(3); }",
+      "  if (r.op === 'big') { console.log('x'.repeat(1100000)); process.exit(0); }",
+      "  if (r.op === 'slow') { setTimeout(() => { console.log(JSON.stringify({ slow: true })); }, 1500); return; }",
+      "  console.log(JSON.stringify({ pong: r.x, han: r.han || null, page: false }));",
+      "  return;",
+      "}",
+      "console.log('<div id=\"out\">대기</div>');",
+      "console.log('<script>', \"window.__run = function (req) { return ctm.call(req).then(function (x) { return 'OK:' + x; }, function (e) { return 'ERR:' + e.message; }); };\", '<' + '/script>');",
+    ].join('\n');
+    const mk = (extra) => JSON.stringify(Object.assign({ name: 'callslot', mode: 'script', scope: 'all', preset: 'artifact-reports', instruction: '', autoUpdate: false, aiModel: 'sonnet', aiInclude: 'none', enabled: true, interpreter: 'node', script: callScript, timeoutMs: 8000, outputFormat: 'html', allowJs: true }, extra || {}));
+    const saved = JSON.parse(await app.eval(`window.api.savePanelSlot(${mk()}).then(c => JSON.stringify(c.slots.map(s => s.id)))`));
+    const slotId = saved[saved.length - 1];
+    // API 직통: 정상
+    const direct = await app.eval(`window.api.callPanelScript(${JSON.stringify(slotId)}, null, ${JSON.stringify(JSON.stringify({ op: 'x', x: 7, han: '한글 "따옴표"' }))}).then(x => x, e => 'ERR:' + e)`);
+    const dv = JSON.parse(direct);
+    ok(dv.pong === 7 && dv.han === '한글 "따옴표"' && dv.page === false, `요청이 스크립트에 그대로 전달되지 않았습니다: ${direct}`);
+    const failed = await app.eval(`window.api.callPanelScript(${JSON.stringify(slotId)}, null, ${JSON.stringify(JSON.stringify({ op: 'fail' }))}).then(x => 'OK:' + x, e => 'ERR:' + e)`);
+    ok(/^ERR:/.test(failed) && failed.includes('종료 코드 3') && failed.includes('boom'), `스크립트 실패가 오류로 오지 않았습니다: ${failed}`);
+    const big = await app.eval(`window.api.callPanelScript(${JSON.stringify(slotId)}, null, ${JSON.stringify(JSON.stringify({ op: 'big' }))}).then(x => 'OK:' + x.length, e => 'ERR:' + e)`);
+    ok(/^ERR:/.test(big) && big.includes('넘어'), `너무 큰 응답이 오류로 오지 않았습니다: ${big.slice(0, 120)}`);
+    const longReq = await app.eval(`window.api.callPanelScript(${JSON.stringify(slotId)}, null, 'x'.repeat(20001)).then(x => 'OK', e => 'ERR:' + e)`);
+    ok(/^ERR:/.test(longReq) && longReq.includes('너무 깁니다'), `긴 요청이 거절되지 않았습니다: ${longReq}`);
+    const nope = await app.eval(`window.api.callPanelScript('slot-없음', null, '{}').then(x => 'OK', e => 'ERR:' + e)`);
+    ok(/^ERR:/.test(nope), '없는 슬롯이 거절되지 않았습니다');
+    // 허용되지 않은 슬롯(JavaScript 허용 꺼짐)
+    const nojs = JSON.parse(await app.eval(`window.api.savePanelSlot(${mk({ name: 'nojs', allowJs: false })}).then(c => JSON.stringify(c.slots.map(s => s.id)))`));
+    const nojsId = nojs[nojs.length - 1];
+    const denied = await app.eval(`window.api.callPanelScript(${JSON.stringify(nojsId)}, null, '{}').then(x => 'OK', e => 'ERR:' + e)`);
+    ok(/^ERR:/.test(denied) && denied.includes('ctm.call을 쓸 수 없습니다'), `JS 허용이 꺼진 슬롯이 거절되지 않았습니다: ${denied}`);
+    // 화면 경로: 프레임 안에서 ctm.call
+    await app.eval(`document.querySelector('.tab-btn[data-tab="work"]').click(); 1`); await sleep(300); // 패널은 작업 탭에서만 보인다
+    await app.eval(`(async () => { await window.api.setPanelEnabled(true); panelConfig = await window.api.getPanelConfig(); panelActiveId = ${JSON.stringify(slotId)}; try { localStorage.setItem('ctm.panelCollapsed', '0'); } catch (e) {} renderPanelChrome(); await refreshPanelContent(true, true); return 1 })()`);
+    let fsx = null;
+    for (let i = 0; i < 40 && !fsx; i++) { await sleep(500); fsx = await app.frameSession('ctmframe'); }
+    ok(fsx, '패널 그래픽 프레임이 뜨지 않았습니다');
+    await sleep(800);
+    const r1 = await app.eval(`window.__run({op:'x',x:42})`, fsx);
+    ok(r1 === 'OK:' + JSON.stringify({ pong: 42, han: null, page: false }), `프레임 안 ctm.call 결과가 다릅니다: ${r1}`);
+    const r2 = await app.eval(`window.__run({op:'fail'})`, fsx);
+    ok(r2.startsWith('ERR:') && r2.includes('종료 코드 3'), `프레임 안에서 실패가 거부로 오지 않았습니다: ${r2}`);
+    // 동시에 둘: 하나는 처리, 하나는 '너무 잦습니다'
+    const both = JSON.parse(await app.eval(`Promise.all([window.__run({op:'slow'}), window.__run({op:'x',x:1})]).then(a => JSON.stringify(a))`, fsx));
+    ok(both.some(x => x.startsWith('OK:')) && both.some(x => x.startsWith('ERR:') && x.includes('잦습니다')), `동시 요청이 한 번에 하나만 처리되지 않았습니다: ${JSON.stringify(both)}`);
+    // 왕복 시간(작은 요청 5번)
+    const times = [];
+    for (let i = 0; i < 5; i++) { const t0 = Date.now(); await app.eval(`window.__run({op:'x',x:${i}})`, fsx); times.push(Date.now() - t0); }
+    console.log(`      · 요청 왕복(스크립트 실행 포함, 작은 요청 5번): ${times.join(', ')}ms`);
+    ok(Math.max(...times) < 5000, `요청이 너무 느립니다: ${times}`);
+    await app.eval('(async () => { const c = await window.api.getPanelConfig(); for (const sl of c.slots) await window.api.deletePanelSlot(sl.id); })()');
+  });
+
   console.log('\n진단·환경');
   await check('진단 정보에 버전과 환경 점검이 들어 있고 스크립트 본문은 없다', async () => {
     const text = await app.eval('window.api.getDiagnostics()');
