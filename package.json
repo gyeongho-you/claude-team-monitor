@@ -1,6 +1,6 @@
 {
   "name": "claude-team-monitor",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Claude Code 팀장/팀원 세션을 한 화면에서 모니터링·관리하는 데스크톱 앱(Tauri). src/main.ts의 Electron 구현은 참고용으로만 남겨 둔 것이다.",
   "private": true,
   "license": "MIT",
