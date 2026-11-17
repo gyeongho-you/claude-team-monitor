@@ -591,8 +591,10 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 .request-card .deny-btn { background: var(--danger-strong); }
 
 /* --- 정체 감시 알림(헤더 바로 아래, 전체 탭 공통 표시) --- */
-#stall-alerts-list { padding: 0 16px; }
-#stall-alerts-list:empty { padding: 0; }
+#stall-alerts-list, #request-alerts-list { padding: 0 16px; }
+#stall-alerts-list:empty, #request-alerts-list:empty { padding: 0; }
+.request-alert-card .stall-alert-actions { margin-top: 4px; }
+.request-alert-card .stall-alert-actions:empty { display: none; }
 .stall-alert-card {
   background: var(--surface);
   border: 1px solid var(--warning);

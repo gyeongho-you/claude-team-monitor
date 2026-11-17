@@ -276,6 +276,7 @@ const cancelAdoptBtn = document.getElementById('cancel-adopt-btn');
 
 const memberRowEl = document.getElementById('member-row');
 const requestsListEl = document.getElementById('requests-list');
+const requestAlertsListEl = document.getElementById('request-alerts-list');
 const stallAlertsListEl = document.getElementById('stall-alerts-list');
 const unapprovedDirListEl = document.getElementById('unapproved-dir-list');
 const lastUpdatedEl = document.getElementById('last-updated');
@@ -358,6 +359,10 @@ let lastLeadIds = new Set();
 // 같은 팀장에 여러 조작이 겹치면 세션이 갈라질 수 있어서(main.ts의 leadId 큐 참고), 진행 중엔 관련
 // 버튼을 비활성화해 사용자가 겹쳐서 누르는 걸 막는다.
 const busyLeadIds = new Set();
+// 승인/거부 처리 중인 요청 id와, 팀장별 처리 중인 건수 — busyLeadIds와 함께 쓴다(updateBusyUI 설명 참고).
+const decidingRequestIds = new Set();
+const decisionLeadCount = new Map();
+let lastRequests = []; // 서버가 준 대기 요청 전체(팀장 구분 없이) — 선택한 팀장 것만 아래 목록에 그린다
 // 서버 트랜스크립트에 아직 안 나타난(=응답이 안 끝난) 채팅 턴들 — leadId -> Array<{ id, message, kind }>.
 // kind는 'queued'(팀장이 busy라 main.ts가 큐에 쌓아뒀다가 idle/blocked 되면 자동 전달 — id는
 // main.ts PendingNotice.id라 취소 IPC에 쓰인다) 또는 'in-flight'(즉시 stop→resume으로 보내서 지금
@@ -487,8 +492,17 @@ function updateBusyUI() {
   restartLeadBtn.title = selectedBusy ? busyTitle : restartLeadBtnOriginalTitle;
   endWorkBtn.disabled = selectedBusy;
   endWorkBtn.title = selectedBusy ? busyTitle : endWorkBtnOriginalTitle;
+  // 승인/거부 버튼: 켜기도 한다(예전엔 잠그기만 해서, 같은 팀장의 다른 카드가 잠긴 채 남았다).
+  // - 방금 누른 요청 자신의 버튼은 처리가 끝날 때까지 잠근다(연타 방지).
+  // - 같은 팀장의 "다른" 요청 카드는, 잠근 이유가 승인/거부 처리뿐이면 잠그지 않는다 — 결정은 요청마다 따로 기록되고
+  //   팀장에게 알리는 재개는 백엔드가 팀장 하나씩 줄 세워 처리하므로, 연달아 눌러도 안전하다.
+  //   채팅 전송 같은 다른 작업이 그 팀장을 쓰는 중이면 그대로 잠근다.
   document.querySelectorAll('[data-team-lead]').forEach(btn => {
-    if (busyLeadIds.has(btn.dataset.teamLead)) btn.disabled = true;
+    const reqId = btn.dataset.approve || btn.dataset.deny;
+    const leadId = btn.dataset.teamLead;
+    const deciding = !!reqId && decidingRequestIds.has(reqId);
+    const lockedByOther = busyLeadIds.has(leadId) && !decisionLeadCount.has(leadId);
+    btn.disabled = deciding || lockedByOther;
   });
 }
 
@@ -2871,6 +2885,7 @@ async function selectLead(leadId) {
   renderMemberRow(); // 팀원 목록도 폴링 안 기다리고 바로 갱신 — lastRows 캐시 기준이라 즉시 가능
   updateLeadSectionVisibility();
   updateMemberSectionVisibility();
+  renderRequests(lastRequests); // 승인/종료 요청 카드는 선택한 팀장 것만 보인다 — 팀장을 바꾸면 바로 다시 그린다
   document.querySelectorAll('[data-lead]').forEach(el => {
     el.classList.toggle('selected', el.dataset.lead === leadId);
   });
@@ -4746,8 +4761,45 @@ addMemberSubmitBtn.addEventListener('click', async () => {
 
 // ---------------- 작업 탭: 승인 대기 ----------------
 
-function renderRequests(requests) {
-  if (!requests || requests.length === 0) {
+// 위쪽 알림: 승인/종료 요청을 기다리는 팀장을 팀장별로 한 줄씩 보여 준다(어느 탭에 있어도 보인다). 누르면 그 팀장으로 들어간다.
+// 요청 카드 자체는 그 팀장을 선택했을 때만 아래 "팀원 모니터링 및 관리"에 뜬다.
+function renderRequestAlerts() {
+  const byLead = new Map();
+  for (const req of lastRequests) {
+    const e = byLead.get(req.teamLeadId) || { approve: 0, stop: 0 };
+    if (req.type === 'stop-member') e.stop++; else e.approve++;
+    byLead.set(req.teamLeadId, e);
+  }
+  if (byLead.size === 0) { requestAlertsListEl.innerHTML = ''; return; }
+  requestAlertsListEl.innerHTML = [...byLead.entries()].map(([leadId, c]) => {
+    const known = lastRows.some(r => r.isLead && r.id === leadId);
+    const parts = [];
+    if (c.approve) parts.push(`팀원 승인 ${c.approve}건`);
+    if (c.stop) parts.push(`팀원 종료 ${c.stop}건`);
+    const title = known
+      ? `⏳ ${leadDisplayName(leadId)} 팀장이 ${parts.join(' · ')} 대기 중`
+      : `⏳ 팀장 ${leadId}(목록에 없음)의 ${parts.join(' · ')} 대기 중 — 아래에서 처리하세요`;
+    const action = known ? `<button class="stall-confirm-btn" data-open-requests="${escapeHtml(leadId)}">${escapeHtml(leadId === selectedLeadId ? '아래에서 보기' : '이 팀장 열기')}</button>` : '';
+    return `<div class="stall-alert-card request-alert-card"><div class="stall-alert-title">${escapeHtml(title)}</div><div class="stall-alert-actions">${action}</div></div>`;
+  }).join('');
+  requestAlertsListEl.querySelectorAll('[data-open-requests]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.openRequests;
+      const workTab = document.querySelector('.tab-btn[data-tab="work"]');
+      if (workTab) workTab.click();
+      if (id !== selectedLeadId) await selectLead(id);
+      renderRequests(lastRequests);
+      requestsListEl.scrollIntoView({ block: 'center' });
+    });
+  });
+}
+
+function renderRequests(allRequests) {
+  lastRequests = allRequests || [];
+  renderRequestAlerts();
+  // 선택한 팀장의 요청만 카드로 그린다. 단 어느 팀장 것인지 알 수 없는 요청(팀장이 목록에서 사라짐)은 처리할 길이 없어지지 않게 항상 보여 준다.
+  const requests = lastRequests.filter(req => req.teamLeadId === selectedLeadId || !lastRows.some(r => r.isLead && r.id === req.teamLeadId));
+  if (requests.length === 0) {
     requestsListEl.innerHTML = '';
     return;
   }
@@ -4781,8 +4833,12 @@ function renderRequests(requests) {
   async function handleDecision(btn, apiCall) {
     const card = btn.closest('.request-card');
     const leadId = btn.dataset.teamLead;
+    const reqId = btn.dataset.approve || btn.dataset.deny;
+    // 이 요청 카드만 잠근다(연타 방지). 같은 팀장의 다른 요청 카드는 계속 누를 수 있다(updateBusyUI 설명 참고).
     card.querySelectorAll('button').forEach(b => { b.disabled = true; });
-    if (leadId) { busyLeadIds.add(leadId); updateBusyUI(); }
+    if (reqId) decidingRequestIds.add(reqId);
+    if (leadId) { decisionLeadCount.set(leadId, (decisionLeadCount.get(leadId) || 0) + 1); busyLeadIds.add(leadId); }
+    updateBusyUI();
     try {
       const result = await apiCall();
       // approve-request/deny-request는 이제 { decided, delivered }를 돌려준다 — decided는 결정
@@ -4796,7 +4852,14 @@ function renderRequests(requests) {
     } catch (err) {
       card.insertAdjacentHTML('beforeend', `<div style="color:#f14c4c">처리 중 오류가 발생했습니다: ${escapeHtml(errMsg(err))}</div>`);
     } finally {
-      if (leadId) { busyLeadIds.delete(leadId); updateBusyUI(); }
+      if (reqId) decidingRequestIds.delete(reqId);
+      if (leadId) {
+        // 같은 팀장의 다른 요청이 아직 처리 중이면 그 팀장의 잠금(채팅 전송 등)은 그 요청이 끝날 때까지 유지한다.
+        const left = (decisionLeadCount.get(leadId) || 1) - 1;
+        if (left > 0) decisionLeadCount.set(leadId, left);
+        else { decisionLeadCount.delete(leadId); busyLeadIds.delete(leadId); }
+      }
+      updateBusyUI();
       await refreshBoardNow();
     }
   }

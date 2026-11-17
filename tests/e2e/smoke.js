@@ -261,6 +261,47 @@ async function main() {
     await app.eval('(async () => { const c = await window.api.getPanelConfig(); for (const sl of c.slots) await window.api.deletePanelSlot(sl.id); })()');
   });
 
+  console.log('\n승인 요청 표시');
+  await check('승인 요청은 위쪽에 팀장별 알림으로 뜨고, 카드는 선택한 팀장 것만 보이며, 하나를 처리해도 같은 팀장의 다른 카드가 잠기지 않는다', async () => {
+    // 백엔드 없이 화면 로직만 확인한다 — 승인/새로고침 API를 가짜로 바꿔 끼우고(끝나면 되돌린다) 상태를 직접 넣는다.
+    const r = JSON.parse(await app.eval(`(async () => {
+      const out = {};
+      const origApprove = window.api.approveRequest, origRefresh = window.api.refreshBoard;
+      const savedRows = lastRows, savedSel = selectedLeadId;
+      const req = (id, lead) => ({ id, type: 'dir-approval', requestedDir: 'C:/x/' + id, reason: '시험', teamLeadId: lead, createdAt: Date.now() });
+      const all = [req('r1', 'L1'), req('r2', 'L1'), req('r3', 'L2')];
+      lastRows = [{ id: 'L1', isLead: true, label: '가팀장' }, { id: 'L2', isLead: true, label: '나팀장' }];
+      selectedLeadId = 'L1';
+      try {
+        renderRequests(all);
+        const alerts = [...document.querySelectorAll('#request-alerts-list .request-alert-card .stall-alert-title')].map(e => e.textContent);
+        out.alerts = alerts;
+        out.cardsForL1 = [...document.querySelectorAll('#requests-list .request-card')].length;
+        selectedLeadId = 'L2'; renderRequests(all);
+        out.cardsForL2 = [...document.querySelectorAll('#requests-list .request-card')].length;
+        selectedLeadId = 'L1'; renderRequests(all);
+        let release; window.api.approveRequest = () => new Promise(res => { release = res; });
+        window.api.refreshBoard = async () => { throw new Error('시험: 화면 갱신은 건너뜀'); };
+        const dis = id => [...document.querySelectorAll('#requests-list [data-team-lead]')].filter(b => (b.dataset.approve || b.dataset.deny) === id).map(b => b.disabled);
+        document.querySelector('#requests-list [data-approve="r1"]').click();
+        out.duringR1 = dis('r1'); out.duringR2 = dis('r2');
+        release({ decided: true, delivered: true });
+        await new Promise(res => setTimeout(res, 100));
+        out.busyAfter = busyLeadIds.size + decidingRequestIds.size + decisionLeadCount.size;
+        out.afterR2 = dis('r2');
+      } finally {
+        window.api.approveRequest = origApprove; window.api.refreshBoard = origRefresh;
+        lastRows = savedRows; selectedLeadId = savedSel; renderRequests([]);
+      }
+      return JSON.stringify(out);
+    })()`));
+    ok(r.alerts.length === 2 && r.alerts[0].includes('가팀장') && r.alerts[0].includes('2건') && r.alerts[1].includes('나팀장'), `위쪽 알림: ${JSON.stringify(r.alerts)}`);
+    ok(r.cardsForL1 === 2 && r.cardsForL2 === 1, `선택한 팀장 것만 보여야 합니다: ${r.cardsForL1}/${r.cardsForL2}`);
+    ok(r.duringR1.every(x => x === true), `처리 중인 카드는 잠겨야 합니다: ${r.duringR1}`);
+    ok(r.duringR2.every(x => x === false), `같은 팀장의 다른 카드는 잠기면 안 됩니다: ${r.duringR2}`);
+    ok(r.busyAfter === 0 && r.afterR2.every(x => x === false), `처리가 끝나면 잠금이 남지 않아야 합니다: ${JSON.stringify(r)}`);
+  });
+
   console.log('\n진단·환경');
   await check('진단 정보에 버전과 환경 점검이 들어 있고 스크립트 본문은 없다', async () => {
     const text = await app.eval('window.api.getDiagnostics()');
