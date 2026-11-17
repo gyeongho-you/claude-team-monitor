@@ -57,7 +57,7 @@ pub(crate) struct EnvVarDoc {
     pub when_empty: &'static str,
 }
 
-pub(crate) const ENV_VAR_DOCS: [EnvVarDoc; 12] = [
+pub(crate) const ENV_VAR_DOCS: [EnvVarDoc; 13] = [
     EnvVarDoc { name: "CTM_OUTPUT_FORMAT", what: "이 슬롯이 기대하는 출력 형식: `markdown` 또는 `html`. 아래 '출력 형식'을 보고 그 형식으로 낸다", when_empty: "항상 채워진다" },
     EnvVarDoc { name: "CTM_ALLOW_JS", what: "이 슬롯이 `html` 출력에서 JavaScript 실행을 허용했는지: `true` 또는 `false`. `true`일 때만 출력 HTML 안의 `<script>`가 돈다(아래 '출력 형식'의 JavaScript 허용 부분)", when_empty: "항상 채워진다" },
     EnvVarDoc { name: "CTM_LEAD_ID", what: "선택한 팀장의 앱 내부 id (예: `ed09bf70`)", when_empty: "팀장을 고르지 않았을 때" },
@@ -66,6 +66,7 @@ pub(crate) const ENV_VAR_DOCS: [EnvVarDoc; 12] = [
     EnvVarDoc { name: "CTM_LEAD_DIR", what: "선택한 팀장의 작업 폴더 절대 경로. 스크립트의 현재 작업 디렉터리(cwd)이기도 하다", when_empty: "팀장을 고르지 않았을 때(이때 cwd는 임시 폴더)" },
     EnvVarDoc { name: "CTM_SESSION_ID", what: "선택한 팀장의 claude 세션 id (UUID)", when_empty: "팀장을 고르지 않았을 때" },
     EnvVarDoc { name: "CTM_SESSION_FILE", what: "선택한 팀장의 대화 기록 파일 경로(JSONL: 한 줄이 JSON 하나. 사용자·답변·도구 호출·도구 결과가 시간순으로 들어 있고 각 줄에 `timestamp`가 있다). 팀장이 한 일을 직접 분석할 때 읽는다", when_empty: "팀장을 고르지 않았을 때(파일이 아직 없으면 경로만 있고 파일은 없을 수 있다)" },
+    EnvVarDoc { name: "CTM_PREVIOUS_SESSION_FILES", what: "같은 팀장이 \"새 작업 시작(맥락 초기화)\"이나 재개 전에 쓰던 **이전 세션들**의 대화 기록 파일 경로를 줄바꿈으로 이은 글(최신 것부터, 현재 세션 파일은 빼고, 앱이 기억하는 만큼만 — 최대 30개). 초기화 전 일까지 분석하려면 `CTM_SESSION_FILE`과 함께 읽는다. 파일이 이미 지워졌을 수 있다", when_empty: "팀장을 고르지 않았거나 이전 세션이 없을 때" },
     EnvVarDoc { name: "CTM_LEADS_FILE", what: "이 앱에 등록된 **모든** 팀장 목록 파일 경로(JSON 배열). 항목: `id`, `label`(선택), `aiTitle`(선택), `targetDir`, `sessionId`, `launchedAt`(시작 시각, epoch ms), `internalId`, `approvedMembers`(허용한 팀원 폴더 배열). 종료된(히스토리) 팀장도 들어 있다. 읽기 전용으로만 쓸 것(고치면 앱이 망가진다)", when_empty: "항상 채워진다(팀장 선택과 무관)" },
     EnvVarDoc { name: "CTM_CLAUDE_HOME", what: "claude 홈 폴더 절대 경로(보통 사용자 홈의 `.claude`). 아래에 `projects/`(대화 기록), `jobs/`(백그라운드 세션 상태) 등이 있다", when_empty: "항상 채워진다" },
     EnvVarDoc { name: "CTM_APP_VERSION", what: "이 앱의 버전 문자열 (예: `0.1.1`)", when_empty: "항상 채워진다" },
@@ -74,7 +75,7 @@ pub(crate) const ENV_VAR_DOCS: [EnvVarDoc; 12] = [
 
 /// 스크립트에 넘길 환경 변수 전부(팀장이 없으면 팀장 관련 값은 빈 문자열). 이름은 ENV_VAR_DOCS와 같아야 한다.
 pub(crate) fn script_env(lead: Option<&LeadRecord>, output_format: &str, allow_js: bool, request: Option<&str>) -> Vec<(&'static str, String)> {
-    let (id, label, title, dir, session_id, session_file) = match lead {
+    let (id, label, title, dir, session_id, session_file, previous_files) = match lead {
         Some(l) => (
             l.id.clone(),
             l.label.clone().unwrap_or_default(),
@@ -82,6 +83,8 @@ pub(crate) fn script_env(lead: Option<&LeadRecord>, output_format: &str, allow_j
             l.target_dir.clone(),
             l.session_id.clone(),
             crate::transcript::session_file_path(&l.target_dir, &l.session_id).to_string_lossy().to_string(),
+            // all_session_ids는 현재 세션이 맨 앞 — 그 뒤(이전 세션들)만 줄바꿈으로 잇는다
+            crate::session_history::all_session_ids(l).iter().skip(1).map(|sid| crate::transcript::session_file_path(&l.target_dir, sid).to_string_lossy().to_string()).collect::<Vec<_>>().join("\n"),
         ),
         None => Default::default(),
     };
@@ -94,6 +97,7 @@ pub(crate) fn script_env(lead: Option<&LeadRecord>, output_format: &str, allow_j
         ("CTM_LEAD_DIR", dir),
         ("CTM_SESSION_ID", session_id),
         ("CTM_SESSION_FILE", session_file),
+        ("CTM_PREVIOUS_SESSION_FILES", previous_files),
         ("CTM_LEADS_FILE", crate::paths::leads_path().to_string_lossy().to_string()),
         ("CTM_CLAUDE_HOME", crate::paths::claude_home().to_string_lossy().to_string()),
         ("CTM_APP_VERSION", env!("CARGO_PKG_VERSION").to_string()),

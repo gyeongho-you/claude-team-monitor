@@ -573,11 +573,43 @@ fn lead_label(l: &LeadRecord) -> String {
     l.label.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| Path::new(&l.target_dir).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| l.id.clone()))
 }
 
+/// 같은 링크가 여러 세션 기록에 나올 때(예: resume이 대화를 이어 붙인 경우) 한 줄로 합친다 — process_line과 같은 규칙(버전은 큰 쪽, 제목은 그 버전의 것, 시각은 최신).
+fn merge_raw_item(into: &mut HashMap<String, RawItem>, url: String, raw: RawItem) {
+    match into.get_mut(&url) {
+        None => {
+            into.insert(url, raw);
+        }
+        Some(e) => {
+            if raw.version >= e.version {
+                e.version = raw.version;
+                e.title = raw.title;
+            }
+            if raw.ts > e.ts {
+                e.ts = raw.ts;
+            }
+        }
+    }
+}
+
+/// 팀장 하나가 훑을 대화 기록 파일들 — 현재 세션뿐 아니라 맥락 초기화·resume 전의 이전 세션 것도(그래야 초기화해도 모은 링크가 안 사라진다).
+fn session_files_of(l: &LeadRecord) -> Vec<PathBuf> {
+    crate::session_history::all_session_ids(l).iter().map(|sid| crate::transcript::session_file_path(&l.target_dir, sid)).collect()
+}
+
 fn collect_items(preset: &str, leads: &[LeadRecord], selected: Option<&str>) -> Vec<CollectedItem> {
+    collect_items_with(preset, leads, selected, &session_files_of)
+}
+
+fn collect_items_with(preset: &str, leads: &[LeadRecord], selected: Option<&str>, files_of: &dyn Fn(&LeadRecord) -> Vec<PathBuf>) -> Vec<CollectedItem> {
     let mut out: Vec<CollectedItem> = Vec::new();
     for l in leads.iter().filter(|l| selected.map_or(true, |s| l.id == s)) {
-        let file = crate::transcript::session_file_path(&l.target_dir, &l.session_id);
-        for (url, raw) in scan_file(preset, &file) {
+        let mut merged: HashMap<String, RawItem> = HashMap::new();
+        for file in files_of(l) {
+            for (url, raw) in scan_file(preset, &file) {
+                merge_raw_item(&mut merged, url, raw);
+            }
+        }
+        for (url, raw) in merged {
             out.push(CollectedItem { lead_id: l.id.clone(), url, title: raw.title, version: raw.version, ts: raw.ts, lead_label: lead_label(l) });
         }
     }
@@ -1452,6 +1484,34 @@ mod tests {
         c.write_all(&second.as_bytes()[30..]).unwrap();
         c.write_all(b"\n").unwrap();
         assert_eq!(scan_file("artifact-reports", &f).len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn links_from_sessions_before_a_context_reset_are_still_collected_and_merged_across_sessions() {
+        let dir = std::env::temp_dir().join(format!("ctm_panel_prev_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (old_f, new_f) = (dir.join("old.jsonl"), dir.join("new.jsonl"));
+        std::fs::write(&old_f, [
+            tool_result_line("2026-11-01T01:00:00Z", "Published /a/before.html at https://claude.ai/artifact/BEFORE (Version 1)"),
+            tool_result_line("2026-11-01T02:00:00Z", "Published /a/shared.html at https://claude.ai/artifact/SHARED (Version 1)"),
+        ].join("\n") + "\n").unwrap();
+        std::fs::write(&new_f, [
+            tool_result_line("2026-11-05T01:00:00Z", "Published /a/after.html at https://claude.ai/artifact/AFTER (Version 1)"),
+            tool_result_line("2026-11-05T02:00:00Z", "Published /a/shared-renamed.html at https://claude.ai/artifact/SHARED (Version 2)"),
+        ].join("\n") + "\n").unwrap();
+        let leads = vec![lead("L1", Some("i1"))];
+        // 이전 세션을 안 보면(예전 동작) 초기화 전 링크가 사라진다
+        let only_current = collect_items_with("artifact-reports", &leads, None, &|_| vec![new_f.clone()]);
+        assert_eq!(only_current.len(), 2);
+        // 현재 + 이전 세션을 함께 보면 다 남고, 두 세션에 걸친 같은 링크는 한 줄(큰 버전·최신 시각)로 합쳐진다
+        let both = collect_items_with("artifact-reports", &leads, None, &|_| vec![new_f.clone(), old_f.clone()]);
+        assert_eq!(both.len(), 3, "{both:?}");
+        let shared = both.iter().find(|i| i.url.ends_with("/SHARED")).unwrap();
+        assert_eq!((shared.title.as_str(), shared.version, shared.ts.as_str()), ("shared-renamed", 2, "2026-11-05T02:00:00Z"));
+        assert!(both.iter().any(|i| i.url.ends_with("/BEFORE")));
+        // 정렬은 최신순 — 가장 최근 것이 맨 앞
+        assert_eq!(both[0].ts, "2026-11-05T02:00:00Z");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

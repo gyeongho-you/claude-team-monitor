@@ -161,6 +161,11 @@ pub fn pending_notices_path() -> PathBuf {
     app_data_dir().join("pendingNotices.json")
 }
 
+// 팀장(internalId)별로 "예전에 쓰던 sessionId" 목록 — 맥락 초기화·resume으로 sessionId가 바뀌어도 자동 수집이 이전 세션 기록을 보게 한다(session_history.rs).
+pub fn session_history_path() -> PathBuf {
+    app_data_dir().join("sessionHistory.json")
+}
+
 // main.ts의 APP_LOG_PATH — logCritical(logging.rs)이 원인을 알 수 없이 겪는 실패의 핵심 실패
 // 지점만 콘솔과 별개로 남기는 곳.
 pub fn app_log_path() -> PathBuf {

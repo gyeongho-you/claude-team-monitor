@@ -28,6 +28,7 @@ mod notice_queue;
 mod path_fix;
 mod paths;
 mod resume;
+mod session_history;
 mod session_model;
 mod session_registry;
 mod env_check;

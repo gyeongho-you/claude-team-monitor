@@ -365,11 +365,13 @@ pub async fn restart_lead(internal_id: String, instruction: String) -> RestartLe
     let new_id_for_lock = new_id.clone();
     let new_session_id_for_lock = new_session_id.clone();
     let approved_members_for_lock = approved_members.clone();
-    let old_id = with_leads_lock(move |leads| {
+    let internal_id_for_history = internal_id.clone();
+    let replaced = with_leads_lock(move |leads| {
         let Some(rec) = leads.iter_mut().find(|l| l.internal_id.as_deref() == Some(internal_id.as_str())) else {
             return (false, None);
         };
         let old_id = rec.id.clone();
+        let old_session_id = rec.session_id.clone();
         rec.id = new_id_for_lock;
         rec.session_id = new_session_id_for_lock;
         rec.launched_at = now_ms();
@@ -384,9 +386,14 @@ pub async fn restart_lead(internal_id: String, instruction: String) -> RestartLe
         // 재시작은 완전히 새 세션(새 sessionId)이라 예전 대화 주제가 더 이상 안 맞는다 — 안 지우면
         // 히스토리 탭에 재시작 이전 대화의 주제가 그대로 남아 보인다.
         rec.ai_title = None;
-        (true, Some(old_id))
+        (true, Some((old_id, old_session_id)))
     })
     .await;
+    // 새 세션이 sessionId를 덮어썼으니, 예전 세션의 대화 기록을 자동 수집(보고서·PR 링크)·스크립트 패널이 계속 볼 수 있게 이전 id를 기억해 둔다.
+    if let Some((_, old_session_id)) = &replaced {
+        crate::session_history::remember_replaced_session(&internal_id_for_history, old_session_id, &new_session_id);
+    }
+    let old_id = replaced.map(|(id, _)| id);
 
     // F-1: restartLead가 짧은 id를 항상 새로 발급하면서도 MemberRecord.leadId는 안 건드려서
     // (실측 확인) 그 팀장 소속 팀원들이 재시작 직후부터 전부 leadId 불일치를 겪었다 — endLeadWork가

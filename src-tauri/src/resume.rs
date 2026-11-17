@@ -731,6 +731,13 @@ pub async fn resume_lead(internal_id: String, message: String) -> Option<String>
     // 반영됐을 때만 last_known_live_lead_row 캐시도 새 id로 옮긴다.
     if updated {
         migrate_last_known_live_lead_row(&current.id, &new_id);
+        // sessionId가 실제로 새 값으로 바뀌었으면(apply_resume_session_update가 받아들인 경우만 — 짧은 id가 같은데 sessionId만 다른 조합은 거부된다)
+        // 예전 세션의 대화 기록을 자동 수집이 계속 볼 수 있게 이전 id를 기억해 둔다.
+        if let Some(sid) = new_session_id.as_deref() {
+            if sid != current.session_id && new_id != current.id {
+                crate::session_history::remember_replaced_session(&internal_id, &current.session_id, sid);
+            }
+        }
     }
     Some(new_id)
 }
