@@ -2936,9 +2936,16 @@ function summarizeAutoInjectedPrompt(prompt) {
 // (.chat-prompt-auto)로, 사용자가 직접 친 것이면 기존과 동일하게 "▸ "로 보여준다.
 function renderPromptLineHtml(prompt) {
   if (isAutoInjectedPrompt(prompt)) {
-    return `<div class="chat-prompt chat-prompt-auto">🔔 ${escapeHtml(summarizeAutoInjectedPrompt(prompt))}</div>`;
+    return promptLineHtml('🔔', summarizeAutoInjectedPrompt(prompt), 'chat-prompt-auto');
   }
-  return `<div class="chat-prompt">▸ ${escapeHtml(cleanPrompt(prompt))}</div>`;
+  return promptLineHtml('▸', cleanPrompt(prompt));
+}
+
+// 내가 보낸 말(▸)·자동 알림(🔔) 줄 — 표시(▸)는 첫 줄에만 붙고, 줄바꿈이 있거나 길어서 접힌 아랫줄은 표시가 없지만 첫 줄 글자가 시작하는 곳에 맞춘다.
+// 표시와 글자를 따로 두고 나란히(flex) 놓아서, 표시 글자의 너비가 폰트마다 달라도 아랫줄이 항상 첫 줄 글자와 같은 칸에서 시작한다.
+function promptLineHtml(mark, text, extraClass) {
+  const cls = extraClass ? 'chat-prompt ' + extraClass : 'chat-prompt';
+  return `<div class="${escapeHtml(cls)}"><span class="chat-prompt-mark">${escapeHtml(mark)}</span><span class="chat-prompt-text">${escapeHtml(text)}</span></div>`;
 }
 
 // 팀장이 팀원 보고를 요약해서 최종 답변에 적어줘도 "그래서 뭐가 바뀌었는데?"는 여전히 안 보인다 —
@@ -3200,13 +3207,13 @@ function renderQueuedTurnsHtml(leadId) {
     // pendingChatTurns에 남겨서 사용자가 직접 재시도/삭제할 때까지 유지하고, 사유는 그 아래에 빨간 글씨로 보여준다.
     if (item.kind === 'failed') {
       const failedBtns = ` <button class="cancel-queued-btn" data-retry-stuck="${escapeHtml(item.id)}" data-retry-lead="${escapeHtml(leadId)}">재시도</button> <button class="cancel-queued-btn" data-delete-stuck="${escapeHtml(item.id)}" data-delete-lead="${escapeHtml(leadId)}">삭제</button>`;
-      return `<div class="chat-turn"><div class="chat-prompt">▸ ${escapeHtml(item.message)}</div><div class="chat-answer chat-pending chat-pending-exhausted">전달되지 않았습니다.${failedBtns}</div><div class="chat-send-error">${escapeHtml(item.failedReason || '전송에 실패했습니다.')}</div></div>`;
+      return `<div class="chat-turn">${promptLineHtml('▸', item.message)}<div class="chat-answer chat-pending chat-pending-exhausted">전달되지 않았습니다.${failedBtns}</div><div class="chat-send-error">${escapeHtml(item.failedReason || '전송에 실패했습니다.')}</div></div>`;
     }
     const answerClass = item.exhausted ? 'chat-answer chat-pending chat-pending-exhausted' : 'chat-answer chat-pending';
     const actionBtnHtml = item.kind === 'queued'
       ? ` <button class="cancel-queued-btn" data-cancel-queued="${escapeHtml(item.id)}" data-cancel-lead="${escapeHtml(leadId)}">취소</button>`
       : (isStuck ? ` <button class="cancel-queued-btn" data-retry-stuck="${escapeHtml(item.id)}" data-retry-lead="${escapeHtml(leadId)}">재시도</button> <button class="cancel-queued-btn" data-delete-stuck="${escapeHtml(item.id)}" data-delete-lead="${escapeHtml(leadId)}">삭제</button>` : '');
-    return `<div class="chat-turn"><div class="chat-prompt">▸ ${escapeHtml(item.message)}</div><div class="${answerClass}">${statusText}${actionBtnHtml}</div></div>`;
+    return `<div class="chat-turn">${promptLineHtml('▸', item.message)}<div class="${answerClass}">${statusText}${actionBtnHtml}</div></div>`;
   }).join('');
 }
 

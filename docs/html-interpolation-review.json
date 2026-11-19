@@ -14,6 +14,10 @@
       "basis": "격리 프레임 문서 조립. 앱이 Math.floor로 계산한 정수(패널에서 보이는 높이 px)라 글자가 섞일 수 없다."
     },
     {
+      "expr": "promptLineHtml('▸', item.message)",
+      "basis": "promptLineHtml이 만든 조각 — 표시와 글자 둘 다 그 안에서 escapeHtml을 거친다(만드는 곳에서 이스케이프 확인)"
+    },
+    {
       "expr": "action",
       "basis": "승인 대기 알림 카드(renderRequestAlerts)의 버튼 조각. 안의 팀장 id는 escapeHtml로 감쌌고 나머지는 고정 문구(만드는 곳에서 이스케이프 확인)"
     },

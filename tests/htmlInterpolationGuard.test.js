@@ -46,7 +46,8 @@ test('외부 값이 들어오는 대표 자리는 escapeHtml을 거친다(회귀
   const src = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'renderer.js'), 'utf8');
   for (const needle of [
     'data-lead="${escapeHtml(row.id)}"',
-    '<div class="chat-prompt">▸ ${escapeHtml(item.message)}</div>',
+    '<span class="chat-prompt-text">${escapeHtml(text)}</span>',
+    "${promptLineHtml('▸', item.message)}",
     '<div class="diff-path">${escapeHtml(file)}</div>',
     'activity-${escapeHtml(it.kind)}',
     'src="${escapeHtml(attachmentThumbs.get(p))}"',

@@ -453,7 +453,10 @@ mark.find-match-current { background: var(--accent-2); color: #fff; }
 #emergency-stop-yes-btn { background: var(--danger-strong); color: #fff; }
 .chat-turn { margin-bottom: 10px; }
 .chat-turn .chat-time { color: var(--text-dim); font-size: 10px; }
-.chat-turn .chat-prompt { color: var(--accent-3); margin: 2px 0; white-space: pre-wrap; }
+/* 표시(▸·🔔)와 글자를 나란히 놓는다 — 표시는 첫 줄에만 있고, 줄바꿈·접힌 아랫줄은 첫 줄 글자가 시작하는 칸에 맞춰진다. */
+.chat-turn .chat-prompt { color: var(--accent-3); margin: 2px 0; display: flex; align-items: flex-start; gap: 0.5em; }
+.chat-turn .chat-prompt .chat-prompt-mark { flex: none; }
+.chat-turn .chat-prompt .chat-prompt-text { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 /* 사용자가 직접 친 메시지가 아니라 하네스/앱이 자동으로 주입한 알림(task-notification, [알림] 등) —
    사용자 메시지와 헷갈리지 않도록 톤을 낮추고 기울임으로 구분한다. */
 .chat-turn .chat-prompt.chat-prompt-auto { color: var(--text-dim); font-style: italic; }
