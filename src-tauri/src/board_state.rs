@@ -27,6 +27,9 @@ pub struct BoardState {
     pub member_idle_since: HashMap<String, i64>, // 팀원 sessionId -> idle/done으로 바뀐 시각
     pub lead_idle_since: HashMap<String, i64>,   // 팀장 sessionId -> idle/done으로 바뀐 시각
     pub stall_last_checked_at: HashMap<String, i64>, // 팀원 sessionId -> 마지막으로 실제 Haiku를 호출한 시각
+    /// 팀원 sessionId -> Haiku가 이미 판단을 내린 "상황"의 지문(팀장 최근 대화 + 팀원 상태 + 팀원이 쉬기 시작한 시각, stall_watchdog::stall_judgement_key).
+    /// 같은 상황이면 쿨다운이 지나도 다시 묻지 않는다 — 안 그러면 끝난 팀원이 살아 있는 동안 13분마다 같은 질문을 되풀이하고, 판단이 가끔 뒤집혀 오알림이 뜬다.
+    pub stall_judged: HashMap<String, u64>,
 
     // 아래 두 개는 서브청크 α에서 저장소만 마련해뒀던 것 — 실제로 채우고 읽는 로직은 δ 범위라
     // 아직 여기서는 저장소만 준비한다. §3-4(폴링 루프를 단일 소유자로) 원칙은 "폴링 태스크만
@@ -66,6 +69,7 @@ impl BoardState {
             member_idle_since: HashMap::new(),
             lead_idle_since: HashMap::new(),
             stall_last_checked_at: HashMap::new(),
+            stall_judged: HashMap::new(),
             resume_retry_status: HashMap::new(),
             attach_terminal_pids: HashMap::new(),
             member_first_miss_at: HashMap::new(),

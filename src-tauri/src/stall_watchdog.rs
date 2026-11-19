@@ -136,6 +136,17 @@ pub fn should_send_nudge(verdict: Option<&StallVerdict>, last_answer_text: &str)
     v.should_nudge
 }
 
+/// "Haiku가 이미 판단한 상황"의 지문 — 팀장의 최근 대화(분류기에 넣는 글), 팀원 상태, 팀원이 쉬기 시작한 시각이 모두 같으면 같은 값.
+/// 프로세스 안에서만 쓰는 값이라(저장하지 않음) 해시 알고리즘이 실행마다 달라도 상관없다.
+pub(crate) fn stall_judgement_key(tail_text: &str, member_status: &str, member_idle_since: i64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    tail_text.hash(&mut h);
+    member_status.hash(&mut h);
+    member_idle_since.hash(&mut h);
+    h.finish()
+}
+
 /// buildStallClassifierPrompt(main.ts)와 동일.
 pub fn build_stall_classifier_prompt(tail_text: &str, member_desc: &str) -> String {
     let tail = if tail_text.is_empty() { "(대화 기록 없음)" } else { tail_text };
@@ -455,6 +466,7 @@ fn run_stall_watchdog(live_rows: &[SessionRow], leads: &[LeadRecord], members: &
         }
         prune_missing_keys(&mut guard.member_idle_since, &live_member_session_ids);
         prune_missing_keys(&mut guard.stall_last_checked_at, &live_member_session_ids);
+        prune_missing_keys(&mut guard.stall_judged, &live_member_session_ids);
 
         let live_lead_session_ids: HashSet<String> = lead_rows_by_id.values().map(|r| r.agent.session_id.clone()).collect();
         for row in lead_rows_by_id.values() {
@@ -519,12 +531,6 @@ fn run_stall_watchdog(live_rows: &[SessionRow], leads: &[LeadRecord], members: &
             continue;
         }
 
-        // 여기서부터는 실제로 Haiku를 호출한다 — 지금 마크해서 실패해도 쿨다운 동안 재시도 안 함.
-        {
-            let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
-            guard.stall_last_checked_at.insert(member_row.agent.session_id.clone(), now_ms());
-        }
-
         let joined = last_entries.iter().map(|e| format!("사용자: {}\n팀장: {}", e.prompt, e.answer)).collect::<Vec<_>>().join("\n\n");
         let tail_text: String = {
             let chars: Vec<char> = joined.chars().collect();
@@ -538,6 +544,23 @@ fn run_stall_watchdog(live_rows: &[SessionRow], leads: &[LeadRecord], members: &
             let guard = state().lock().unwrap_or_else(|e| e.into_inner());
             guard.member_idle_since.get(&member_row.agent.session_id).copied().unwrap_or_else(now_ms)
         };
+
+        // 같은 상황(팀장 최근 대화·팀원 상태·팀원이 쉬기 시작한 시각이 그대로)을 Haiku가 이미 판단했으면 쿨다운이 지나도 다시 묻지 않는다 —
+        // 끝난 팀원이 살아 있는 동안 13분마다 같은 질문을 되풀이하고 판단이 뒤집혀 오알림이 뜨는 것을 막는다. 팀장이 새로 말하거나 팀원이 다시 일하고 쉬면 상황이 달라져 다시 판단한다.
+        let situation = stall_judgement_key(&tail_text, &get_status_row(member_row), idle_since);
+        {
+            let guard = state().lock().unwrap_or_else(|e| e.into_inner());
+            if guard.stall_judged.get(&member_row.agent.session_id) == Some(&situation) {
+                continue;
+            }
+        }
+
+        // 여기서부터는 실제로 Haiku를 호출한다 — 지금 마크해서 실패해도 쿨다운 동안 재시도 안 함.
+        {
+            let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
+            guard.stall_last_checked_at.insert(member_row.agent.session_id.clone(), now_ms());
+        }
+
         let idle_minutes = (((now_ms() - idle_since) as f64) / 60000.0).round().max(1.0) as i64;
         let member_desc = format!(
             "팀원 {}(역할: {})가 {}분째 {} 상태로 멈춰있습니다.",
@@ -548,6 +571,12 @@ fn run_stall_watchdog(live_rows: &[SessionRow], leads: &[LeadRecord], members: &
         );
 
         let verdict = run_stall_classifier(&tail_text, &member_desc);
+        // 판단을 받았으면(호출·해석이 실패한 경우는 제외 — 그건 쿨다운 뒤 다시 시도) 이 상황은 다시 묻지 않는다. 재촉 판정이어도 같다:
+        // 알림을 사용자가 무시한 뒤 같은 상황이 그대로면 또 띄우지 않는다.
+        if verdict.is_some() {
+            let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
+            guard.stall_judged.insert(member_row.agent.session_id.clone(), situation);
+        }
         if !should_send_nudge(verdict.as_ref(), &last_answer) {
             continue;
         }
@@ -607,6 +636,26 @@ fn run_stall_watchdog(live_rows: &[SessionRow], leads: &[LeadRecord], members: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn judgement_key_is_equal_only_for_the_same_situation() {
+        let base = stall_judgement_key("팀장: 보고 끝", "done", 1_000);
+        assert_eq!(base, stall_judgement_key("팀장: 보고 끝", "done", 1_000), "같은 상황이면 같은 값 — 그래서 다시 묻지 않는다");
+        assert_ne!(base, stall_judgement_key("팀장: 새 지시를 했다", "done", 1_000), "팀장이 새로 말하면 다시 판단한다");
+        assert_ne!(base, stall_judgement_key("팀장: 보고 끝", "idle", 1_000), "팀원 상태가 달라지면 다시 판단한다");
+        assert_ne!(base, stall_judgement_key("팀장: 보고 끝", "done", 2_000), "팀원이 다시 일하고 새로 쉬기 시작하면 다시 판단한다");
+    }
+
+    #[test]
+    fn board_state_prunes_judgements_of_members_that_are_gone() {
+        let mut m: HashMap<String, u64> = HashMap::new();
+        m.insert("alive".into(), 1);
+        m.insert("gone".into(), 2);
+        let live: HashSet<String> = ["alive".to_string()].into_iter().collect();
+        prune_missing_keys(&mut m, &live);
+        assert_eq!(m.len(), 1);
+        assert!(m.contains_key("alive"));
+    }
 
     #[test]
     fn approval_request_patterns_match_main_ts_examples() {
