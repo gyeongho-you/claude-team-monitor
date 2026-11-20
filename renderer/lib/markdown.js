@@ -40,6 +40,32 @@ function splitRow(line) {
 
 const isTableSep = line => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(line) && line.includes('-');
 
+const MAX_LIST_DEPTH = 6; // 이보다 깊게 들여쓴 항목은 같은 깊이로 본다(입력이 이상해도 중첩이 끝없이 깊어지지 않게)
+
+// 목록 항목들(들여쓰기·종류·글자)을 중첩된 <ul>/<ol>로 만든다. 항목 글자는 renderInline을 거치므로 이스케이프는 그대로다.
+function renderListItems(items) {
+  let pos = 0;
+  const task = text => {
+    const t = /^\[( |x|X)\]\s+(.*)$/.exec(text);
+    return t ? `${t[1] === ' ' ? '☐' : '☑'} ${renderInline(t[2])}` : renderInline(text);
+  };
+  const build = depth => {
+    const ind = items[pos].indent;
+    const tag = items[pos].ordered ? 'ol' : 'ul';
+    let html = `<${tag}>`;
+    while (pos < items.length && items[pos].indent >= ind) {
+      const it = items[pos++];
+      let li = `<li>${task(it.text)}`;
+      if (pos < items.length && items[pos].indent > ind && depth < MAX_LIST_DEPTH) li += build(depth + 1);
+      html += `${li}</li>`;
+    }
+    return `${html}</${tag}>`;
+  };
+  let html = '';
+  while (pos < items.length) html += build(1);
+  return html;
+}
+
 function renderMarkdown(text) {
   const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
   const out = [];
@@ -77,14 +103,17 @@ function renderMarkdown(text) {
       out.push(`<blockquote>${q.map(renderInline).join('<br>')}</blockquote>`);
       continue;
     }
-    // 목록
-    const ul = /^\s*[-*+]\s+/, ol = /^\s*\d+[.)]\s+/;
+    // 목록(들여쓴 항목은 안쪽 목록으로, "[ ]"/"[x]"는 체크 표시로)
+    const ul = /^(\s*)[-*+]\s+/, ol = /^(\s*)\d+[.)]\s+/;
     if (ul.test(line) || ol.test(line)) {
-      const ordered = ol.test(line);
-      const re = ordered ? ol : ul;
       const items = [];
-      while (i < lines.length && re.test(lines[i])) items.push(lines[i++].replace(re, ''));
-      out.push(`<${ordered ? 'ol' : 'ul'}>${items.map(it => `<li>${renderInline(it)}</li>`).join('')}</${ordered ? 'ol' : 'ul'}>`);
+      while (i < lines.length && (ul.test(lines[i]) || ol.test(lines[i]))) {
+        const um = lines[i].match(ul);
+        const m = um || lines[i].match(ol);
+        items.push({ indent: m[1].replace(/\t/g, '    ').length, ordered: !um, text: lines[i].slice(m[0].length) });
+        i++;
+      }
+      out.push(renderListItems(items));
       continue;
     }
     // 문단(빈 줄까지, 줄바꿈은 그대로 보인다)

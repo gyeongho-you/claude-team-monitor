@@ -16,6 +16,7 @@ const examples = [...js.matchAll(/const (PS_EXAMPLE_[A-Z_]+) = String\.raw`([\s\
 test('내장 예제가 2개 이상 있다', () => {
   assert.ok(examples.length >= 2, examples.map(e => e.name).join(','));
   assert.ok(examples.some(e => e.name === 'PS_EXAMPLE_GRAPH_TEAM_JS'));
+  assert.ok(examples.some(e => e.name === 'PS_EXAMPLE_CHANGES_JS'));
 });
 
 for (const ex of examples) {
@@ -27,7 +28,7 @@ for (const ex of examples) {
 }
 
 test('예제 버튼이 화면과 코드에 모두 연결돼 있다', () => {
-  for (const id of ['ps-example-graph-js-btn', 'ps-example-graph-team-btn']) {
+  for (const id of ['ps-example-graph-js-btn', 'ps-example-graph-team-btn', 'ps-example-changes-btn']) {
     assert.ok(html.includes(`id="${id}"`), `${id} 버튼이 index.html에 없다`);
     assert.ok(js.includes(`getElementById('${id}')`), `${id} 핸들러가 renderer.js에 없다`);
   }

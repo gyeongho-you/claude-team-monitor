@@ -990,6 +990,12 @@ const JS_FRAME_BRIDGE = String.raw`(function(){
       var id=++callSeq;pendingCalls[id]={res:res,rej:rej};
       post({t:'call',id:id,req:s});
       setTimeout(function(){if(pendingCalls[id]){delete pendingCalls[id];rej(new Error('응답 시간 초과'));}},180000);
+    });},
+    renderMarkdown:function(t){return new Promise(function(res,rej){
+      if(typeof t!=='string'){rej(new Error('글자만 변환할 수 있습니다'));return;}
+      var id=++callSeq;pendingCalls[id]={res:res,rej:rej};
+      post({t:'md',id:id,text:t});
+      setTimeout(function(){if(pendingCalls[id]){delete pendingCalls[id];rej(new Error('응답 시간 초과'));}},30000);
     });}
   };
   var callSeq=0,pendingCalls={};
@@ -1096,6 +1102,7 @@ window.addEventListener('message', async e => {
   if (!frameViewportSent.has(frame)) sendFrameViewport(frame);
   if (d.t === 'hb') return;
   if (d.t === 'call') { handleFrameCall(frame, d); return; }
+  if (d.t === 'md') { handleFrameMarkdown(frame, d); return; }
   if (d.t === 'state') { // 요청 횟수 제한 대상이 아님(사용자가 누를 때만 보낸다) — 크기만 제한한다
     try {
       const s = JSON.parse(JSON.stringify(d.s));
@@ -1196,6 +1203,27 @@ async function handleFrameCall(frame, d) {
   } catch (err) {
     reply(false, { err: errMsg(err) });
   } finally { log.inFlight--; }
+}
+// ---- ctm.renderMarkdown: 그래픽이 마크다운 글을 앱의 마크다운 변환기(renderer/lib/markdown.js)로 HTML로 바꿔 받는 통로 ----
+// 변환기는 입력의 HTML을 전부 이스케이프하고 링크는 http/https만 허용하므로, 돌려주는 HTML을 프레임이 그대로 넣어도 안전하다(시험: tests/markdown.test.js).
+const FRAME_MD_MAX_CHARS = 400000;
+const FRAME_MD_WINDOW_MS = 10000;
+const FRAME_MD_MAX_IN_WINDOW = 30;
+const frameMdLog = new WeakMap(); // frame -> number[]
+function handleFrameMarkdown(frame, d) {
+  const id = Number(d.id);
+  if (!Number.isFinite(id)) return;
+  const reply = (ok, payload) => {
+    if (!document.contains(frame) || !frame.contentWindow) return;
+    try { frame.contentWindow.postMessage(Object.assign({ ctm: 1, t: 'result', id, ok }, payload), '*'); } catch { /* 프레임이 사라졌다 */ }
+  };
+  if (typeof d.text !== 'string') { reply(false, { err: '글자만 변환할 수 있습니다' }); return; }
+  if (d.text.length > FRAME_MD_MAX_CHARS) { reply(false, { err: `글이 너무 깁니다(${FRAME_MD_MAX_CHARS}자까지)` }); return; }
+  const now = Date.now();
+  const times = (frameMdLog.get(frame) || []).filter(t => now - t < FRAME_MD_WINDOW_MS);
+  if (times.length >= FRAME_MD_MAX_IN_WINDOW) { frameMdLog.set(frame, times); reply(false, { err: '변환 요청이 너무 잦습니다' }); return; }
+  times.push(now); frameMdLog.set(frame, times);
+  try { reply(true, { text: renderMarkdown(d.text) }); } catch (err) { reply(false, { err: errMsg(err) }); }
 }
 function renderPanelBody(slot, c) {
   const auto = slot.mode === 'auto' && Array.isArray(c.items);
@@ -2376,6 +2404,389 @@ function frameMain() {
   console.log('<script>(' + frameMain.toString() + ')()</script>');
 })().catch(e => { console.log(REQ ? JSON.stringify({ ok: false, error: String((e && e.message) || e) }) : '<pre style="color:#f85149;white-space:pre-wrap">' + esc((e && e.stack) || e) + '</pre>'); });
 `;
+const PS_EXAMPLE_CHANGES_JS = String.raw`// 작업 중 변경 보기(팀장+팀원 · 질의 방식): 선택한 팀장의 작업 폴더·워크트리와 떠 있는 팀원 폴더에서 "아직 커밋하지 않은 변경"을 모아 보여 줍니다.
+// 파일을 누르면 바뀐 줄만이 아니라 파일 전체가 나오고(바뀐 줄은 색으로 표시), 마크다운(.md)은 "렌더링" 탭에서 서식이 적용된 모습으로 볼 수 있습니다.
+// 이 슬롯은 "출력: HTML"과 "JavaScript 허용"을 켜야 합니다(읽기만 하는 git 명령을 쓰고 파일을 고치지 않습니다).
+// 동작 방식: 환경 변수 CTM_REQUEST가 비어 있으면 페이지 전체(변경 목록)를 출력하고, 채워져 있으면(화면이 ctm.call로 부른 것) 요청에 맞는 JSON만 출력합니다.
+//   요청 {op:"list"}: 변경 목록을 다시 모읍니다 / 요청 {op:"file", dir, path}: 파일 하나의 전체 내용과 줄별 변경 표시.
+// 어떤 폴더를 보나: ① 이 팀장 세션의 현재 작업 폴더(대화 기록에서 읽음) ② 팀장 등록 폴더와 그 git 워크트리 전부 ③ 지금 떠 있는 팀원 세션의 작업 폴더(claude agents --json).
+const { execFile } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const MAX_FILES_PER_DIR = 400; // 폴더 하나에서 목록에 올리는 변경 파일 최대 수
+const MAX_BYTES = 400000; // 파일 하나에서 읽는 최대 크기(넘으면 앞부분만)
+const MAX_ROWS = 8000; // 파일 하나에서 보내는 최대 줄 수
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const norm = p => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+const REQ = process.env.CTM_REQUEST || '';
+const leadDir = process.env.CTM_LEAD_DIR;
+const fail = msg => { console.log(REQ ? JSON.stringify({ ok: false, error: msg }) : '<p style="color:var(--text-soft)">' + esc(msg) + '</p>'); process.exit(0); };
+if (!leadDir) fail('작업 탭에서 팀장을 선택하세요.');
+
+const run = (cmd, args, cwd, timeout) => new Promise(res => execFile(cmd, args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true, timeout: timeout || 20000 }, (e, out) => res(e ? null : out)));
+const git = (cwd, ...a) => run('git', ['-c', 'core.quotePath=false', '--no-optional-locks', ...a], cwd);
+
+// 1) 이 팀장 세션의 현재 작업 폴더 — 대화 기록 맨 끝쪽에서 마지막으로 적힌 cwd
+function currentCwd() {
+  const f = process.env.CTM_SESSION_FILE;
+  if (!f) return null;
+  try {
+    const fd = fs.openSync(f, 'r');
+    try {
+      const size = fs.fstatSync(fd).size;
+      const len = Math.min(size, 262144);
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, size - len);
+      const lines = buf.toString('utf8').split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const m = /"cwd":"((?:[^"\\]|\\.)*)"/.exec(lines[i]);
+        if (m) { try { return JSON.parse('"' + m[1] + '"'); } catch { /* 다음 줄 */ } }
+      }
+    } finally { fs.closeSync(fd); }
+  } catch { /* 기록이 없으면 건너뜀 */ }
+  return null;
+}
+
+// 2) 저장소 하나의 워크트리 목록
+async function worktrees(dir) {
+  const out = await git(dir, 'worktree', 'list', '--porcelain');
+  const list = [];
+  for (const l of (out || '').split('\n')) if (l.startsWith('worktree ')) list.push(l.slice(9).trim());
+  return list;
+}
+
+// 3) 떠 있는 팀원(이 팀장 소속): 등록 파일의 leadId + claude agents --json 의 작업 폴더
+async function liveMembers() {
+  const home = process.env.CTM_CLAUDE_HOME;
+  const leadId = process.env.CTM_LEAD_ID;
+  if (!home || !leadId) return [];
+  const mine = new Map(); // 짧은 id → 이름표
+  try {
+    const mdir = path.join(home, 'claude-team-monitor', 'members');
+    for (const f of fs.readdirSync(mdir)) {
+      if (!f.endsWith('.json')) continue;
+      try {
+        const m = JSON.parse(fs.readFileSync(path.join(mdir, f), 'utf8'));
+        if (m && m.leadId === leadId && m.memberId) mine.set(String(m.memberId), String(m.label || m.role || m.memberId));
+      } catch { /* 깨진 파일은 건너뜀 */ }
+    }
+  } catch { return []; }
+  if (!mine.size) return [];
+  const out = await run('claude', ['agents', '--json'], undefined, 10000);
+  let agents = [];
+  try { agents = JSON.parse(out || '[]'); } catch { return []; }
+  const res = [];
+  for (const a of Array.isArray(agents) ? agents : []) {
+    if (a && mine.has(String(a.id)) && typeof a.cwd === 'string' && a.cwd) res.push({ dir: a.cwd, label: mine.get(String(a.id)) });
+  }
+  return res;
+}
+
+// 이 팀장에 대해 볼 폴더 목록(화면이 요청할 수 있는 폴더는 이 목록뿐이다 — 요청은 믿을 수 없는 입력이므로 매번 다시 계산해 대조한다)
+async function sources() {
+  const list = []; const seen = new Set();
+  const add = (dir, role) => { if (!dir || !fs.existsSync(dir)) return; const k = norm(dir); if (seen.has(k)) return; seen.add(k); list.push({ dir, role }); };
+  add(currentCwd(), '팀장 작업 폴더');
+  add(leadDir, '팀장 폴더');
+  for (const w of await worktrees(leadDir)) add(w, '팀장 워크트리');
+  for (const m of await liveMembers()) add(m.dir, '팀원 ' + m.label);
+  return list;
+}
+
+// 변경 목록: git status --porcelain=v1 -z -uall 의 결과를 {s: 상태글자, p: 경로}로
+const STATUS = { M: 'M', A: 'A', D: 'D', R: 'R', C: 'A', T: 'M', U: 'M' };
+function parseStatus(out) {
+  const parts = (out || '').split('\0'); const files = [];
+  for (let i = 0; i < parts.length; i++) {
+    const e = parts[i];
+    if (e.length < 4) continue;
+    const x = e[0], y = e[1], p = e.slice(3);
+    if (x === 'R' || x === 'C') i++; // 이름 바꾸기·복사는 원래 경로가 다음 칸에 한 번 더 온다
+    let s;
+    if (x === '?' && y === '?') s = '?';
+    else if (x === '!' ) continue;
+    else s = STATUS[y !== ' ' ? y : x] || 'M';
+    if (x === 'R' || x === 'C') s = 'R';
+    files.push({ s, p });
+  }
+  return files;
+}
+async function dirChanges(src) {
+  const out = await git(src.dir, 'status', '--porcelain=v1', '-z', '-uall');
+  if (out === null) return { dir: src.dir, role: src.role, err: 'git 저장소가 아니거나 상태를 읽지 못했습니다', files: [] };
+  const branch = ((await git(src.dir, 'rev-parse', '--abbrev-ref', 'HEAD')) || '').trim();
+  const all = parseStatus(out);
+  return { dir: src.dir, role: src.role, branch, files: all.slice(0, MAX_FILES_PER_DIR), more: Math.max(0, all.length - MAX_FILES_PER_DIR) };
+}
+async function collect() {
+  const srcs = await sources();
+  const res = await Promise.all(srcs.map(dirChanges));
+  return res;
+}
+
+// 파일 하나: 전체 내용 + 줄별 변경 표시. rows = [종류('+','-',' '), 옛 줄번호, 새 줄번호, 글자]
+const isBinary = buf => buf.indexOf(0) !== -1;
+function parseDiff(out) {
+  const rows = []; let o = 0, n = 0, inHunk = false;
+  for (const l of out.split('\n')) {
+    const h = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l);
+    if (h) { o = Number(h[1]); n = Number(h[2]); inHunk = true; continue; }
+    if (!inHunk) continue;
+    if (l.startsWith('\\')) continue; // "\ No newline at end of file"
+    const c = l[0];
+    if (c === '+') rows.push(['+', 0, n++, l.slice(1)]);
+    else if (c === '-') rows.push(['-', o++, 0, l.slice(1)]);
+    else if (c === ' ') rows.push([' ', o++, n++, l.slice(1)]);
+  }
+  return rows;
+}
+function plainRows(text, kind) {
+  const lines = text.split('\n'); if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  return lines.map((t, i) => kind === '-' ? ['-', i + 1, 0, t] : kind === '+' ? ['+', 0, i + 1, t] : [' ', i + 1, i + 1, t]);
+}
+function validRel(p) {
+  if (typeof p !== 'string' || !p || p.length > 1000) return false;
+  if (/^[\\/]/.test(p) || /^[A-Za-z]:/.test(p) || p.indexOf('\0') !== -1) return false;
+  return !p.split(/[\\/]/).some(seg => seg === '..');
+}
+async function fileDetail(dir, rel, status) {
+  const abs = path.resolve(dir, rel);
+  if (norm(abs).indexOf(norm(path.resolve(dir)) + '/') !== 0) return { ok: false, error: '폴더 밖의 경로입니다' };
+  const isMd = /\.(md|markdown)$/i.test(rel);
+  let rows = [], raw = '', binary = false, truncated = false, st = status || 'M';
+  const exists = fs.existsSync(abs) && fs.statSync(abs).isFile();
+  if (st === 'D' || !exists) {
+    const old = await run('git', ['-c', 'core.quotePath=false', '--no-optional-locks', 'show', 'HEAD:' + rel.replace(/\\/g, '/')], dir);
+    if (old === null) return { ok: false, error: '파일 내용을 읽지 못했습니다' };
+    if (old.indexOf('\0') !== -1) binary = true;
+    else { rows = plainRows(old.slice(0, MAX_BYTES), '-'); raw = old.slice(0, MAX_BYTES); truncated = old.length > MAX_BYTES; }
+    st = 'D';
+  } else {
+    const fd = fs.openSync(abs, 'r');
+    let buf;
+    try { const size = fs.fstatSync(fd).size; buf = Buffer.alloc(Math.min(size, MAX_BYTES)); fs.readSync(fd, buf, 0, buf.length, 0); truncated = size > MAX_BYTES; } finally { fs.closeSync(fd); }
+    if (isBinary(buf)) binary = true;
+    else {
+      const text = buf.toString('utf8'); raw = text;
+      if (st === '?' || st === 'A') rows = plainRows(text, '+');
+      else {
+        const d = await git(dir, 'diff', '-U99999', '--no-color', '--no-ext-diff', 'HEAD', '--', rel.replace(/\\/g, '/'));
+        rows = d ? parseDiff(d) : [];
+        if (!rows.length) rows = plainRows(text, ' '); // 줄 내용이 같은 변경(권한 등)은 전체만 보여 준다
+      }
+    }
+  }
+  if (rows.length > MAX_ROWS) { rows = rows.slice(0, MAX_ROWS); truncated = true; }
+  return { ok: true, path: rel, status: st, binary, truncated, rows, raw: isMd && !binary ? raw : '' };
+}
+
+function frameMain() {
+  var D = JSON.parse(document.getElementById('data').textContent);
+  var root = document.getElementById('app');
+  var el = function (tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  var listEl = document.getElementById('list'), detailEl = document.getElementById('detail'), topEl = document.getElementById('top');
+  var S = { view: 'list', dir: null, path: null, st: null, mode: 'full', q: '', ext: '', closed: {} };
+  try { var saved = window.ctm && window.ctm.getState ? window.ctm.getState() : null; if (saved && typeof saved === 'object') { S.q = String(saved.q || ''); S.ext = String(saved.ext || ''); S.closed = saved.closed && typeof saved.closed === 'object' ? saved.closed : {}; S.view = saved.view === 'detail' ? 'detail' : 'list'; S.dir = saved.dir || null; S.path = saved.path || null; S.st = saved.st || null; S.mode = saved.mode || 'full'; } } catch (e) { /* 저장된 상태가 없으면 목록부터 */ }
+  var save = function () { try { if (window.ctm && window.ctm.setState) window.ctm.setState({ view: S.view, dir: S.dir, path: S.path, st: S.st, mode: S.mode, q: S.q, ext: S.ext, closed: S.closed }); } catch (e) { /* 못 저장해도 화면은 그대로 */ } };
+  var call = function (req) { return window.ctm.call(req).then(function (t) { var r = JSON.parse(t); if (!r.ok) throw new Error(r.error || '요청 실패'); return r; }); };
+  var extOf = function (p) { var m = /\.([A-Za-z0-9]+)$/.exec(p); return m ? m[1].toLowerCase() : '(없음)'; };
+  var baseOf = function (p) { var i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\')); return i < 0 ? '' : p.slice(0, i + 1); };
+  var nameOf = function (p) { var i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\')); return i < 0 ? p : p.slice(i + 1); };
+  var shortDir = function (d) { var parts = d.replace(/\\/g, '/').split('/').filter(Boolean); return parts.slice(-2).join('/'); };
+
+  function totalFiles() { var n = 0; D.dirs.forEach(function (d) { n += d.files.length; }); return n; }
+  function renderTop() {
+    topEl.textContent = '';
+    var info = el('div', 'info');
+    var lbl = el('span', null, (D.lead || '팀장') + ' · 폴더 ' + D.dirs.length + '개에서 변경 ' + totalFiles() + '개' + (D.at ? ' · ' + D.at : ''));
+    lbl.style.flex = '1'; lbl.style.minWidth = '0';
+    var re = el('button', 'ib', '↻'); re.title = '변경 목록을 다시 모읍니다';
+    re.onclick = function () { re.disabled = true; call({ op: 'list' }).then(function (r) { D.dirs = r.dirs; D.at = r.at; renderAll(); }).catch(function (e) { alert('새로고침 실패: ' + e.message); }).then(function () { re.disabled = false; }); };
+    info.appendChild(lbl); info.appendChild(re); topEl.appendChild(info);
+    if (S.view === 'list') {
+      var bar = el('div', 'bbar');
+      var q = document.createElement('input'); q.placeholder = '파일 이름·경로 검색'; q.value = S.q;
+      q.oninput = function () { S.q = q.value; renderList(); save(); };
+      bar.appendChild(q); topEl.appendChild(bar);
+      var counts = {}; D.dirs.forEach(function (d) { d.files.forEach(function (f) { var x = extOf(f.p); counts[x] = (counts[x] || 0) + 1; }); });
+      var exts = Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a]; }).slice(0, 8);
+      var chips = el('div', 'chips');
+      var chip = function (value, text) { var b = el('button', 'chip' + (S.ext === value ? ' on' : ''), text); b.onclick = function () { S.ext = value; renderTop(); renderList(); save(); }; chips.appendChild(b); };
+      chip('', '전체'); exts.forEach(function (x) { chip(x, x + ' ' + counts[x]); });
+      topEl.appendChild(chips);
+    }
+  }
+  function renderList() {
+    listEl.textContent = '';
+    var q = S.q.trim().toLowerCase(); var any = false;
+    D.dirs.forEach(function (d, di) {
+      var files = d.files.filter(function (f) { return (!S.ext || extOf(f.p) === S.ext) && (!q || f.p.toLowerCase().indexOf(q) !== -1); });
+      if (!files.length) return;
+      any = true;
+      var key = d.dir; var closed = !!S.closed[key];
+      var h = el('div', 'sec');
+      h.appendChild(el('span', 'arrow', closed ? '▸' : '▾'));
+      h.appendChild(el('span', 'role', d.role));
+      h.appendChild(el('b', null, shortDir(d.dir)));
+      if (d.branch) h.appendChild(el('span', 'meta', d.branch));
+      h.appendChild(el('span', 'meta', files.length + '개'));
+      h.title = d.dir;
+      h.onclick = function () { S.closed[key] = !closed; renderList(); save(); };
+      listEl.appendChild(h);
+      if (closed) return;
+      files.forEach(function (f) {
+        var row = el('div', 'frow');
+        row.appendChild(el('span', 'st st' + (f.s === '?' ? 'N' : f.s), f.s === '?' ? 'N' : f.s));
+        var nm = el('span', 'fname'); nm.appendChild(el('span', 'fdir', baseOf(f.p))); nm.appendChild(el('b', null, nameOf(f.p)));
+        row.appendChild(nm); row.title = f.p;
+        row.onclick = function () { open(d.dir, f.p, f.s); };
+        listEl.appendChild(row);
+      });
+      if (d.more) listEl.appendChild(el('div', 'meta', '… 외 ' + d.more + '개는 표시하지 않았습니다'));
+    });
+    if (!any) listEl.appendChild(el('div', 'empty', totalFiles() ? '조건에 맞는 변경 파일이 없습니다.' : '아직 커밋하지 않은 변경이 없습니다.'));
+    var clean = D.dirs.filter(function (d) { return !d.files.length && !d.err; }).map(function (d) { return shortDir(d.dir); });
+    if (clean.length && !q && !S.ext) listEl.appendChild(el('div', 'meta', '변경 없음: ' + clean.join(', ')));
+    D.dirs.forEach(function (d) { if (d.err) listEl.appendChild(el('div', 'meta err', shortDir(d.dir) + ' — ' + d.err)); });
+  }
+
+  // ---- 파일 보기 ----
+  var cur = null; // 지금 보는 파일의 서버 응답
+  function open(dir, p, st) { S.view = 'detail'; S.dir = dir; S.path = p; S.st = st; S.mode = /\.(md|markdown)$/i.test(p) ? 'md' : 'full'; save(); renderAll(); }
+  function back() { S.view = 'list'; cur = null; save(); renderAll(); }
+  function fullPath() { var sep = S.dir.indexOf('\\') >= 0 ? '\\' : '/'; return S.dir.replace(/[\\/]+$/, '') + sep + S.path.replace(/[\\/]/g, sep); }
+  function renderDetailTop() {
+    var b = el('div', 'bbar');
+    var bk = el('button', 'ib', '← 목록'); bk.onclick = back; b.appendChild(bk);
+    var t = el('b', 'dtitle', nameOf(S.path)); t.title = S.path; b.appendChild(t);
+    var ed = el('button', 'ib', '편집기'); ed.title = 'VS Code로 엽니다'; ed.onclick = function () { window.ctm.editor(fullPath(), null); }; b.appendChild(ed);
+    var rv = el('button', 'ib', '탐색기'); rv.title = '탐색기에서 위치를 봅니다'; rv.onclick = function () { window.ctm.reveal(fullPath()); }; b.appendChild(rv);
+    topEl.appendChild(b);
+    var tabs = el('div', 'chips');
+    var isMd = /\.(md|markdown)$/i.test(S.path);
+    var tab = function (mode, text, title) { var x = el('button', 'chip' + (S.mode === mode ? ' on' : ''), text); x.title = title; x.onclick = function () { S.mode = mode; save(); renderDetailBody(); renderTopTabs(); }; tabs.appendChild(x); };
+    var renderTopTabs = function () { tabs.textContent = ''; if (isMd) tab('md', '렌더링', '서식이 적용된 모습'); tab('full', '전체(변경 표시)', '파일 전체를 보고 바뀐 줄은 색으로 표시'); tab('diff', '변경만', '바뀐 줄과 앞뒤 3줄만'); };
+    renderTopTabs();
+    var jump = el('button', 'ib', '다음 변경 ↓'); jump.title = '다음에 바뀐 곳으로 이동'; jump.onclick = nextChange; tabs.appendChild(jump);
+    topEl.appendChild(tabs);
+    topEl.appendChild(el('div', 'meta', shortDir(S.dir) + ' · ' + S.path));
+  }
+  function nextChange() {
+    var sc = document.getElementById('scroll'); var rows = detailEl.querySelectorAll('tr.add, tr.del'); if (!rows.length) return;
+    var top = sc.getBoundingClientRect().top + 8; var target = null;
+    for (var i = 0; i < rows.length; i++) { if (rows[i].getBoundingClientRect().top > top + 24 && (i === 0 || rows[i - 1].nextElementSibling !== rows[i])) { target = rows[i]; break; } }
+    if (!target) target = rows[0];
+    sc.scrollTop += target.getBoundingClientRect().top - top - 4;
+  }
+  function codeTable(rows, onlyChanges) {
+    var keep = null;
+    if (onlyChanges) { keep = new Array(rows.length).fill(false); rows.forEach(function (r, i) { if (r[0] !== ' ') for (var k = Math.max(0, i - 3); k <= Math.min(rows.length - 1, i + 3); k++) keep[k] = true; }); }
+    var table = el('table', 'code'); var tb = document.createElement('tbody'); table.appendChild(tb);
+    var gap = false;
+    rows.forEach(function (r, i) {
+      if (keep && !keep[i]) { if (!gap) { var g = document.createElement('tr'); g.className = 'gap'; var gc = el('td', null, '⋯'); gc.colSpan = 3; g.appendChild(gc); tb.appendChild(g); gap = true; } return; }
+      gap = false;
+      var tr = document.createElement('tr'); tr.className = r[0] === '+' ? 'add' : r[0] === '-' ? 'del' : '';
+      tr.appendChild(el('td', 'ln', r[0] === '-' ? '' : String(r[2])));
+      tr.appendChild(el('td', 'mk', r[0] === ' ' ? '' : r[0]));
+      tr.appendChild(el('td', 'tx', r[3] === '' ? ' ' : r[3]));
+      tb.appendChild(tr);
+    });
+    return table;
+  }
+  function renderDetailBody() {
+    detailEl.textContent = '';
+    if (!cur) { detailEl.appendChild(el('div', 'empty', '불러오는 중…')); return; }
+    if (cur.binary) { detailEl.appendChild(el('div', 'empty', '이진 파일이라 내용을 보여 줄 수 없습니다.')); return; }
+    if (cur.truncated) detailEl.appendChild(el('div', 'meta err', '파일이 커서 앞부분만 보여 줍니다.'));
+    if (S.mode === 'md' && cur.raw !== undefined) {
+      var box = el('div', 'md', '렌더링하는 중…'); detailEl.appendChild(box);
+      window.ctm.renderMarkdown(cur.raw).then(function (html) { box.innerHTML = html; box.querySelectorAll('a[data-url]').forEach(function (a) { a.onclick = function (e) { e.preventDefault(); window.ctm.open(a.getAttribute('data-url')); }; }); })
+        .catch(function (e) { box.textContent = '렌더링하지 못했습니다: ' + e.message; });
+      if (cur.status === 'D') box.insertAdjacentHTML('beforebegin', '<div class="meta err">삭제된 파일입니다(지우기 전 내용).</div>');
+      return;
+    }
+    detailEl.appendChild(codeTable(cur.rows, S.mode === 'diff'));
+    if (!cur.rows.length) detailEl.appendChild(el('div', 'empty', '빈 파일입니다.'));
+  }
+  function renderDetail() {
+    renderDetailTop();
+    if (cur && cur.path === S.path) { renderDetailBody(); return; }
+    cur = null; renderDetailBody();
+    var want = S.path;
+    call({ op: 'file', dir: S.dir, path: S.path, st: S.st }).then(function (r) { if (S.path !== want) return; cur = r; renderDetailBody(); })
+      .catch(function (e) { detailEl.textContent = ''; detailEl.appendChild(el('div', 'meta err', '파일을 불러오지 못했습니다: ' + e.message)); });
+  }
+  function renderAll() {
+    topEl.textContent = '';
+    if (S.view === 'detail' && S.dir && S.path) { listEl.hidden = true; detailEl.hidden = false; renderDetail(); }
+    else { S.view = 'list'; listEl.hidden = false; detailEl.hidden = true; renderTop(); renderList(); }
+  }
+  // 보이는 높이에 맞춰 위쪽은 고정하고 아래만 스크롤(깃 그래프 예제와 같은 방식)
+  function fit(h) { root.style.setProperty('--vh', Math.max(240, h - 8) + 'px'); }
+  if (window.ctm && window.ctm.onViewport) window.ctm.onViewport(fit);
+  renderAll();
+}
+
+(async () => {
+  if (REQ) {
+    let req; try { req = JSON.parse(REQ); } catch { fail('요청을 해석하지 못했습니다'); }
+    if (!req || typeof req !== 'object') fail('요청 형식이 맞지 않습니다');
+    if (req.op === 'list') { console.log(JSON.stringify({ ok: true, dirs: await collect(), at: new Date().toTimeString().slice(0, 5) })); return; }
+    if (req.op === 'file') {
+      const allowed = await sources();
+      const src = allowed.find(s => norm(s.dir) === norm(String(req.dir || '')));
+      if (!src) fail('이 팀장이 볼 수 있는 폴더가 아닙니다');
+      if (!validRel(req.path)) fail('경로가 올바르지 않습니다');
+      const st = ['M', 'A', 'D', 'R', '?'].includes(req.st) ? req.st : 'M';
+      console.log(JSON.stringify(await fileDetail(src.dir, req.path, st)));
+      return;
+    }
+    fail('알 수 없는 요청입니다');
+  }
+  const dirs = await collect();
+  const css = [
+    'html,body{overflow:hidden}body{margin:0;padding:0 !important}',
+    '#app{display:flex;flex-direction:column;height:var(--vh,560px);min-height:0;font-size:12px}',
+    '#top{flex:none;position:relative;z-index:5;background:var(--bg);padding:2px 0 4px;border-bottom:1px solid var(--border)}',
+    '#scroll{flex:1;min-height:0;overflow:auto;padding-top:6px}',
+    '.info{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text-soft);margin-bottom:4px}',
+    '.bbar{display:flex;gap:6px;align-items:center;margin:4px 0}',
+    '.bbar input{flex:1;min-width:0;background:var(--surface-2);border:1px solid var(--border-2);color:var(--text);border-radius:4px;padding:3px 6px;font-size:11px}',
+    '.ib{background:var(--border-2);color:var(--text);border:0;border-radius:4px;padding:2px 8px;font-size:11px;cursor:pointer}.ib:disabled{opacity:.5;cursor:default}',
+    '.dtitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '.chips{display:flex;flex-wrap:wrap;gap:4px;margin:2px 0}',
+    '.chip{background:var(--surface-2);color:var(--text);border:1px solid var(--border-2);border-radius:10px;padding:1px 8px;font-size:11px;cursor:pointer}.chip.on{background:var(--accent-3,#3b82f6);color:#fff;border-color:transparent}',
+    '.sec{display:flex;gap:6px;align-items:baseline;padding:4px 2px;margin-top:6px;border-bottom:1px solid var(--border);cursor:pointer}',
+    '.sec .role{background:var(--border-2);border-radius:4px;padding:0 5px;font-size:10px}',
+    '.meta{color:var(--text-soft);font-size:10px}.meta.err{color:#f85149}',
+    '.frow{display:flex;gap:6px;align-items:baseline;padding:2px 4px;cursor:pointer;border-radius:3px}.frow:hover{background:var(--surface-2)}',
+    '.st{flex:none;width:16px;text-align:center;border-radius:3px;font-size:10px;font-weight:700;line-height:15px}',
+    '.stM{background:#d29922aa}.stA,.stN{background:#3fb950aa}.stD{background:#f85149aa}.stR{background:#58a6ffaa}',
+    '.fname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fdir{color:var(--text-soft)}',
+    '.empty{color:var(--text-soft);padding:10px 4px}',
+    'table.code{border-collapse:collapse;width:100%;font-family:Consolas,monospace;font-size:11px}',
+    'table.code td{padding:0 4px;vertical-align:top}.ln{color:var(--text-soft);text-align:right;width:38px;user-select:none}.mk{width:12px;text-align:center;user-select:none}',
+    'table.code td.tx{white-space:pre-wrap;word-break:break-all}',
+    'tr.add{background:#2ea04326}tr.del{background:#f8514926}tr.add .mk{color:#3fb950}tr.del .mk{color:#f85149}tr.gap td{color:var(--text-soft);text-align:center}',
+    '.md{padding:4px 6px;line-height:1.55;font-size:12px}.md h2{font-size:17px;margin:14px 0 6px;border-bottom:1px solid var(--border);padding-bottom:3px}.md h3{font-size:15px;margin:12px 0 5px}.md h4{font-size:13px;margin:10px 0 4px}.md h5,.md h6{font-size:12px;margin:8px 0 3px}',
+    '.md p{margin:6px 0}.md ul,.md ol{margin:4px 0;padding-left:20px}.md li{margin:2px 0}.md code{background:var(--surface-2);padding:0 4px;border-radius:3px;font-family:Consolas,monospace;font-size:11px}',
+    '.md pre{background:var(--surface-2);border:1px solid var(--border);border-radius:4px;padding:6px 8px;overflow:auto}.md pre code{background:none;padding:0}',
+    '.md blockquote{margin:6px 0;padding:2px 10px;border-left:3px solid var(--border-2);color:var(--text-soft)}.md hr{border:0;border-top:1px solid var(--border);margin:10px 0}',
+    '.md table{border-collapse:collapse;margin:6px 0}.md th,.md td{border:1px solid var(--border-2);padding:3px 8px}.md th{background:var(--surface-2)}.md a{color:var(--accent-3,#58a6ff)}',
+  ].join('\n');
+  const data = { lead: process.env.CTM_LEAD_LABEL || '', dirs, at: new Date().toTimeString().slice(0, 5) };
+  console.log('<style>' + css + '</style>');
+  console.log('<div id="app"><div id="top"></div><div id="scroll"><div id="list"></div><div id="detail" hidden></div></div></div>');
+  console.log('<script type="application/json" id="data">' + JSON.stringify(data).replace(/</g, '\\u003c') + '</script>');
+  console.log('<script>(' + frameMain.toString() + ')()</script>');
+})().catch(e => { console.log(REQ ? JSON.stringify({ ok: false, error: String((e && e.message) || e) }) : '<pre style="color:#f85149;white-space:pre-wrap">' + esc((e && e.stack) || e) + '</pre>'); });
+`;
+document.getElementById('ps-example-changes-btn').addEventListener('click', () => {
+  if (psScript.value.trim() && !confirm('입력해 둔 스크립트를 예제로 바꿉니다. 계속할까요?')) return;
+  psInterp.value = 'node'; psFormat.value = 'html'; psAllowJs.checked = true; updatePsJsUi(); psTimeout.value = 40000; psScript.value = PS_EXAMPLE_CHANGES_JS; clearPsTest();
+  if (!psName.value.trim()) psName.value = '작업 중 변경 보기';
+});
 document.getElementById('ps-example-graph-team-btn').addEventListener('click', () => {
   if (psScript.value.trim() && !confirm('입력해 둔 스크립트를 예제로 바꿉니다. 계속할까요?')) return;
   psInterp.value = 'node'; psFormat.value = 'html'; psAllowJs.checked = true; updatePsJsUi(); psTimeout.value = 40000; psScript.value = PS_EXAMPLE_GRAPH_TEAM_JS; clearPsTest();

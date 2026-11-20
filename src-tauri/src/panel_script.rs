@@ -135,7 +135,10 @@ pub(crate) fn reference_markdown() -> String {
         - 출력 HTML 안에 **인라인 `<script>`**를 써서 정렬(표 머리 클릭), 접기·펼치기, 탭 전환, 필터, 마우스를 올렸을 때 값 보여 주기 같은 **화면 안 상호작용**을 만들 수 있다. 데이터는 스크립트가 HTML에 미리 넣어 두고(예: `<script type=\"application/json\">`나 JS 배열), 화면 안의 JavaScript가 그걸 다룬다.\n\
         - 막혀 있는 것: 네트워크 접속(`fetch`·`XMLHttpRequest`·WebSocket), 외부 스크립트·이미지·CSS 불러오기(`<script src>` 포함), 폼 전송, 팝업, `localStorage`·쿠키, 앱 화면의 변수·함수 접근, 프레임 자신의 주소를 바꾸는 것. 보안 규칙(CSP)이 막으므로 시도하지 마라. 필요한 데이터는 전부 스크립트(Node 등)가 모아서 HTML에 넣는다.\n\
         - 앱에 요청할 수 있는 동작(전역 객체 `window.ctm`): `ctm.open(url)`(http/https 주소를 기본 브라우저로), `ctm.reveal(경로)`(탐색기·Finder에서 그 파일/폴더 위치 보여 주기), `ctm.editor(경로, 줄번호)`(VS Code로 열기, 줄번호는 선택). 경로는 **절대 경로**여야 하고 선택한 팀장의 작업 폴더·허용한 팀원 폴더·그 저장소의 git 워크트리 폴더 **안**의 존재하는 것만 된다. 반환값은 없고 실패하면 앱이 패널 위쪽에 오류를 잠깐 보여 준다. `<a href=\"https://...\">` 링크는 자동으로 `ctm.open`처럼 동작한다.\n\
-        - **상태를 바꾸는 동작(파일 수정·삭제, git 커밋·체크아웃 등)을 요청하는 방법은 없다.** `ctm`에는 위 세 가지 외에 아래 `ctm.onViewport`(보이는 높이 받기), `ctm.call`, 화면 상태 저장(`ctm.setState`/`ctm.getState`)뿐이다.\n\
+        - **상태를 바꾸는 동작(파일 수정·삭제, git 커밋·체크아웃 등)을 요청하는 방법은 없다.** `ctm`에는 위 세 가지 외에 아래 `ctm.onViewport`(보이는 높이 받기), `ctm.call`, `ctm.renderMarkdown`(마크다운을 HTML로), 화면 상태 저장(`ctm.setState`/`ctm.getState`)뿐이다.\n\
+        ### 마크다운을 서식 있는 HTML로 (`ctm.renderMarkdown`)\n\n\
+        - 화면: `ctm.renderMarkdown(글자).then((html) => ...)`. 앱의 마크다운 변환기가 제목·목록(들여쓴 안쪽 목록, `[ ]`/`[x]` 체크 표시 포함)·표·인용·코드 블록·구분선·굵게·기울임·링크를 바꿔 준다. 글은 400000자 이하이고 너무 잦으면(10초에 30번 초과) 거절된다.\n\
+        - 돌려주는 HTML은 안전하게 만들어져 있다: 입력의 HTML은 전부 이스케이프되고, 링크는 http/https만 `<a href=\"#\" data-url=\"주소\">`로 나온다(눌렀을 때 `ctm.open(주소)`를 부르는 것은 화면이 한다). 이미지는 base64 `data:` 주소만 그려진다. 모양(CSS)은 프레임 안에서 스크립트가 정한다 — 앱의 스타일은 따라오지 않는다.\n\
         ### 패널에서 보이는 높이 받기 (`ctm.onViewport`) — 위쪽 박스를 고정하는 스크롤 영역 만들기\n\n\
         - 그래픽(프레임)은 기본적으로 **내용만큼 키가 늘어나고** 스크롤은 바깥 패널이 한다. 그래서 프레임 안에서 `position: sticky`로 위쪽 박스를 고정할 수 없다. 대신 앱이 알려 주는 **패널에서 보이는 높이(px)**에 맞춰 스크립트가 **고정 높이의 스크롤 영역**을 만들고, 그 안에서 위쪽 박스를 고정하면 된다.\n\
         - 화면: `ctm.onViewport((높이) => {{ ... }})`(처음 한 번과 창 크기가 바뀔 때마다 불린다), `ctm.getViewport()`(마지막 값, 아직 모르면 null). 예: 높이를 CSS 변수에 넣고 `#app{{height:var(--vh);display:flex;flex-direction:column}}` + 위쪽 `flex:none`, 아래쪽 `flex:1;overflow:auto`. 높이를 받기 전에는 적당한 기본 높이(예: 560px)로 그려 두고, `body`의 위아래 여백은 0으로 해서 바깥 스크롤바가 생기지 않게 한다.\n\n\

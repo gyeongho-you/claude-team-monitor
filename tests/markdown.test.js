@@ -42,6 +42,32 @@ test('제목, 목록, 표, 인용, 코드 블록, 구분선', () => {
   assert.ok(renderMarkdown('위\n\n---\n\n아래').includes('<hr>'));
 });
 
+test('들여쓴 목록 항목은 안쪽 목록이 되고, 되돌아오면 바깥 목록으로 이어진다', () => {
+  assert.strictEqual(renderMarkdown('- a\n  - a1\n  - a2\n- b'), '<ul><li>a<ul><li>a1</li><li>a2</li></ul></li><li>b</li></ul>');
+  assert.strictEqual(renderMarkdown('1. a\n   - x\n2. b'), '<ol><li>a<ul><li>x</li></ul></li><li>b</li></ol>');
+  // 두 단계를 한꺼번에 되돌아와도 항목이 사라지거나 깨진 태그가 생기지 않는다
+  assert.strictEqual(renderMarkdown('- a\n    - b\n        - c\n- d'), '<ul><li>a<ul><li>b<ul><li>c</li></ul></li></ul></li><li>d</li></ul>');
+  // 첫 항목이 들여써져 있어도 모든 항목이 한 번씩 나온다
+  const odd = renderMarkdown('    - a\n- b');
+  assert.ok(odd.includes('>a<') && odd.includes('>b<') && (odd.match(/<ul>/g) || []).length === (odd.match(/<\/ul>/g) || []).length, odd);
+});
+
+test('체크 목록은 ☐/☑로, 안쪽 글자의 HTML은 여전히 이스케이프된다', () => {
+  assert.strictEqual(renderMarkdown('- [ ] 할 일\n- [x] 끝난 일'), '<ul><li>☐ 할 일</li><li>☑ 끝난 일</li></ul>');
+  assert.ok(renderMarkdown('- [ ] <script>x</script>').includes('&lt;script&gt;'));
+  assert.ok(!renderMarkdown('  - <img src=x onerror=1>').includes('<img'));
+});
+
+test('아주 깊은 들여쓰기도 중첩이 제한된다(태그 수가 맞고 오래 걸리지 않는다)', () => {
+  const deep = Array.from({ length: 60 }, (_, i) => ' '.repeat(i * 2) + '- n' + i).join('\n');
+  const t0 = Date.now();
+  const h = renderMarkdown(deep);
+  assert.ok(Date.now() - t0 < 500);
+  assert.strictEqual((h.match(/<ul>/g) || []).length, (h.match(/<\/ul>/g) || []).length);
+  assert.ok((h.match(/<ul>/g) || []).length <= 6, '중첩 상한');
+  assert.strictEqual((h.match(/<li>/g) || []).length, 60, '항목은 하나도 빠지지 않는다');
+});
+
 test('인라인 코드 안은 변환하지 않고, 문단의 줄바꿈은 유지한다', () => {
   assert.strictEqual(renderInline('`**그대로** <b>`'), '<code>**그대로** &lt;b&gt;</code>');
   assert.strictEqual(renderMarkdown('첫 줄\n둘째 줄'), '<p>첫 줄<br>둘째 줄</p>');

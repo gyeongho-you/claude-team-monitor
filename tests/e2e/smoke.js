@@ -217,7 +217,7 @@ async function main() {
       "  return;",
       "}",
       "console.log('<div id=\"out\">대기</div>');",
-      "console.log('<script>', \"window.__run = function (req) { return ctm.call(req).then(function (x) { return 'OK:' + x; }, function (e) { return 'ERR:' + e.message; }); };\", '<' + '/script>');",
+      "console.log('<script>', \"window.__run = function (req) { return ctm.call(req).then(function (x) { return 'OK:' + x; }, function (e) { return 'ERR:' + e.message; }); };\", \"window.__md = function (t) { return ctm.renderMarkdown(t).then(function (h) { return 'OK:' + h; }, function (e) { return 'ERR:' + e.message; }); };\", '<' + '/script>');",
     ].join('\n');
     const mk = (extra) => JSON.stringify(Object.assign({ name: 'callslot', mode: 'script', scope: 'all', preset: 'artifact-reports', instruction: '', autoUpdate: false, aiModel: 'sonnet', aiInclude: 'none', enabled: true, interpreter: 'node', script: callScript, timeoutMs: 8000, outputFormat: 'html', allowJs: true }, extra || {}));
     const saved = JSON.parse(await app.eval(`window.api.savePanelSlot(${mk()}).then(c => JSON.stringify(c.slots.map(s => s.id)))`));
@@ -250,6 +250,13 @@ async function main() {
     ok(r1 === 'OK:' + JSON.stringify({ pong: 42, han: null, page: false }), `프레임 안 ctm.call 결과가 다릅니다: ${r1}`);
     const r2 = await app.eval(`window.__run({op:'fail'})`, fsx);
     ok(r2.startsWith('ERR:') && r2.includes('종료 코드 3'), `프레임 안에서 실패가 거부로 오지 않았습니다: ${r2}`);
+    // 프레임 안 ctm.renderMarkdown: 앱의 변환기로 서식 있는 HTML을 받고, HTML은 이스케이프되며, 너무 긴 글·글자가 아닌 값은 거부된다
+    const md1 = await app.eval(`window.__md('# 제목\\n- [x] 끝\\n  - 안쪽\\n<script>x</script>')`, fsx);
+    ok(md1.startsWith('OK:') && md1.includes('<h2>제목</h2>') && md1.includes('<ul><li>☑ 끝<ul><li>안쪽</li></ul></li></ul>') && md1.includes('&lt;script&gt;') && !md1.includes('<script'), `마크다운 변환이 다릅니다: ${md1}`);
+    const mdBig = await app.eval(`window.__md('x'.repeat(400001))`, fsx);
+    ok(mdBig.startsWith('ERR:') && mdBig.includes('너무 깁니다'), `너무 긴 글이 거부되지 않았습니다: ${mdBig.slice(0, 80)}`);
+    const mdBad = await app.eval(`window.__md(5)`, fsx);
+    ok(mdBad.startsWith('ERR:') && mdBad.includes('글자만'), `글자가 아닌 값이 거부되지 않았습니다: ${mdBad}`);
     // 동시에 둘: 하나는 처리, 하나는 '너무 잦습니다'
     const both = JSON.parse(await app.eval(`Promise.all([window.__run({op:'slow'}), window.__run({op:'x',x:1})]).then(a => JSON.stringify(a))`, fsx));
     ok(both.some(x => x.startsWith('OK:')) && both.some(x => x.startsWith('ERR:') && x.includes('잦습니다')), `동시 요청이 한 번에 하나만 처리되지 않았습니다: ${JSON.stringify(both)}`);
