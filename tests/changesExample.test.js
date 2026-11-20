@@ -174,6 +174,74 @@ test('질의 방식: 잘못된·악의적 요청(허용 안 된 폴더, 경로 �
   fs.rmSync(ctx.base, { recursive: true, force: true });
 });
 
+// 팀장이 이미 "커밋한" 변경도 보여야 한다(실사용: 팀장이 설계 문서를 쓰고 커밋까지 했는데 "커밋 전 변경"만 보면 아무것도 안 보였다)
+function addTopicWorktree(ctx) {
+  const topic = path.join(ctx.base, '토픽 워크트리');
+  git(ctx.lead, 'worktree', 'add', '-q', '-b', 'topic', topic, 'main');
+  const lines = fs.readFileSync(path.join(topic, 'code.txt'), 'utf8').split('\n'); lines[2] = '줄 3 (커밋으로 바뀜)';
+  fs.writeFileSync(path.join(topic, 'code.txt'), lines.join('\n'));
+  fs.writeFileSync(path.join(topic, 'new-design.md'), '# 설계\n첫 문단\n');
+  git(topic, 'add', '-A'); git(topic, 'commit', '-q', '-m', '설계 추가');
+  fs.writeFileSync(path.join(topic, 'new-design.md'), '# 설계\n첫 문단\n둘째 문단\n');
+  fs.writeFileSync(path.join(topic, 'extra.md'), '추가 문서\n');
+  git(topic, 'add', '-A'); git(topic, 'commit', '-q', '-m', '설계 보강');
+  fs.writeFileSync(path.join(topic, 'new-design.md'), '# 설계\n첫 문단\n둘째 문단\n아직 커밋 안 한 줄\n'); // 커밋 후 더 고침
+  return topic;
+}
+const listFor = (ctx, scope, dir) => { const r = call(ctx, { op: 'list', scope }); const d = r.dirs.find(x => norm(x.dir) === norm(dir)); assert.ok(d, '폴더가 목록에 없다: ' + dir); return d; };
+const fileMap = d => Object.fromEntries(d.files.map(f => [f.p, f]));
+
+test('이미 커밋한 변경: 기본 비교 기준("브랜치 전체")은 기본 브랜치와 갈라진 뒤의 모든 변경을 보여 주고, 커밋 전 변경에는 표시를 붙인다', () => {
+  const ctx = setup(); const topic = addTopicWorktree(ctx);
+  const { data } = page(ctx);
+  const d = data.dirs.find(x => norm(x.dir) === norm(topic));
+  assert.ok(d, '커밋만 한 워크트리도 목록에 있어야 한다');
+  assert.ok(d.base.includes('main'), '비교 기준 설명: ' + d.base);
+  const f = fileMap(d);
+  assert.deepStrictEqual(Object.keys(f).sort(), ['code.txt', 'extra.md', 'new-design.md']);
+  assert.strictEqual(f['code.txt'].s, 'M'); assert.strictEqual(f['code.txt'].u, false, '커밋만 한 파일은 커밋 전 표시가 없다');
+  assert.strictEqual(f['extra.md'].s, 'A'); assert.strictEqual(f['extra.md'].u, false);
+  assert.strictEqual(f['new-design.md'].s, 'A'); assert.strictEqual(f['new-design.md'].u, true, '커밋한 뒤 더 고친 파일은 커밋 전 표시');
+  fs.rmSync(ctx.base, { recursive: true, force: true });
+});
+
+test('비교 기준을 바꾸면 목록이 달라진다: 커밋 전만 / 최근 1커밋', () => {
+  const ctx = setup(); const topic = addTopicWorktree(ctx);
+  assert.deepStrictEqual(Object.keys(fileMap(listFor(ctx, 'wt', topic))), ['new-design.md'], '커밋 전만 보면 아직 커밋 안 한 파일뿐');
+  const one = fileMap(listFor(ctx, 'last:1', topic));
+  assert.deepStrictEqual(Object.keys(one).sort(), ['extra.md', 'new-design.md'], '최근 1커밋 + 그 뒤의 변경: ' + Object.keys(one));
+  assert.strictEqual(one['new-design.md'].s, 'M', '직전 커밋에도 있던 파일은 수정으로');
+  const three = fileMap(listFor(ctx, 'last:3', topic));
+  assert.ok('code.txt' in three, '3커밋 전이면 처음 바꾼 파일도 들어온다(기록이 모자라면 빈 트리와 비교)');
+  assert.strictEqual(call(ctx, { op: 'list', scope: 'last:0' }).scope, 'branch', '범위 밖의 값은 기본으로');
+  assert.strictEqual(call(ctx, { op: 'list', scope: 'last:999' }).scope, 'branch');
+  assert.strictEqual(call(ctx, { op: 'list', scope: '--output=x' }).scope, 'branch', '이상한 값은 기본으로(git 옵션으로 쓰이지 않는다)');
+  fs.rmSync(ctx.base, { recursive: true, force: true });
+});
+
+test('커밋한 파일의 내용: 기준과 비교한 전체 보기(바뀐 줄 표시)와 마크다운 원문', () => {
+  const ctx = setup(); const topic = addTopicWorktree(ctx);
+  const code = call(ctx, { op: 'file', dir: topic, path: 'code.txt', st: 'M', scope: 'branch' });
+  assert.strictEqual(code.ok, true);
+  const added = code.rows.filter(x => x[0] === '+').map(x => x[3]); const removed = code.rows.filter(x => x[0] === '-').map(x => x[3]);
+  assert.deepStrictEqual(added, ['줄 3 (커밋으로 바뀜)']); assert.deepStrictEqual(removed, ['줄 3']);
+  assert.ok(code.rows.length >= 30, '파일 전체가 나와야 한다');
+  const md = call(ctx, { op: 'file', dir: topic, path: 'new-design.md', st: 'A', scope: 'branch' });
+  assert.ok(md.rows.every(x => x[0] === '+') && md.rows.length === 4, '기준에 없던 파일은 전부 추가: ' + md.rows.length);
+  assert.ok(md.raw.includes('아직 커밋 안 한 줄'), '렌더링 원문은 작업 폴더의 현재 내용');
+  const mdLast = call(ctx, { op: 'file', dir: topic, path: 'new-design.md', st: 'M', scope: 'last:1' });
+  assert.deepStrictEqual(mdLast.rows.filter(x => x[0] === '+').map(x => x[3]), ['둘째 문단', '아직 커밋 안 한 줄'], '최근 1커밋 기준에서는 그 뒤에 바뀐 줄만 추가로 표시');
+  fs.rmSync(ctx.base, { recursive: true, force: true });
+});
+
+test('기본 브랜치(main) 위에서 일하는 폴더는 기준을 바꿔도 커밋 전 변경은 그대로 보인다', () => {
+  const ctx = setup();
+  const d = listFor(ctx, 'branch', ctx.lead);
+  assert.ok(d.base.includes('새 커밋 없음') || d.base.includes('main'), d.base);
+  assert.strictEqual(fileMap(d)['code.txt'].u, true);
+  fs.rmSync(ctx.base, { recursive: true, force: true });
+});
+
 test('팀장을 고르지 않으면 안내만 낸다', () => {
   const ctx = setup();
   const env = { ...process.env };

@@ -2404,12 +2404,14 @@ function frameMain() {
   console.log('<script>(' + frameMain.toString() + ')()</script>');
 })().catch(e => { console.log(REQ ? JSON.stringify({ ok: false, error: String((e && e.message) || e) }) : '<pre style="color:#f85149;white-space:pre-wrap">' + esc((e && e.stack) || e) + '</pre>'); });
 `;
-const PS_EXAMPLE_CHANGES_JS = String.raw`// 작업 중 변경 보기(팀장+팀원 · 질의 방식): 선택한 팀장의 작업 폴더·워크트리와 떠 있는 팀원 폴더에서 "아직 커밋하지 않은 변경"을 모아 보여 줍니다.
+const PS_EXAMPLE_CHANGES_JS = String.raw`// 작업 중 변경 보기(팀장+팀원 · 질의 방식): 선택한 팀장의 작업 폴더·워크트리와 떠 있는 팀원 폴더에서 "바뀐 파일"을 모아 보여 줍니다.
+// 무엇과 비교할지는 위쪽 칩으로 고릅니다 — 기본은 "브랜치 전체"(기본 브랜치와 갈라진 뒤 이 브랜치에서 한 모든 변경: 이미 커밋한 것 + 아직 커밋 안 한 것, ●는 커밋 전 변경 포함), "최근 N커밋", "커밋 전만".
 // 파일을 누르면 바뀐 줄만이 아니라 파일 전체가 나오고(바뀐 줄은 색으로 표시), 마크다운(.md)은 "렌더링" 탭에서 서식이 적용된 모습으로 볼 수 있습니다.
 // 이 슬롯은 "출력: HTML"과 "JavaScript 허용"을 켜야 합니다(읽기만 하는 git 명령을 쓰고 파일을 고치지 않습니다).
 // 동작 방식: 환경 변수 CTM_REQUEST가 비어 있으면 페이지 전체(변경 목록)를 출력하고, 채워져 있으면(화면이 ctm.call로 부른 것) 요청에 맞는 JSON만 출력합니다.
 //   요청 {op:"list"}: 변경 목록을 다시 모읍니다 / 요청 {op:"file", dir, path}: 파일 하나의 전체 내용과 줄별 변경 표시.
 // 어떤 폴더를 보나: ① 이 팀장 세션의 현재 작업 폴더(대화 기록에서 읽음) ② 팀장 등록 폴더와 그 git 워크트리 전부 ③ 지금 떠 있는 팀원 세션의 작업 폴더(claude agents --json).
+//   ①과 ③은 처음부터 펼쳐 보이고 ②의 나머지 워크트리는 접혀 있습니다(제목줄을 누르면 펼침).
 const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
@@ -2493,35 +2495,75 @@ async function sources() {
   return list;
 }
 
-// 변경 목록: git status --porcelain=v1 -z -uall 의 결과를 {s: 상태글자, p: 경로}로
+// 비교 기준(scope): 무엇과 비교해 "바뀐 파일"로 볼지 — 'branch'(기본 브랜치와 갈라진 뒤 이 브랜치에서 한 모든 변경, 커밋한 것 + 커밋 전 것),
+//   'last:N'(최근 커밋 N개와 그 뒤의 커밋 전 변경), 'wt'(아직 커밋하지 않은 변경만). 기준은 요청이 아니라 이 스크립트가 git으로 직접 계산한다.
+const normScope = s => { const m = /^last:(\d{1,2})$/.exec(String(s || '')); if (m && Number(m[1]) >= 1 && Number(m[1]) <= 50) return 'last:' + Number(m[1]); return s === 'wt' ? 'wt' : 'branch'; };
+async function defaultBranch(dir) {
+  const o = ((await git(dir, 'symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD')) || '').trim();
+  if (o && (await git(dir, 'rev-parse', '--verify', '--quiet', o + '^{commit}')) !== null) return o;
+  for (const n of ['main', 'master', 'develop']) if ((await git(dir, 'rev-parse', '--verify', '--quiet', 'refs/heads/' + n)) !== null) return n;
+  return null;
+}
+async function baseFor(dir, scope) {
+  const head = ((await git(dir, 'rev-parse', '--verify', '--quiet', 'HEAD')) || '').trim();
+  if (!head) return { sha: null, label: '커밋이 아직 없음' }; // 기준이 없으면 추적 안 되는 파일만 보인다
+  if (scope === 'wt') return { sha: head, label: '커밋 전 변경만' };
+  const lm = /^last:(\d+)$/.exec(scope);
+  if (lm) {
+    const sha = ((await git(dir, 'rev-parse', '--verify', '--quiet', 'HEAD~' + lm[1])) || '').trim();
+    if (sha) return { sha, label: '최근 커밋 ' + lm[1] + '개' };
+    // 기록이 N개보다 짧으면 첫 커밋 이후의 변경으로 대신한다(첫 커밋에서 처음 생긴 파일은 "달라진 것"에 들지 않는다)
+    const root = ((await git(dir, 'rev-list', '--max-parents=0', 'HEAD')) || '').trim().split('\n')[0];
+    return { sha: root || head, label: '전체 기록(첫 커밋 이후)' };
+  }
+  const def = await defaultBranch(dir);
+  if (!def) return { sha: head, label: '기본 브랜치를 찾지 못해 커밋 전 변경만' };
+  const mb = ((await git(dir, 'merge-base', 'HEAD', def)) || '').trim();
+  if (!mb || mb === head) return { sha: head, label: def + ' 대비 새 커밋 없음' };
+  return { sha: mb, label: def + ' 대비' };
+}
+
+// 변경 목록: ① git diff --name-status 로 기준 커밋과 달라진 추적 파일(커밋한 것 + 스테이지·작업 중), ② git status 로 추적 안 되는 새 파일과 "아직 커밋 안 함" 표시
 const STATUS = { M: 'M', A: 'A', D: 'D', R: 'R', C: 'A', T: 'M', U: 'M' };
-function parseStatus(out) {
+function parseNameStatus(out) {
+  const t = (out || '').split('\0'); const files = [];
+  for (let i = 0; i < t.length;) {
+    const st = t[i] || '';
+    if (!st) { i++; continue; }
+    if (st[0] === 'R' || st[0] === 'C') { if (t[i + 2]) files.push({ s: st[0] === 'R' ? 'R' : 'A', p: t[i + 2] }); i += 3; }
+    else { if (t[i + 1]) files.push({ s: STATUS[st[0]] || 'M', p: t[i + 1] }); i += 2; }
+  }
+  return files;
+}
+function parsePorcelain(out) {
   const parts = (out || '').split('\0'); const files = [];
   for (let i = 0; i < parts.length; i++) {
     const e = parts[i];
     if (e.length < 4) continue;
     const x = e[0], y = e[1], p = e.slice(3);
     if (x === 'R' || x === 'C') i++; // 이름 바꾸기·복사는 원래 경로가 다음 칸에 한 번 더 온다
-    let s;
-    if (x === '?' && y === '?') s = '?';
-    else if (x === '!' ) continue;
-    else s = STATUS[y !== ' ' ? y : x] || 'M';
-    if (x === 'R' || x === 'C') s = 'R';
-    files.push({ s, p });
+    if (x === '!') continue;
+    files.push({ p, untracked: x === '?' && y === '?' });
   }
   return files;
 }
-async function dirChanges(src) {
-  const out = await git(src.dir, 'status', '--porcelain=v1', '-z', '-uall');
-  if (out === null) return { dir: src.dir, role: src.role, err: 'git 저장소가 아니거나 상태를 읽지 못했습니다', files: [] };
+async function dirChanges(src, scope) {
+  const status = await git(src.dir, 'status', '--porcelain=v1', '-z', '-uall');
+  if (status === null) return { dir: src.dir, role: src.role, err: 'git 저장소가 아니거나 상태를 읽지 못했습니다', files: [] };
   const branch = ((await git(src.dir, 'rev-parse', '--abbrev-ref', 'HEAD')) || '').trim();
-  const all = parseStatus(out);
-  return { dir: src.dir, role: src.role, branch, files: all.slice(0, MAX_FILES_PER_DIR), more: Math.max(0, all.length - MAX_FILES_PER_DIR) };
+  const base = await baseFor(src.dir, scope);
+  const wt = parsePorcelain(status);
+  const dirty = new Set(wt.map(f => f.p));
+  const tracked = base.sha ? parseNameStatus(await git(src.dir, 'diff', '--name-status', '-M', '-z', '--no-color', '--no-ext-diff', base.sha)) : [];
+  const seen = new Set(tracked.map(f => f.p));
+  const all = tracked.map(f => ({ s: f.s, p: f.p, u: dirty.has(f.p) }));
+  for (const f of wt) if (f.untracked && !seen.has(f.p)) all.push({ s: '?', p: f.p, u: true });
+  all.sort((a, b) => (a.p < b.p ? -1 : a.p > b.p ? 1 : 0));
+  return { dir: src.dir, role: src.role, branch, base: base.label, files: all.slice(0, MAX_FILES_PER_DIR), more: Math.max(0, all.length - MAX_FILES_PER_DIR) };
 }
-async function collect() {
+async function collect(scope) {
   const srcs = await sources();
-  const res = await Promise.all(srcs.map(dirChanges));
-  return res;
+  return Promise.all(srcs.map(s => dirChanges(s, scope)));
 }
 
 // 파일 하나: 전체 내용 + 줄별 변경 표시. rows = [종류('+','-',' '), 옛 줄번호, 새 줄번호, 글자]
@@ -2549,14 +2591,16 @@ function validRel(p) {
   if (/^[\\/]/.test(p) || /^[A-Za-z]:/.test(p) || p.indexOf('\0') !== -1) return false;
   return !p.split(/[\\/]/).some(seg => seg === '..');
 }
-async function fileDetail(dir, rel, status) {
+async function fileDetail(dir, rel, status, scope) {
   const abs = path.resolve(dir, rel);
   if (norm(abs).indexOf(norm(path.resolve(dir)) + '/') !== 0) return { ok: false, error: '폴더 밖의 경로입니다' };
   const isMd = /\.(md|markdown)$/i.test(rel);
   let rows = [], raw = '', binary = false, truncated = false, st = status || 'M';
+  const base = await baseFor(dir, scope); // 목록과 같은 기준(커밋한 변경까지 포함)과 비교한다
   const exists = fs.existsSync(abs) && fs.statSync(abs).isFile();
+  if ((st === 'D' || !exists) && !base.sha) return { ok: false, error: '비교할 커밋이 없어 내용을 읽지 못했습니다' };
   if (st === 'D' || !exists) {
-    const old = await run('git', ['-c', 'core.quotePath=false', '--no-optional-locks', 'show', 'HEAD:' + rel.replace(/\\/g, '/')], dir);
+    const old = await run('git', ['-c', 'core.quotePath=false', '--no-optional-locks', 'show', base.sha + ':' + rel.replace(/\\/g, '/')], dir);
     if (old === null) return { ok: false, error: '파일 내용을 읽지 못했습니다' };
     if (old.indexOf('\0') !== -1) binary = true;
     else { rows = plainRows(old.slice(0, MAX_BYTES), '-'); raw = old.slice(0, MAX_BYTES); truncated = old.length > MAX_BYTES; }
@@ -2568,9 +2612,9 @@ async function fileDetail(dir, rel, status) {
     if (isBinary(buf)) binary = true;
     else {
       const text = buf.toString('utf8'); raw = text;
-      if (st === '?' || st === 'A') rows = plainRows(text, '+');
+      if (st === '?' || !base.sha) rows = plainRows(text, '+');
       else {
-        const d = await git(dir, 'diff', '-U99999', '--no-color', '--no-ext-diff', 'HEAD', '--', rel.replace(/\\/g, '/'));
+        const d = await git(dir, 'diff', '-U99999', '--no-color', '--no-ext-diff', base.sha, '--', rel.replace(/\\/g, '/'));
         rows = d ? parseDiff(d) : [];
         if (!rows.length) rows = plainRows(text, ' '); // 줄 내용이 같은 변경(권한 등)은 전체만 보여 준다
       }
@@ -2585,9 +2629,10 @@ function frameMain() {
   var root = document.getElementById('app');
   var el = function (tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
   var listEl = document.getElementById('list'), detailEl = document.getElementById('detail'), topEl = document.getElementById('top');
-  var S = { view: 'list', dir: null, path: null, st: null, mode: 'full', q: '', ext: '', closed: {} };
-  try { var saved = window.ctm && window.ctm.getState ? window.ctm.getState() : null; if (saved && typeof saved === 'object') { S.q = String(saved.q || ''); S.ext = String(saved.ext || ''); S.closed = saved.closed && typeof saved.closed === 'object' ? saved.closed : {}; S.view = saved.view === 'detail' ? 'detail' : 'list'; S.dir = saved.dir || null; S.path = saved.path || null; S.st = saved.st || null; S.mode = saved.mode || 'full'; } } catch (e) { /* 저장된 상태가 없으면 목록부터 */ }
-  var save = function () { try { if (window.ctm && window.ctm.setState) window.ctm.setState({ view: S.view, dir: S.dir, path: S.path, st: S.st, mode: S.mode, q: S.q, ext: S.ext, closed: S.closed }); } catch (e) { /* 못 저장해도 화면은 그대로 */ } };
+  var S = { view: 'list', dir: null, path: null, st: null, mode: 'full', q: '', ext: '', closed: {}, scope: D.scope || 'branch' };
+  var SCOPES = [['branch', '브랜치 전체', '기본 브랜치와 갈라진 뒤 이 브랜치에서 한 모든 변경(커밋한 것 + 커밋 전 것)'], ['last:1', '최근 1커밋', '마지막 커밋과 그 뒤의 커밋 전 변경'], ['last:3', '최근 3커밋', '마지막 3개 커밋과 그 뒤의 커밋 전 변경'], ['last:10', '최근 10커밋', '마지막 10개 커밋과 그 뒤의 커밋 전 변경'], ['wt', '커밋 전만', '아직 커밋하지 않은 변경만']];
+  try { var saved = window.ctm && window.ctm.getState ? window.ctm.getState() : null; if (saved && typeof saved === 'object') { if (saved.scope && SCOPES.some(function (x) { return x[0] === saved.scope; })) S.scope = saved.scope; S.q = String(saved.q || ''); S.ext = String(saved.ext || ''); S.closed = saved.closed && typeof saved.closed === 'object' ? saved.closed : {}; S.view = saved.view === 'detail' ? 'detail' : 'list'; S.dir = saved.dir || null; S.path = saved.path || null; S.st = saved.st || null; S.mode = saved.mode || 'full'; } } catch (e) { /* 저장된 상태가 없으면 목록부터 */ }
+  var save = function () { try { if (window.ctm && window.ctm.setState) window.ctm.setState({ view: S.view, dir: S.dir, path: S.path, st: S.st, mode: S.mode, q: S.q, ext: S.ext, closed: S.closed, scope: S.scope }); } catch (e) { /* 못 저장해도 화면은 그대로 */ } };
   var call = function (req) { return window.ctm.call(req).then(function (t) { var r = JSON.parse(t); if (!r.ok) throw new Error(r.error || '요청 실패'); return r; }); };
   var extOf = function (p) { var m = /\.([A-Za-z0-9]+)$/.exec(p); return m ? m[1].toLowerCase() : '(없음)'; };
   var baseOf = function (p) { var i = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\')); return i < 0 ? '' : p.slice(0, i + 1); };
@@ -2595,15 +2640,24 @@ function frameMain() {
   var shortDir = function (d) { var parts = d.replace(/\\/g, '/').split('/').filter(Boolean); return parts.slice(-2).join('/'); };
 
   function totalFiles() { var n = 0; D.dirs.forEach(function (d) { n += d.files.length; }); return n; }
+  // 목록을 다시 모은다(비교 기준을 바꿨거나 ↻을 눌렀을 때). 불러오는 동안 화면은 그대로 두고 끝나면 새로 그린다.
+  function reload(btn) {
+    if (btn) btn.disabled = true;
+    call({ op: 'list', scope: S.scope }).then(function (r) { D.dirs = r.dirs; D.at = r.at; if (r.scope) S.scope = r.scope; cur = null; renderAll(); })
+      .catch(function (e) { alert('불러오지 못했습니다: ' + e.message); }).then(function () { if (btn) btn.disabled = false; });
+  }
   function renderTop() {
     topEl.textContent = '';
     var info = el('div', 'info');
     var lbl = el('span', null, (D.lead || '팀장') + ' · 폴더 ' + D.dirs.length + '개에서 변경 ' + totalFiles() + '개' + (D.at ? ' · ' + D.at : ''));
     lbl.style.flex = '1'; lbl.style.minWidth = '0';
     var re = el('button', 'ib', '↻'); re.title = '변경 목록을 다시 모읍니다';
-    re.onclick = function () { re.disabled = true; call({ op: 'list' }).then(function (r) { D.dirs = r.dirs; D.at = r.at; renderAll(); }).catch(function (e) { alert('새로고침 실패: ' + e.message); }).then(function () { re.disabled = false; }); };
+    re.onclick = function () { reload(re); };
     info.appendChild(lbl); info.appendChild(re); topEl.appendChild(info);
     if (S.view === 'list') {
+      var sc = el('div', 'chips');
+      SCOPES.forEach(function (x) { var b = el('button', 'chip' + (S.scope === x[0] ? ' on' : ''), x[1]); b.title = x[2]; b.onclick = function () { if (S.scope === x[0]) return; S.scope = x[0]; save(); reload(b); }; sc.appendChild(b); });
+      topEl.appendChild(sc);
       var bar = el('div', 'bbar');
       var q = document.createElement('input'); q.placeholder = '파일 이름·경로 검색'; q.value = S.q;
       q.oninput = function () { S.q = q.value; renderList(); save(); };
@@ -2616,6 +2670,9 @@ function frameMain() {
       topEl.appendChild(chips);
     }
   }
+  // 처음부터 펼쳐 보일 폴더: 세션의 현재 작업 폴더와 떠 있는 팀원 폴더. 그런 폴더를 하나도 못 찾았으면 팀장 폴더를 펼친다.
+  var primaryRole = function (d) { return d.role === '팀장 작업 폴더' || d.role.indexOf('팀원') === 0; };
+  function isPrimary(d) { return primaryRole(d) || (d.role === '팀장 폴더' && !D.dirs.some(primaryRole)); }
   function renderList() {
     listEl.textContent = '';
     var q = S.q.trim().toLowerCase(); var any = false;
@@ -2623,12 +2680,14 @@ function frameMain() {
       var files = d.files.filter(function (f) { return (!S.ext || extOf(f.p) === S.ext) && (!q || f.p.toLowerCase().indexOf(q) !== -1); });
       if (!files.length) return;
       any = true;
-      var key = d.dir; var closed = !!S.closed[key];
+      // 처음에는 이 팀장의 작업 폴더와 떠 있는 팀원 폴더만 펼친다 — 같은 저장소의 다른 워크트리는 접어 두고(제목줄의 개수는 보인다) 누르면 펼친다
+      var key = d.dir; var closed = S.closed[key] !== undefined ? !!S.closed[key] : !isPrimary(d);
       var h = el('div', 'sec');
       h.appendChild(el('span', 'arrow', closed ? '▸' : '▾'));
       h.appendChild(el('span', 'role', d.role));
       h.appendChild(el('b', null, shortDir(d.dir)));
       if (d.branch) h.appendChild(el('span', 'meta', d.branch));
+      if (d.base) h.appendChild(el('span', 'meta', '· ' + d.base));
       h.appendChild(el('span', 'meta', files.length + '개'));
       h.title = d.dir;
       h.onclick = function () { S.closed[key] = !closed; renderList(); save(); };
@@ -2638,7 +2697,8 @@ function frameMain() {
         var row = el('div', 'frow');
         row.appendChild(el('span', 'st st' + (f.s === '?' ? 'N' : f.s), f.s === '?' ? 'N' : f.s));
         var nm = el('span', 'fname'); nm.appendChild(el('span', 'fdir', baseOf(f.p))); nm.appendChild(el('b', null, nameOf(f.p)));
-        row.appendChild(nm); row.title = f.p;
+        row.appendChild(nm); row.title = f.p + (f.u ? ' (아직 커밋하지 않은 변경 포함)' : ' (커밋한 변경)');
+        if (f.u) row.appendChild(el('span', 'dirty', '●'));
         row.onclick = function () { open(d.dir, f.p, f.s); };
         listEl.appendChild(row);
       });
@@ -2714,7 +2774,7 @@ function frameMain() {
     if (cur && cur.path === S.path) { renderDetailBody(); return; }
     cur = null; renderDetailBody();
     var want = S.path;
-    call({ op: 'file', dir: S.dir, path: S.path, st: S.st }).then(function (r) { if (S.path !== want) return; cur = r; renderDetailBody(); })
+    call({ op: 'file', dir: S.dir, path: S.path, st: S.st, scope: S.scope }).then(function (r) { if (S.path !== want) return; cur = r; renderDetailBody(); })
       .catch(function (e) { detailEl.textContent = ''; detailEl.appendChild(el('div', 'meta err', '파일을 불러오지 못했습니다: ' + e.message)); });
   }
   function renderAll() {
@@ -2732,19 +2792,19 @@ function frameMain() {
   if (REQ) {
     let req; try { req = JSON.parse(REQ); } catch { fail('요청을 해석하지 못했습니다'); }
     if (!req || typeof req !== 'object') fail('요청 형식이 맞지 않습니다');
-    if (req.op === 'list') { console.log(JSON.stringify({ ok: true, dirs: await collect(), at: new Date().toTimeString().slice(0, 5) })); return; }
+    if (req.op === 'list') { const scope = normScope(req.scope); console.log(JSON.stringify({ ok: true, scope, dirs: await collect(scope), at: new Date().toTimeString().slice(0, 5) })); return; }
     if (req.op === 'file') {
       const allowed = await sources();
       const src = allowed.find(s => norm(s.dir) === norm(String(req.dir || '')));
       if (!src) fail('이 팀장이 볼 수 있는 폴더가 아닙니다');
       if (!validRel(req.path)) fail('경로가 올바르지 않습니다');
       const st = ['M', 'A', 'D', 'R', '?'].includes(req.st) ? req.st : 'M';
-      console.log(JSON.stringify(await fileDetail(src.dir, req.path, st)));
+      console.log(JSON.stringify(await fileDetail(src.dir, req.path, st, normScope(req.scope))));
       return;
     }
     fail('알 수 없는 요청입니다');
   }
-  const dirs = await collect();
+  const dirs = await collect('branch');
   const css = [
     'html,body{overflow:hidden}body{margin:0;padding:0 !important}',
     '#app{display:flex;flex-direction:column;height:var(--vh,560px);min-height:0;font-size:12px}',
@@ -2757,13 +2817,13 @@ function frameMain() {
     '.dtitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
     '.chips{display:flex;flex-wrap:wrap;gap:4px;margin:2px 0}',
     '.chip{background:var(--surface-2);color:var(--text);border:1px solid var(--border-2);border-radius:10px;padding:1px 8px;font-size:11px;cursor:pointer}.chip.on{background:var(--accent-3,#3b82f6);color:#fff;border-color:transparent}',
-    '.sec{display:flex;gap:6px;align-items:baseline;padding:4px 2px;margin-top:6px;border-bottom:1px solid var(--border);cursor:pointer}',
-    '.sec .role{background:var(--border-2);border-radius:4px;padding:0 5px;font-size:10px}',
-    '.meta{color:var(--text-soft);font-size:10px}.meta.err{color:#f85149}',
+    '.sec{display:flex;flex-wrap:wrap;gap:2px 6px;align-items:baseline;padding:4px 2px;margin-top:6px;border-bottom:1px solid var(--border);cursor:pointer}',
+    '.sec .role{background:var(--border-2);border-radius:4px;padding:0 5px;font-size:10px;white-space:nowrap}.sec .arrow{flex:none}.sec b{word-break:break-all}',
+    '.meta{color:var(--text-soft);font-size:10px}.sec .meta{white-space:nowrap}.meta.err{color:#f85149}',
     '.frow{display:flex;gap:6px;align-items:baseline;padding:2px 4px;cursor:pointer;border-radius:3px}.frow:hover{background:var(--surface-2)}',
     '.st{flex:none;width:16px;text-align:center;border-radius:3px;font-size:10px;font-weight:700;line-height:15px}',
     '.stM{background:#d29922aa}.stA,.stN{background:#3fb950aa}.stD{background:#f85149aa}.stR{background:#58a6ffaa}',
-    '.fname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fdir{color:var(--text-soft)}',
+    '.fname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fdir{color:var(--text-soft)}.dirty{flex:none;color:#d29922;font-size:9px}',
     '.empty{color:var(--text-soft);padding:10px 4px}',
     'table.code{border-collapse:collapse;width:100%;font-family:Consolas,monospace;font-size:11px}',
     'table.code td{padding:0 4px;vertical-align:top}.ln{color:var(--text-soft);text-align:right;width:38px;user-select:none}.mk{width:12px;text-align:center;user-select:none}',
@@ -2775,7 +2835,7 @@ function frameMain() {
     '.md blockquote{margin:6px 0;padding:2px 10px;border-left:3px solid var(--border-2);color:var(--text-soft)}.md hr{border:0;border-top:1px solid var(--border);margin:10px 0}',
     '.md table{border-collapse:collapse;margin:6px 0}.md th,.md td{border:1px solid var(--border-2);padding:3px 8px}.md th{background:var(--surface-2)}.md a{color:var(--accent-3,#58a6ff)}',
   ].join('\n');
-  const data = { lead: process.env.CTM_LEAD_LABEL || '', dirs, at: new Date().toTimeString().slice(0, 5) };
+  const data = { lead: process.env.CTM_LEAD_LABEL || '', scope: 'branch', dirs, at: new Date().toTimeString().slice(0, 5) };
   console.log('<style>' + css + '</style>');
   console.log('<div id="app"><div id="top"></div><div id="scroll"><div id="list"></div><div id="detail" hidden></div></div></div>');
   console.log('<script type="application/json" id="data">' + JSON.stringify(data).replace(/</g, '\\u003c') + '</script>');
