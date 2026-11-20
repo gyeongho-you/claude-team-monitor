@@ -823,6 +823,7 @@ const spToolbarEl = document.getElementById('sp-toolbar');
 const spPaneTemplate = document.getElementById('sp-pane-template');
 const spSplitWrapEl = document.getElementById('sp-split-wrap');
 const spSplitBtnsEl = document.getElementById('sp-split-btns');
+const spDirBtnsEl = document.getElementById('sp-dir-btns');
 const spCollapseBtn = document.getElementById('sp-collapse-btn');
 const spExpandBtn = document.getElementById('sp-expand-btn');
 const PANEL_COLLAPSED_KEY = 'ctm.panelCollapsed';
@@ -834,7 +835,7 @@ const PANEL_MODE_LABELS = { auto: '자동 수집', lead: '팀장이 채움', ai:
 const PANEL_LAYOUT_KEY = 'ctm.panelLayout';
 const PANEL_MAXSPLIT_KEY = 'ctm.panelMaxSplit';
 const PANEL_MAXSPLIT_DEFAULT = 3, PANEL_MAXSPLIT_LIMIT = 6; // 칸이 너무 많으면 한 칸이 쓸모없이 작아진다
-const PANE_MIN_H = 110;
+const PANE_MIN_H = 110, PANE_MIN_W = 170, PANE_PREF_W = 260; // 위아래로 나눌 때 칸의 최소 높이 / 좌우로 나눌 때 칸의 최소 너비 / 좌우로 나눌 때 패널이 처음 잡는 칸 너비
 function clampInt(v, lo, hi, fallback) { if (v === null || v === undefined || String(v).trim() === '') return fallback; const n = Math.round(Number(v)); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback; } // 비어 있거나 없는 값(Number(null)은 0)을 1로 잘못 읽지 않게 기본값을 쓴다
 function panelMaxSplit() { try { return clampInt(localStorage.getItem(PANEL_MAXSPLIT_KEY), 1, PANEL_MAXSPLIT_LIMIT, PANEL_MAXSPLIT_DEFAULT); } catch { return PANEL_MAXSPLIT_DEFAULT; } }
 function setPanelMaxSplit(n) {
@@ -843,13 +844,15 @@ function setPanelMaxSplit(n) {
   return v;
 }
 function loadPanelLayout() {
-  const L = { count: 1, slots: [], weights: [], pins: [] };
+  const L = { count: 1, dir: 'v', slots: [], weights: [], weightsH: [], pins: [] }; // dir: 'v' 위아래로 쌓기 / 'h' 좌우로 나란히(방향마다 칸 크기 비율을 따로 기억)
   let raw = null;
   try { raw = JSON.parse(localStorage.getItem(PANEL_LAYOUT_KEY)); } catch { /* 저장된 것이 없거나 깨졌으면 칸 하나로 */ }
   if (raw && typeof raw === 'object') {
     L.count = clampInt(raw.count, 1, PANEL_MAXSPLIT_LIMIT, 1);
     if (Array.isArray(raw.slots)) L.slots = raw.slots.slice(0, PANEL_MAXSPLIT_LIMIT).map(x => (typeof x === 'string' ? x : null));
+    L.dir = raw.dir === 'h' ? 'h' : 'v';
     if (Array.isArray(raw.weights)) L.weights = raw.weights.slice(0, PANEL_MAXSPLIT_LIMIT).map(Number).filter(n => Number.isFinite(n) && n > 0);
+    if (Array.isArray(raw.weightsH)) L.weightsH = raw.weightsH.slice(0, PANEL_MAXSPLIT_LIMIT).map(Number).filter(n => Number.isFinite(n) && n > 0);
     // 고정핀: 칸 번호별로 {internalId, label} 또는 null. internalId는 팀장이 재개돼 짧은 id가 바뀌어도 그대로라 그걸로 찾는다.
     if (Array.isArray(raw.pins)) L.pins = raw.pins.slice(0, PANEL_MAXSPLIT_LIMIT).map(x => (x && typeof x.internalId === 'string' && x.internalId ? { internalId: x.internalId, label: String(x.label || '').slice(0, 60) } : null));
   }
@@ -931,50 +934,58 @@ function createPane(idx) {
 }
 function observePane(p) { paneObserver.observe(p.root); paneObserver.observe(p.bodyEl); }
 
+const paneWeightsKey = () => { const k = panelLayout.dir === 'h' ? 'weightsH' : 'weights'; if (!Array.isArray(panelLayout[k])) panelLayout[k] = []; return k; }; // 값이 없는 옛 저장본이어도 안전하게
 function createDivider(i) {
   const d = document.createElement('div');
   d.className = 'sp-divider';
-  d.title = '끌어서 위아래 칸의 높이 조절 (더블클릭: 같은 높이로)';
+  d.title = '끌어서 칸 크기 조절 (더블클릭: 같은 크기로)';
   d.addEventListener('pointerdown', e => {
     e.preventDefault();
     try { d.setPointerCapture(e.pointerId); } catch { /* 포인터를 잡지 못해도 이 경계선 위의 움직임은 받는다 */ }
-    document.body.classList.add('sp-vresizing'); d.classList.add('dragging');
+    const horiz = panelLayout.dir === 'h'; // 좌우로 나눴으면 너비를, 위아래면 높이를 조절한다
+    const cls = horiz ? 'sp-hresizing' : 'sp-vresizing';
+    document.body.classList.add(cls); d.classList.add('dragging');
     const vis = visiblePanes();
     const a = vis[i], b = vis[i + 1];
     if (!a || !b) return;
-    const startY = e.clientY;
-    const hs = vis.map(p => p.root.getBoundingClientRect().height);
-    vis.forEach((p, k) => { p.root.style.flex = `${hs[k]} 1 0px`; }); // 모든 칸을 지금 높이(px) 비율로 고정해 두고 이웃한 두 칸만 옮긴다
+    const size = p => (horiz ? p.root.getBoundingClientRect().width : p.root.getBoundingClientRect().height);
+    const start = horiz ? e.clientX : e.clientY;
+    const min = horiz ? PANE_MIN_W : PANE_MIN_H;
+    const hs = vis.map(size);
+    vis.forEach((p, k) => { p.root.style.flex = `${hs[k]} 1 0px`; }); // 모든 칸을 지금 크기(px) 비율로 고정해 두고 이웃한 두 칸만 옮긴다
     const move = ev => {
       const total = hs[i] + hs[i + 1];
-      const na = Math.min(total - PANE_MIN_H, Math.max(PANE_MIN_H, hs[i] + (ev.clientY - startY)));
+      const na = Math.min(total - min, Math.max(min, hs[i] + ((horiz ? ev.clientX : ev.clientY) - start)));
       a.root.style.flex = `${na} 1 0px`; b.root.style.flex = `${total - na} 1 0px`;
     };
     const up = () => {
       d.removeEventListener('pointermove', move); d.removeEventListener('pointerup', up); d.removeEventListener('pointercancel', up);
-      document.body.classList.remove('sp-vresizing'); d.classList.remove('dragging');
+      document.body.classList.remove(cls); d.classList.remove('dragging');
       savePaneWeights();
     };
     d.addEventListener('pointermove', move); d.addEventListener('pointerup', up); d.addEventListener('pointercancel', up);
   });
-  d.addEventListener('dblclick', () => { panelLayout.weights = []; savePanelLayout(); applyPaneSizes(panelPaneCount()); });
+  d.addEventListener('dblclick', () => { panelLayout[paneWeightsKey()] = []; savePanelLayout(); applyPaneSizes(panelPaneCount()); });
   return d;
 }
-// 지금 보이는 칸들의 높이 비율을 저장한다
+// 지금 보이는 칸들의 크기 비율을 (지금 방향 기준으로) 저장한다
 function savePaneWeights() {
   const vis = visiblePanes();
-  const hs = vis.map(p => p.root.getBoundingClientRect().height);
+  const horiz = panelLayout.dir === 'h';
+  const hs = vis.map(p => (horiz ? p.root.getBoundingClientRect().width : p.root.getBoundingClientRect().height));
   const total = hs.reduce((x, y) => x + y, 0);
   if (!(total > 0)) return;
   const w = hs.map(h => Math.max(0.05, h / total));
-  panelLayout.weights = w.concat(panelLayout.weights.slice(w.length)); // 보이지 않는 칸의 예전 비율은 그대로 둔다
+  const key = paneWeightsKey();
+  panelLayout[key] = w.concat(panelLayout[key].slice(w.length)); // 보이지 않는 칸의 예전 비율은 그대로 둔다
   savePanelLayout();
   vis.forEach((p, k) => { p.root.style.flex = `${w[k]} 1 0px`; });
 }
 function applyPaneSizes(count) {
+  const weights = panelLayout[paneWeightsKey()];
   visiblePanes().forEach((p, k) => {
     if (count <= 1) { p.root.style.flex = ''; return; } // 칸이 하나면 내용 높이대로(패널 최대 높이까지)
-    const w = panelLayout.weights.length >= count ? panelLayout.weights[k] : 1;
+    const w = weights.length >= count ? weights[k] : 1;
     p.root.style.flex = `${w} 1 0px`;
   });
 }
@@ -1007,15 +1018,21 @@ function assignPaneSlots(slots, count) {
 function renderSplitButtons() {
   const max = panelMaxSplit();
   spSplitWrapEl.hidden = max < 2;
-  if (max < 2) { spSplitBtnsEl.innerHTML = ''; return; }
+  if (max < 2) { spSplitBtnsEl.innerHTML = ''; spDirBtnsEl.innerHTML = ''; return; }
   const count = panelPaneCount();
   spSplitBtnsEl.innerHTML = Array.from({ length: max }, (_, i) => { const n = i + 1; const cls = n === count ? 'sp-split-btn active' : 'sp-split-btn'; return `<button class="${cls}" data-sp-split="${Number(n)}" title="${Number(n)}칸으로 나누기">${Number(n)}</button>`; }).join('');
+  spDirBtnsEl.innerHTML = [['v', '위아래', '위아래로 쌓기'], ['h', '좌우', '좌우로 나란히']].map(([d, label, tip]) => { const cls = d === panelLayout.dir ? 'sp-split-btn active' : 'sp-split-btn'; return `<button class="${cls}" data-sp-dir="${escapeHtml(d)}" title="${escapeHtml(tip)}">${escapeHtml(label)}</button>`; }).join('');
 }
 function setPanelCount(n) {
   panelLayout.count = clampInt(n, 1, panelMaxSplit(), 1); savePanelLayout();
   renderPanelChrome(); refreshPanelContent(true);
 }
+function setPanelDir(d) {
+  panelLayout.dir = d === 'h' ? 'h' : 'v'; savePanelLayout();
+  renderPanelChrome(); refreshPanelContent(true);
+}
 spSplitBtnsEl.addEventListener('click', e => { const b = e.target.closest('[data-sp-split]'); if (b) setPanelCount(Number(b.dataset.spSplit)); });
+spDirBtnsEl.addEventListener('click', e => { const b = e.target.closest('[data-sp-dir]'); if (b) setPanelDir(b.dataset.spDir); });
 
 function panelCollapsed() {
   try {
@@ -1046,12 +1063,14 @@ function renderPanelChrome() {
   document.body.classList.toggle('panel-open', visible && !collapsed);
   const count = panelPaneCount();
   spEl.classList.toggle('split', count > 1);
+  spEl.classList.toggle('hsplit', count > 1 && panelLayout.dir === 'h');
   if (!slots.length) { renderSplitButtons(); return; } // 슬롯이 없으면 보일 것이 없다(칸은 만들어 두지 않는다)
   syncPaneDom(count);
   assignPaneSlots(slots, count);
   applyPaneSizes(count);
   visiblePanes().forEach(p => renderPaneChrome(p, slots));
   renderSplitButtons();
+  syncPanelWidth(); // 좌우로 나누면 칸이 들어갈 만큼 패널을 넓힌다
 }
 
 // force: 화면을 다시 그린다. runScript: (스크립트 슬롯에서) 스크립트도 다시 실행한다 — 새로고침 버튼·슬롯 저장처럼 사용자가 직접 시킨 경우만 true.
@@ -1461,13 +1480,22 @@ async function loadPanelConfig() {
 // 패널 너비 조절: 왼쪽 가장자리를 끌면 바뀌고, 값은 이 PC에 저장한다(더블클릭하면 기본 340px).
 const PANEL_WIDTH_KEY = 'ctm.panelWidth';
 const PANEL_WIDTH_DEFAULT = 340, PANEL_WIDTH_MIN = 240, PANEL_MAIN_MIN = 420;
+// 좌우로 나눴을 때 칸들이 최소 너비로 들어가는 데 필요한 패널 너비(위아래이거나 칸이 하나면 0)
+function panelWidthNeed() { const n = panelPaneCount(); return panelLayout.dir === 'h' && n > 1 ? n * PANE_MIN_W + (n - 1) * 9 + 2 : 0; }
 function clampPanelWidth(w) {
   const max = Math.max(PANEL_WIDTH_MIN, window.innerWidth - PANEL_MAIN_MIN - 30); // 메인이 너무 좁아지지 않게
-  return Math.round(Math.min(max, Math.max(PANEL_WIDTH_MIN, w)));
+  const min = Math.min(max, Math.max(PANEL_WIDTH_MIN, panelWidthNeed()));
+  return Math.round(Math.min(max, Math.max(min, w)));
 }
+function syncPanelWidth() { applyPanelWidth(savedPanelWidth()); }
 function applyPanelWidth(w) { document.documentElement.style.setProperty('--sp-w', `${clampPanelWidth(w)}px`); }
+// 좌우로 나눈 상태(칸이 둘 이상)의 패널 너비는 위아래일 때와 따로, 칸 수마다 따로 기억한다 — 처음에는 칸 수 × 선호 너비로 넓게 잡고, 사용자가 끌면 그 값을 쓴다.
+function panelHorizontal() { return panelLayout.dir === 'h' && panelPaneCount() > 1; }
+function panelWidthKey() { return panelHorizontal() ? `ctm.panelWidthH${panelPaneCount()}` : PANEL_WIDTH_KEY; }
+function panelWidthWanted() { const n = panelPaneCount(); return n * PANE_PREF_W + (n - 1) * 9 + 2; }
 function savedPanelWidth() {
-  try { const v = Number(localStorage.getItem(PANEL_WIDTH_KEY)); return v > 0 ? v : PANEL_WIDTH_DEFAULT; } catch { return PANEL_WIDTH_DEFAULT; }
+  const fallback = panelHorizontal() ? panelWidthWanted() : PANEL_WIDTH_DEFAULT;
+  try { const v = Number(localStorage.getItem(panelWidthKey())); return v > 0 ? v : fallback; } catch { return fallback; }
 }
 applyPanelWidth(savedPanelWidth());
 window.addEventListener('resize', () => applyPanelWidth(savedPanelWidth()));
@@ -1484,15 +1512,15 @@ spResizeEl.addEventListener('pointerdown', e => {
     spResizeEl.removeEventListener('pointerup', up);
     spResizeEl.removeEventListener('pointercancel', up);
     document.body.classList.remove('sp-resizing');
-    try { localStorage.setItem(PANEL_WIDTH_KEY, String(w)); } catch { /* 저장 안 돼도 이번 화면에서는 적용 */ }
+    try { localStorage.setItem(panelWidthKey(), String(w)); } catch { /* 저장 안 돼도 이번 화면에서는 적용 */ }
   };
   spResizeEl.addEventListener('pointermove', move);
   spResizeEl.addEventListener('pointerup', up);
   spResizeEl.addEventListener('pointercancel', up);
 });
 spResizeEl.addEventListener('dblclick', () => {
-  applyPanelWidth(PANEL_WIDTH_DEFAULT);
-  try { localStorage.removeItem(PANEL_WIDTH_KEY); } catch { /* 지울 게 없으면 그대로 */ }
+  try { localStorage.removeItem(panelWidthKey()); } catch { /* 지울 게 없으면 그대로 */ }
+  syncPanelWidth(); // 기본 너비로(좌우로 나눈 상태면 칸 수에 맞는 너비로)
 });
 spCollapseBtn.addEventListener('click', () => setPanelCollapsed(true));
 spExpandBtn.addEventListener('click', () => setPanelCollapsed(false));

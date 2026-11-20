@@ -952,9 +952,19 @@ button:disabled { background: var(--disabled); color: var(--text-dim); cursor: n
 .sp-divider::after { content: ''; position: absolute; left: 0; right: 0; top: 4px; height: 1px; background: var(--border-2); }
 .sp-divider:hover::after, body.sp-vresizing .sp-divider.dragging::after { height: 3px; top: 3px; background: var(--accent-2); }
 body.sp-vresizing { user-select: none; cursor: row-resize; }
-body.sp-vresizing iframe { pointer-events: none; } /* 끄는 동안 그래픽 프레임이 마우스 움직임을 가로채지 않게 */
+body.sp-hresizing { user-select: none; cursor: col-resize; }
+body.sp-vresizing iframe, body.sp-hresizing iframe { pointer-events: none; }
+/* 좌우로 나눌 때: 칸이 나란히 서고 경계선은 세로 막대가 된다 */
+#side-panel.hsplit .sp-panes { flex-direction: row; }
+#side-panel.hsplit .sp-divider { width: 9px; height: auto; cursor: col-resize; }
+#side-panel.hsplit .sp-divider::after { left: 4px; right: auto; top: 0; bottom: 0; width: 1px; height: auto; }
+#side-panel.hsplit .sp-divider:hover::after, body.sp-hresizing .sp-divider.dragging::after { width: 3px; left: 3px; height: auto; top: 0; background: var(--accent-2); }
+#side-panel.hsplit .sp-pane .sp-filter select { max-width: 110px; } /* 끄는 동안 그래픽 프레임이 마우스 움직임을 가로채지 않게 */
 .sp-head { display: flex; align-items: center; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
-.sp-tabs { flex: 1; display: flex; gap: 4px; overflow-x: auto; min-width: 0; }
+.sp-tabs { flex: 1; display: flex; gap: 4px; overflow-x: auto; min-width: 0; scrollbar-width: thin; scrollbar-color: var(--border-2) transparent; }
+.sp-tabs::-webkit-scrollbar { height: 3px; }
+.sp-tabs::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 2px; }
+.sp-tabs::-webkit-scrollbar-track { background: transparent; }
 .sp-tab { background: transparent; border: 1px solid var(--border-2); color: var(--text-soft); border-radius: 999px; padding: 2px 10px; font-size: 11px; white-space: nowrap; }
 .sp-tab.active { border-color: var(--accent-2); color: var(--accent-2); }
 .sp-icon { background: transparent; border: none; color: var(--text-soft); padding: 2px 6px; font-size: 14px; }

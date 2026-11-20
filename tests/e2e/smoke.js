@@ -241,7 +241,7 @@ async function main() {
     ok(/^ERR:/.test(denied) && denied.includes('ctm.call을 쓸 수 없습니다'), `JS 허용이 꺼진 슬롯이 거절되지 않았습니다: ${denied}`);
     // 화면 경로: 프레임 안에서 ctm.call
     await app.eval(`document.querySelector('.tab-btn[data-tab="work"]').click(); 1`); await sleep(300); // 패널은 작업 탭에서만 보인다
-    await app.eval(`(async () => { await window.api.setPanelEnabled(true); panelConfig = await window.api.getPanelConfig(); panelLayout = { count: 1, slots: [${JSON.stringify(slotId)}], weights: [], pins: [] }; try { localStorage.setItem('ctm.panelCollapsed', '0'); } catch (e) {} renderPanelChrome(); await refreshPanelContent(true, true); return 1 })()`);
+    await app.eval(`(async () => { await window.api.setPanelEnabled(true); panelConfig = await window.api.getPanelConfig(); panelLayout = { count: 1, slots: [${JSON.stringify(slotId)}], weights: [], weightsH: [], dir: 'v', pins: [] }; try { localStorage.setItem('ctm.panelCollapsed', '0'); } catch (e) {} renderPanelChrome(); await refreshPanelContent(true, true); return 1 })()`);
     let fsx = null;
     for (let i = 0; i < 40 && !fsx; i++) { await sleep(500); fsx = await app.frameSession('ctmframe'); }
     ok(fsx, '패널 그래픽 프레임이 뜨지 않았습니다');
@@ -275,7 +275,7 @@ async function main() {
     await app.eval(`window.api.savePanelSlot(${mkSlot('슬롯A', '# 슬롯 A 내용')}).then(() => 1)`);
     await app.eval(`window.api.savePanelSlot(${mkSlot('슬롯B', '# 슬롯 B 내용')}).then(() => 1)`);
     await app.eval(`document.querySelector('.tab-btn[data-tab="work"]').click(); 1`); await sleep(300);
-    const ids = JSON.parse(await app.eval(`(async () => { await window.api.setPanelEnabled(true); panelConfig = await window.api.getPanelConfig(); try { localStorage.setItem('ctm.panelCollapsed', '0'); localStorage.removeItem('ctm.panelMaxSplit'); localStorage.removeItem('ctm.panelLayout'); } catch (e) {} panelLayout = { count: 1, slots: [], weights: [], pins: [] }; renderPanelChrome(); await refreshPanelContent(true, true); return JSON.stringify(panelConfig.slots.map(s => s.id)); })()`));
+    const ids = JSON.parse(await app.eval(`(async () => { await window.api.setPanelEnabled(true); panelConfig = await window.api.getPanelConfig(); try { localStorage.setItem('ctm.panelCollapsed', '0'); localStorage.removeItem('ctm.panelMaxSplit'); localStorage.removeItem('ctm.panelLayout'); } catch (e) {} panelLayout = { count: 1, slots: [], weights: [], weightsH: [], dir: 'v', pins: [] }; renderPanelChrome(); await refreshPanelContent(true, true); return JSON.stringify(panelConfig.slots.map(s => s.id)); })()`));
     ok(ids.length === 2, `슬롯이 둘이어야 합니다: ${ids}`);
     const info = async () => JSON.parse(await app.eval(`JSON.stringify({ panes: [...document.querySelectorAll('#sp-panes .sp-pane')].map(p => ({ h: Math.round(p.getBoundingClientRect().height), body: p.querySelector('.sp-body').textContent, active: (p.querySelector('.sp-tab.active') || {}).textContent })), dividers: document.querySelectorAll('#sp-panes .sp-divider').length, split: document.getElementById('side-panel').classList.contains('split'), btns: [...document.querySelectorAll('[data-sp-split]')].map(b => b.dataset.spSplit + (b.classList.contains('active') ? '*' : '')), wrapHidden: document.getElementById('sp-split-wrap').hidden })`));
     let r = await info();
@@ -313,7 +313,49 @@ async function main() {
     const v99 = await app.eval(`(() => { const i = document.getElementById('panel-maxsplit-input'); i.value = '99'; i.dispatchEvent(new Event('change', { bubbles: true })); return document.getElementById('panel-maxsplit-input').value; })()`);
     ok(v99 === '6', `최대 개수는 6까지만(입력 99 → ${v99})`);
     // 정리
-    await app.eval(`(() => { const i = document.getElementById('panel-maxsplit-input'); i.value = '3'; i.dispatchEvent(new Event('change', { bubbles: true })); try { localStorage.removeItem('ctm.panelLayout'); localStorage.removeItem('ctm.panelMaxSplit'); } catch (e) {} panelLayout = { count: 1, slots: [], weights: [], pins: [] }; return 1; })()`);
+    await app.eval(`(() => { const i = document.getElementById('panel-maxsplit-input'); i.value = '3'; i.dispatchEvent(new Event('change', { bubbles: true })); try { localStorage.removeItem('ctm.panelLayout'); localStorage.removeItem('ctm.panelMaxSplit'); } catch (e) {} panelLayout = { count: 1, slots: [], weights: [], weightsH: [], dir: 'v', pins: [] }; return 1; })()`);
+    await app.eval('(async () => { const c = await window.api.getPanelConfig(); for (const sl of c.slots) await window.api.deletePanelSlot(sl.id); })()');
+  });
+
+  await check('나누는 방향을 위아래/좌우로 고를 수 있고, 좌우로 나누면 칸이 나란히 서며 패널이 넓어지고, 경계선을 끌면 너비가 바뀌며, 방향마다 크기 비율이 따로 저장된다', async () => {
+    await app.eval('(async () => { const c = await window.api.getPanelConfig(); for (const sl of c.slots) await window.api.deletePanelSlot(sl.id); })()');
+    const mkSlot = (name, text) => JSON.stringify({ name, mode: 'script', scope: 'all', preset: 'artifact-reports', instruction: '', autoUpdate: false, aiModel: 'sonnet', aiInclude: 'none', enabled: true, interpreter: 'node', script: `console.log(${JSON.stringify(text)})`, timeoutMs: 8000, outputFormat: 'markdown', allowJs: false });
+    await app.eval(`window.api.savePanelSlot(${mkSlot('슬롯A', '# 슬롯 A 내용')}).then(() => 1)`);
+    await app.eval(`window.api.savePanelSlot(${mkSlot('슬롯B', '# 슬롯 B 내용')}).then(() => 1)`);
+    await app.eval(`document.querySelector('.tab-btn[data-tab="work"]').click(); 1`); await sleep(300);
+    await app.eval(`(async () => { await window.api.setPanelEnabled(true); panelConfig = await window.api.getPanelConfig(); try { localStorage.setItem('ctm.panelCollapsed', '0'); localStorage.removeItem('ctm.panelMaxSplit'); localStorage.removeItem('ctm.panelLayout'); } catch (e) {} panelLayout = { count: 2, dir: 'v', slots: [], weights: [], weightsH: [], pins: [] }; localStorage.removeItem('ctm.panelWidth'); renderPanelChrome(); await refreshPanelContent(true, true); return 1; })()`);
+    const geo = async () => JSON.parse(await app.eval(`JSON.stringify({ panes: [...document.querySelectorAll('#sp-panes .sp-pane')].map(p => { const r = p.getBoundingClientRect(); return { l: Math.round(r.left), t: Math.round(r.top), w: Math.round(r.width), h: Math.round(r.height), body: p.querySelector('.sp-body').textContent }; }), div: [...document.querySelectorAll('#sp-panes .sp-divider')].map(d => { const r = d.getBoundingClientRect(); return { w: Math.round(r.width), h: Math.round(r.height) }; }), aside: Math.round(document.getElementById('side-panel').getBoundingClientRect().width), cls: document.getElementById('side-panel').className, dirBtns: [...document.querySelectorAll('[data-sp-dir]')].map(b => b.dataset.spDir + (b.classList.contains('active') ? '*' : '')) })`));
+    for (let i = 0; i < 20; i++) { await sleep(300); const g = await geo(); if (g.panes.length === 2 && g.panes.every(p => p.body.includes('슬롯'))) break; }
+    let g = await geo();
+    ok(g.dirBtns.join(',') === 'v*,h' && g.panes.length === 2 && Math.abs(g.panes[0].l - g.panes[1].l) <= 2 && g.panes[1].t > g.panes[0].t, `처음은 위아래로 쌓여야 합니다: ${JSON.stringify(g)}`);
+    const asideV = g.aside;
+    // 좌우로
+    await app.eval(`document.querySelector('[data-sp-dir="h"]').click(); 1`);
+    await sleep(600); g = await geo();
+    ok(g.dirBtns.join(',') === 'v,h*' && g.cls.includes('hsplit'), `좌우 버튼이 눌린 상태여야 합니다: ${JSON.stringify({ b: g.dirBtns, c: g.cls })}`);
+    ok(Math.abs(g.panes[0].t - g.panes[1].t) <= 2 && g.panes[1].l > g.panes[0].l && g.div.length === 1 && g.div[0].w <= 12 && g.div[0].h > 100, `좌우로 나란히 서고 경계선은 세로 막대여야 합니다: ${JSON.stringify(g)}`);
+    ok(Math.abs(g.panes[0].w - g.panes[1].w) <= 6 && g.panes.every(p => p.w >= 160), `처음에는 너비가 비슷하고 최소 너비 이상이어야 합니다: ${g.panes.map(p => p.w)}`);
+    ok(g.aside >= 2 * 250 && g.panes.every(p => p.w >= 230), `좌우로 나누면 칸당 260px쯤 되게 패널이 넓어져야 합니다: ${asideV} → ${g.aside} / ${g.panes.map(p => p.w)}`);
+    // 경계선 끌기(가로 방향): 오른쪽으로 40px
+    const before = g.panes.map(p => p.w);
+    await app.eval(`(() => { const d = document.querySelectorAll('#sp-panes .sp-divider')[0]; const b = d.getBoundingClientRect(); const x = b.left + b.width / 2; const ev = (t, dx) => d.dispatchEvent(new PointerEvent(t, { bubbles: true, clientX: x + dx, pointerId: 11 })); ev('pointerdown', 0); ev('pointermove', 40); ev('pointerup', 40); return 1; })()`);
+    await sleep(300); g = await geo();
+    ok(Math.abs((g.panes[0].w - before[0]) - 40) <= 4 && Math.abs((before[1] - g.panes[1].w) - 40) <= 4, `경계선을 끌면 너비가 바뀌어야 합니다: ${before} → ${g.panes.map(p => p.w)}`);
+    let saved = JSON.parse(await app.eval(`localStorage.getItem('ctm.panelLayout')`));
+    ok(saved.dir === 'h' && saved.weightsH.length === 2 && saved.weightsH[0] > saved.weightsH[1] && saved.weights.length === 0, `좌우 비율은 weightsH에만 저장돼야 합니다: ${JSON.stringify(saved)}`);
+    // 너무 좁게 끌지는 못한다
+    await app.eval(`(() => { const d = document.querySelectorAll('#sp-panes .sp-divider')[0]; const b = d.getBoundingClientRect(); const x = b.left + b.width / 2; const ev = (t, dx) => d.dispatchEvent(new PointerEvent(t, { bubbles: true, clientX: x + dx, pointerId: 12 })); ev('pointerdown', 0); ev('pointermove', -3000); ev('pointerup', -3000); return 1; })()`);
+    await sleep(300); g = await geo();
+    ok(g.panes[0].w >= 168 && g.panes[0].w <= 174, `칸은 최소 너비 아래로 줄지 않아야 합니다: ${g.panes.map(p => p.w)}`);
+    // 다시 위아래로: 쌓이고, 위아래 비율(weights)은 그대로 비어 있으며, 패널 너비는 원래대로
+    await app.eval(`document.querySelector('[data-sp-dir="v"]').click(); 1`);
+    await sleep(600); g = await geo();
+    ok(Math.abs(g.panes[0].l - g.panes[1].l) <= 2 && g.panes[1].t > g.panes[0].t && !g.cls.includes('hsplit'), `다시 위아래로 쌓여야 합니다: ${JSON.stringify(g)}`);
+    ok(g.aside <= asideV + 2, `위아래로 돌아오면 패널 너비도 원래대로여야 합니다: ${asideV} → ${g.aside}`);
+    saved = JSON.parse(await app.eval(`localStorage.getItem('ctm.panelLayout')`));
+    ok(saved.dir === 'v' && saved.weightsH.length === 2, `방향을 바꿔도 좌우 비율은 남아 있어야 합니다: ${JSON.stringify(saved)}`);
+    // 정리
+    await app.eval(`(() => { try { localStorage.removeItem('ctm.panelLayout'); localStorage.removeItem('ctm.panelMaxSplit'); for (const k of Object.keys(localStorage)) if (k.startsWith('ctm.panelWidth')) localStorage.removeItem(k); } catch (e) {} panelLayout = { count: 1, dir: 'v', slots: [], weights: [], weightsH: [], pins: [] }; renderPanelChrome(); return 1; })()`);
     await app.eval('(async () => { const c = await window.api.getPanelConfig(); for (const sl of c.slots) await window.api.deletePanelSlot(sl.id); })()');
   });
 

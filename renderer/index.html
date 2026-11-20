@@ -590,7 +590,7 @@
           <li><strong>직접 쓰기</strong> — 내가 마크다운으로 직접 씁니다.</li>
           <li><strong>스크립트</strong> — 내가 만든(또는 AI가 만든) 프로그램을 이 PC에서 실행해 그 결과를 표시합니다. 다음 "9. 스크립트 슬롯" 참고.</li>
         </ul>
-        <p><strong>화면 분할</strong> — 패널 위쪽 “화면 분할” 버튼(1·2·3…)으로 패널을 위아래 여러 칸으로 나눠 슬롯을 동시에 띄웁니다. 칸마다 자기 탭에서 슬롯을 따로 고르고(같은 슬롯을 여러 칸에 띄워도 됩니다) 칸 사이의 경계선을 끌어 높이를 조절합니다(더블클릭: 같은 높이로). 버튼이 1부터 몇까지 나올지는 앱 설정의 “오른쪽 패널”에서 “화면 분할 최대 개수”(1~6, 기본 3)로 정합니다. 칸 수·칸별 슬롯·높이는 이 PC에 저장됩니다.</p>
+        <p><strong>화면 분할</strong> — 패널 위쪽 “화면 분할” 버튼(1·2·3…)으로 패널을 위아래 여러 칸으로 나눠 슬롯을 동시에 띄웁니다. 나누는 방향은 “위아래”(쌓기)와 “좌우”(나란히) 중에 고릅니다 — 좌우로 나누면 칸마다 쓸 너비가 있도록 패널이 자동으로 넓어지고(왼쪽 가장자리를 끌어 다시 조절 가능) 방향마다 칸 크기 비율을 따로 기억합니다. 칸마다 자기 탭에서 슬롯을 따로 고르고(같은 슬롯을 여러 칸에 띄워도 됩니다) 칸 사이의 경계선을 끌어 높이(좌우일 때는 너비)를 조절합니다(더블클릭: 같은 크기로). 버튼이 1부터 몇까지 나올지는 앱 설정의 “오른쪽 패널”에서 “화면 분할 최대 개수”(1~6, 기본 3)로 정합니다. 칸 수·칸별 슬롯·높이는 이 PC에 저장됩니다.</p>
         <p><strong>📌 팀장 고정</strong> — 칸 머리글의 📌을 누르면 그 칸이 <u>지금 선택한 팀장</u>에 고정됩니다. 작업 탭에서 다른 팀장을 골라도 고정한 칸은 바뀌지 않고, 고정하지 않은 칸만 선택한 팀장을 따라갑니다(예: 한 칸은 g1cl-mgt-leader에 고정해 두고 다른 칸으로 다른 팀장을 둘러보기). 팀장이 재개돼 짧은 id가 바뀌어도 따라가고, 고정한 팀장이 목록에서 사라지면 칸에 안내가 뜹니다. 다시 눌러 풀면 선택한 팀장을 따라갑니다.</p>
         <p><strong>조작</strong> — 패널 왼쪽 가장자리를 끌면 너비가 바뀌고(더블클릭: 기본 너비), ▸ 로 접었다가 "◂ 패널"로 다시 엽니다. ⟳는 새로고침, ✎는 내용 고치기입니다(자동 수집 슬롯을 뺀 슬롯에서 보입니다).</p>
         <p><strong>화면 필터(자동 수집 슬롯)</strong> — 리더별, 기간별(전체·오늘·최근 7일·30일)로 골라 볼 수 있고, <strong>"현재 리더만"</strong>을 켜면 지금 대화창에 띄운 리더의 항목만 보입니다. 필터는 <u>보이는 것만</u> 거르고 모아 둔 자료는 줄이지 않으며, 바꾸면 3초 갱신을 기다리지 않고 바로 반영됩니다.</p>
@@ -658,7 +658,7 @@
   <aside id="side-panel" hidden>
     <div id="sp-resize" class="sp-resize" title="끌어서 너비 조절 (더블클릭: 기본 너비)"></div>
     <div id="sp-toolbar" class="sp-toolbar">
-      <span id="sp-split-wrap" class="sp-split-wrap" hidden><span class="sp-split-label">화면 분할</span><span id="sp-split-btns" class="sp-split-btns"></span></span>
+      <span id="sp-split-wrap" class="sp-split-wrap" hidden><span class="sp-split-label">화면 분할</span><span id="sp-split-btns" class="sp-split-btns"></span><span id="sp-dir-btns" class="sp-split-btns" title="나누는 방향"></span></span>
       <span class="sp-toolbar-spacer"></span>
       <button id="sp-collapse-btn" class="sp-icon" title="패널 접기" aria-label="패널 접기">▸</button>
     </div>
