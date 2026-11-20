@@ -818,23 +818,204 @@ document.getElementById('settings-nav').addEventListener('click', e => {
 // ---------------- 오른쪽 사용자 패널 ----------------
 // 설정(앱 설정 탭의 "오른쪽 패널")에서 슬롯을 만들면 작업 탭 오른쪽에 정적 마크다운으로 띄운다 — 동작 설명은 src-tauri/src/side_panel.rs 맨 위 참고.
 const spEl = document.getElementById('side-panel');
-const spTabsEl = document.getElementById('sp-tabs');
-const spBodyEl = document.getElementById('sp-body');
-const spMetaEl = document.getElementById('sp-meta');
-const spRefreshBtn = document.getElementById('sp-refresh-btn');
-const spEditBtn = document.getElementById('sp-edit-btn');
+const spPanesEl = document.getElementById('sp-panes');
+const spToolbarEl = document.getElementById('sp-toolbar');
+const spPaneTemplate = document.getElementById('sp-pane-template');
+const spSplitWrapEl = document.getElementById('sp-split-wrap');
+const spSplitBtnsEl = document.getElementById('sp-split-btns');
 const spCollapseBtn = document.getElementById('sp-collapse-btn');
 const spExpandBtn = document.getElementById('sp-expand-btn');
-const spEditorEl = document.getElementById('sp-editor');
-const spEditorText = document.getElementById('sp-editor-text');
 const PANEL_COLLAPSED_KEY = 'ctm.panelCollapsed';
 let panelConfig = { enabled: false, slots: [], scriptsAllowed: false };
-let panelActiveId = null;
-let panelContent = null;
-let panelEditing = false;
-let panelBusy = false;
-let panelLastKey = '';
 const PANEL_MODE_LABELS = { auto: '자동 수집', lead: '팀장이 채움', ai: 'AI가 정리', manual: '직접 쓰기', script: '스크립트' };
+
+// ---- 화면 분할: 패널을 위아래 여러 칸(앱 설정에서 정한 최대 개수까지)으로 나눠 슬롯을 동시에 띄운다. 칸마다 슬롯을 따로 고르고(같은 슬롯도 됨) 경계선을 끌어 높이를 조절한다. ----
+// 칸 수·칸별 슬롯·높이 비율은 이 PC에만 저장한다(너비·접힘과 같은 방식). 칸은 처음 필요할 때 만들어 두고 계속 재사용한다(그래야 칸 수를 바꿔도 남아 있는 칸의 그래픽이 다시 뜨지 않는다).
+const PANEL_LAYOUT_KEY = 'ctm.panelLayout';
+const PANEL_MAXSPLIT_KEY = 'ctm.panelMaxSplit';
+const PANEL_MAXSPLIT_DEFAULT = 3, PANEL_MAXSPLIT_LIMIT = 6; // 칸이 너무 많으면 한 칸이 쓸모없이 작아진다
+const PANE_MIN_H = 110;
+function clampInt(v, lo, hi, fallback) { if (v === null || v === undefined || String(v).trim() === '') return fallback; const n = Math.round(Number(v)); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : fallback; } // 비어 있거나 없는 값(Number(null)은 0)을 1로 잘못 읽지 않게 기본값을 쓴다
+function panelMaxSplit() { try { return clampInt(localStorage.getItem(PANEL_MAXSPLIT_KEY), 1, PANEL_MAXSPLIT_LIMIT, PANEL_MAXSPLIT_DEFAULT); } catch { return PANEL_MAXSPLIT_DEFAULT; } }
+function setPanelMaxSplit(n) {
+  const v = clampInt(n, 1, PANEL_MAXSPLIT_LIMIT, PANEL_MAXSPLIT_DEFAULT);
+  try { localStorage.setItem(PANEL_MAXSPLIT_KEY, String(v)); } catch { /* 저장 안 돼도 이번 화면에서는 적용 */ }
+  return v;
+}
+function loadPanelLayout() {
+  const L = { count: 1, slots: [], weights: [], pins: [] };
+  let raw = null;
+  try { raw = JSON.parse(localStorage.getItem(PANEL_LAYOUT_KEY)); } catch { /* 저장된 것이 없거나 깨졌으면 칸 하나로 */ }
+  if (raw && typeof raw === 'object') {
+    L.count = clampInt(raw.count, 1, PANEL_MAXSPLIT_LIMIT, 1);
+    if (Array.isArray(raw.slots)) L.slots = raw.slots.slice(0, PANEL_MAXSPLIT_LIMIT).map(x => (typeof x === 'string' ? x : null));
+    if (Array.isArray(raw.weights)) L.weights = raw.weights.slice(0, PANEL_MAXSPLIT_LIMIT).map(Number).filter(n => Number.isFinite(n) && n > 0);
+    // 고정핀: 칸 번호별로 {internalId, label} 또는 null. internalId는 팀장이 재개돼 짧은 id가 바뀌어도 그대로라 그걸로 찾는다.
+    if (Array.isArray(raw.pins)) L.pins = raw.pins.slice(0, PANEL_MAXSPLIT_LIMIT).map(x => (x && typeof x.internalId === 'string' && x.internalId ? { internalId: x.internalId, label: String(x.label || '').slice(0, 60) } : null));
+  }
+  return L;
+}
+let panelLayout = loadPanelLayout();
+function savePanelLayout() { try { localStorage.setItem(PANEL_LAYOUT_KEY, JSON.stringify(panelLayout)); } catch { /* 저장 안 돼도 이번 화면에서는 적용 */ } }
+function panelPaneCount() { return Math.min(panelLayout.count, panelMaxSplit()); }
+const panes = []; // 만들어 둔 칸들(앞에서부터 panelPaneCount()개가 보인다)
+const paneDividers = []; // paneDividers[i]: i번째 칸과 i+1번째 칸 사이 경계선
+let paneObserver = null; // 칸 크기가 바뀌면 그래픽에 보이는 높이를 다시 알린다(아래 ResizeObserver 설정에서 채운다)
+function visiblePanes() { return panes.slice(0, panelPaneCount()); }
+const paneSlot = p => enabledPanelSlots().find(s => s.id === p.activeId) || null;
+// 이 칸이 보여 줄 팀장의 짧은 id: 고정핀이 있으면 고정한 팀장(없으면 null), 없으면 지금 선택한 팀장. 고정은 internalId로 찾으므로 팀장이 재개돼 짧은 id가 바뀌어도 따라간다.
+function paneLeadId(p) {
+  const pin = panelLayout.pins[p.idx];
+  if (!pin) return selectedLeadId;
+  const row = lastRows.find(r => r.isLead && r.internalId === pin.internalId);
+  return row ? row.id : null;
+}
+const pinLabel = pin => { const row = lastRows.find(r => r.isLead && r.internalId === pin.internalId); return (row && (row.label || row.projectName)) || pin.label || '팀장'; };
+function resetPanelCache() { panes.forEach(p => { p.lastKey = ''; }); }
+
+function createPane(idx) {
+  const root = spPaneTemplate.content.firstElementChild.cloneNode(true);
+  const q = sel => root.querySelector(sel);
+  const p = {
+    idx, root, tabsEl: q('.sp-tabs'), pinBtn: q('.sp-pin'), refreshBtn: q('.sp-refresh'), editBtn: q('.sp-edit'), metaEl: q('.sp-meta'),
+    filterEl: q('.sp-filter'), filterLeadEl: q('.sp-filter-lead'), filterRangeEl: q('.sp-filter-range'), filterCurrentEl: q('.sp-filter-current'),
+    bodyEl: q('.sp-body'), editorEl: q('.sp-editor'), editorText: q('.sp-editor-text'),
+    activeId: null, content: null, editing: false, busy: false, lastKey: '', fetchSeq: 0, metaText: '', toastTimer: null,
+    filter: { lead: '', range: 'all', current: false }, // 자동 수집 슬롯의 화면 필터(리더별·기간별·현재 리더만) — 칸마다 따로
+  };
+  p.tabsEl.addEventListener('click', e => {
+    const tab = e.target.closest('[data-sp-tab]');
+    if (!tab) return;
+    p.activeId = tab.dataset.spTab; panelLayout.slots[idx] = p.activeId; savePanelLayout();
+    p.editing = false; p.editorEl.hidden = true; p.bodyEl.hidden = false; p.lastKey = '';
+    renderPanelChrome(); refreshPane(p, true);
+  });
+  p.pinBtn.addEventListener('click', () => {
+    if (panelLayout.pins[idx]) panelLayout.pins[idx] = null; // 풀기: 다시 선택한 팀장을 따라간다
+    else {
+      const row = lastRows.find(r => r.isLead && r.id === selectedLeadId);
+      if (!row || !row.internalId) { p.metaEl.textContent = '⚠ 먼저 작업 탭에서 팀장을 선택하세요'; return; }
+      panelLayout.pins[idx] = { internalId: row.internalId, label: String(row.label || row.projectName || row.id || '').slice(0, 60) };
+    }
+    savePanelLayout(); p.lastKey = ''; renderPanelChrome(); refreshPane(p, true);
+  });
+  p.bodyEl.addEventListener('click', async e => {
+    const a = e.target.closest('a[data-url]');
+    if (!a) return;
+    e.preventDefault();
+    try { await window.api.openExternalUrl(a.dataset.url); } catch (err) { console.error('링크 열기 실패:', err); }
+  });
+  p.refreshBtn.addEventListener('click', async () => {
+    const slot = paneSlot(p);
+    if (!slot || p.busy) return;
+    if (slot.mode !== 'ai') { refreshPane(p, true, true); return; }
+    p.busy = true; p.refreshBtn.disabled = true; p.metaEl.textContent = 'AI가 정리하는 중입니다(최대 2분)...';
+    try { await window.api.refreshPanelSlot(slot.id); resetPanelCache(); } catch (err) { p.metaEl.textContent = errMsg(err); }
+    finally { p.busy = false; p.refreshBtn.disabled = false; await refreshPane(p, true, true); }
+  });
+  p.editBtn.addEventListener('click', () => {
+    if (!paneSlot(p)) return;
+    p.editing = true; p.editorText.value = p.content ? p.content.markdown : '';
+    p.editorEl.hidden = false; p.bodyEl.hidden = true; p.editorText.focus();
+  });
+  q('.sp-editor-cancel').addEventListener('click', () => { p.editing = false; p.editorEl.hidden = true; p.bodyEl.hidden = false; refreshPane(p, true); });
+  q('.sp-editor-save').addEventListener('click', async () => {
+    const slot = paneSlot(p);
+    if (!slot) return;
+    try { await window.api.savePanelContent(slot.id, p.editorText.value); } catch (err) { p.metaEl.textContent = errMsg(err); return; }
+    p.editing = false; p.editorEl.hidden = true; p.bodyEl.hidden = false; resetPanelCache(); refreshPanelContent(true, true);
+  });
+  for (const el of [p.filterLeadEl, p.filterRangeEl, p.filterCurrentEl]) el.addEventListener('change', () => onPaneFilterChange(p));
+  if (paneObserver) observePane(p);
+  return p;
+}
+function observePane(p) { paneObserver.observe(p.root); paneObserver.observe(p.bodyEl); }
+
+function createDivider(i) {
+  const d = document.createElement('div');
+  d.className = 'sp-divider';
+  d.title = '끌어서 위아래 칸의 높이 조절 (더블클릭: 같은 높이로)';
+  d.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    try { d.setPointerCapture(e.pointerId); } catch { /* 포인터를 잡지 못해도 이 경계선 위의 움직임은 받는다 */ }
+    document.body.classList.add('sp-vresizing'); d.classList.add('dragging');
+    const vis = visiblePanes();
+    const a = vis[i], b = vis[i + 1];
+    if (!a || !b) return;
+    const startY = e.clientY;
+    const hs = vis.map(p => p.root.getBoundingClientRect().height);
+    vis.forEach((p, k) => { p.root.style.flex = `${hs[k]} 1 0px`; }); // 모든 칸을 지금 높이(px) 비율로 고정해 두고 이웃한 두 칸만 옮긴다
+    const move = ev => {
+      const total = hs[i] + hs[i + 1];
+      const na = Math.min(total - PANE_MIN_H, Math.max(PANE_MIN_H, hs[i] + (ev.clientY - startY)));
+      a.root.style.flex = `${na} 1 0px`; b.root.style.flex = `${total - na} 1 0px`;
+    };
+    const up = () => {
+      d.removeEventListener('pointermove', move); d.removeEventListener('pointerup', up); d.removeEventListener('pointercancel', up);
+      document.body.classList.remove('sp-vresizing'); d.classList.remove('dragging');
+      savePaneWeights();
+    };
+    d.addEventListener('pointermove', move); d.addEventListener('pointerup', up); d.addEventListener('pointercancel', up);
+  });
+  d.addEventListener('dblclick', () => { panelLayout.weights = []; savePanelLayout(); applyPaneSizes(panelPaneCount()); });
+  return d;
+}
+// 지금 보이는 칸들의 높이 비율을 저장한다
+function savePaneWeights() {
+  const vis = visiblePanes();
+  const hs = vis.map(p => p.root.getBoundingClientRect().height);
+  const total = hs.reduce((x, y) => x + y, 0);
+  if (!(total > 0)) return;
+  const w = hs.map(h => Math.max(0.05, h / total));
+  panelLayout.weights = w.concat(panelLayout.weights.slice(w.length)); // 보이지 않는 칸의 예전 비율은 그대로 둔다
+  savePanelLayout();
+  vis.forEach((p, k) => { p.root.style.flex = `${w[k]} 1 0px`; });
+}
+function applyPaneSizes(count) {
+  visiblePanes().forEach((p, k) => {
+    if (count <= 1) { p.root.style.flex = ''; return; } // 칸이 하나면 내용 높이대로(패널 최대 높이까지)
+    const w = panelLayout.weights.length >= count ? panelLayout.weights[k] : 1;
+    p.root.style.flex = `${w} 1 0px`;
+  });
+}
+// 보이는 칸 수에 맞춰 칸과 경계선을 붙이거나 뗀다. 이미 맞게 붙어 있으면 건드리지 않는다(칸을 다시 붙이면 그 안의 그래픽 프레임이 다시 뜬다).
+function syncPaneDom(count) {
+  while (panes.length < count) {
+    const p = createPane(panes.length);
+    panes.push(p);
+    if (panes.length > 1) paneDividers.push(createDivider(panes.length - 2));
+  }
+  const want = [];
+  for (let i = 0; i < count; i++) { want.push(panes[i].root); if (i < count - 1) want.push(paneDividers[i]); }
+  const have = [...spPanesEl.children];
+  if (want.length === have.length && want.every((n, i) => n === have[i])) return;
+  have.forEach(n => { if (!want.includes(n)) n.remove(); });
+  want.forEach((n, i) => { if (spPanesEl.children[i] !== n) spPanesEl.insertBefore(n, spPanesEl.children[i] || null); });
+}
+// 칸마다 보여 줄 슬롯: 저장해 둔 것이 아직 있으면 그대로, 없으면(처음·삭제·꺼짐) 다른 칸이 안 쓰는 슬롯부터 차례로
+function assignPaneSlots(slots, count) {
+  const ids = new Set(slots.map(s => s.id));
+  const used = new Set();
+  let changed = false;
+  for (let i = 0; i < count; i++) {
+    let id = panelLayout.slots[i];
+    if (!ids.has(id)) { id = (slots.find(s => !used.has(s.id)) || slots[0] || {}).id || null; if (panelLayout.slots[i] !== id) { panelLayout.slots[i] = id; changed = true; } }
+    panes[i].activeId = id; used.add(id);
+  }
+  if (changed) savePanelLayout();
+}
+function renderSplitButtons() {
+  const max = panelMaxSplit();
+  spSplitWrapEl.hidden = max < 2;
+  if (max < 2) { spSplitBtnsEl.innerHTML = ''; return; }
+  const count = panelPaneCount();
+  spSplitBtnsEl.innerHTML = Array.from({ length: max }, (_, i) => { const n = i + 1; const cls = n === count ? 'sp-split-btn active' : 'sp-split-btn'; return `<button class="${cls}" data-sp-split="${Number(n)}" title="${Number(n)}칸으로 나누기">${Number(n)}</button>`; }).join('');
+}
+function setPanelCount(n) {
+  panelLayout.count = clampInt(n, 1, panelMaxSplit(), 1); savePanelLayout();
+  renderPanelChrome(); refreshPanelContent(true);
+}
+spSplitBtnsEl.addEventListener('click', e => { const b = e.target.closest('[data-sp-split]'); if (b) setPanelCount(Number(b.dataset.spSplit)); });
 
 function panelCollapsed() {
   try {
@@ -844,47 +1025,60 @@ function panelCollapsed() {
 }
 function setPanelCollapsed(v) { try { localStorage.setItem(PANEL_COLLAPSED_KEY, v ? '1' : '0'); } catch { /* 저장 안 돼도 이번 화면에서는 적용 */ } renderPanelChrome(); refreshPanelContent(true); }
 function enabledPanelSlots() { return (panelConfig.slots || []).filter(s => s.enabled); }
-function activePanelSlot() { return enabledPanelSlots().find(s => s.id === panelActiveId) || null; }
+function activePanelSlot() { return panes.length ? paneSlot(panes[0]) : null; } // 첫 칸의 슬롯(예전 단일 패널과 같은 뜻)
 function workTabActive() { return document.getElementById('work-tab').classList.contains('active'); }
 
+function renderPaneChrome(p, slots) {
+  p.tabsEl.innerHTML = slots.map(s => { const cls = s.id === p.activeId ? 'sp-tab active' : 'sp-tab'; return `<button class="${cls}" data-sp-tab="${escapeHtml(s.id)}">${escapeHtml(s.name)}</button>`; }).join('');
+  const pin = panelLayout.pins[p.idx];
+  p.pinBtn.classList.toggle('on', !!pin);
+  p.pinBtn.title = pin ? `📌 ${pinLabel(pin)}에 고정됨 — 누르면 풀어서 다시 선택한 팀장을 따라갑니다` : '이 칸을 지금 선택한 팀장에 고정합니다(다른 팀장을 골라도 이 칸은 바뀌지 않습니다)';
+  const slot = paneSlot(p);
+  p.editBtn.hidden = !slot || slot.mode === 'auto';
+  p.refreshBtn.title = slot && slot.mode === 'ai' ? 'AI로 지금 갱신' : '새로고침';
+}
 function renderPanelChrome() {
   const slots = enabledPanelSlots();
-  if (!slots.some(s => s.id === panelActiveId)) panelActiveId = slots.length ? slots[0].id : null;
   const visible = panelConfig.enabled && slots.length > 0 && workTabActive();
   const collapsed = panelCollapsed();
   spEl.hidden = !(visible && !collapsed);
   spExpandBtn.hidden = !(visible && collapsed);
   document.body.classList.toggle('panel-open', visible && !collapsed);
-  spTabsEl.innerHTML = slots.map(s => `<button class="sp-tab ${s.id === panelActiveId ? 'active' : ''}" data-sp-tab="${escapeHtml(s.id)}">${escapeHtml(s.name)}</button>`).join('');
-  const slot = activePanelSlot();
-  spEditBtn.hidden = !slot || slot.mode === 'auto';
-  spRefreshBtn.title = slot && slot.mode === 'ai' ? 'AI로 지금 갱신' : '새로고침';
+  const count = panelPaneCount();
+  spEl.classList.toggle('split', count > 1);
+  if (!slots.length) { renderSplitButtons(); return; } // 슬롯이 없으면 보일 것이 없다(칸은 만들어 두지 않는다)
+  syncPaneDom(count);
+  assignPaneSlots(slots, count);
+  applyPaneSizes(count);
+  visiblePanes().forEach(p => renderPaneChrome(p, slots));
+  renderSplitButtons();
 }
 
-let panelFetchSeq = 0;
 // force: 화면을 다시 그린다. runScript: (스크립트 슬롯에서) 스크립트도 다시 실행한다 — 새로고침 버튼·슬롯 저장처럼 사용자가 직접 시킨 경우만 true.
-async function refreshPanelContent(force, runScript) {
-  const slot = activePanelSlot();
-  if (!slot || spEl.hidden || panelEditing) return;
-  const leadId = (slot.mode === 'auto' && slot.scope === 'selected') || slot.mode === 'script' ? selectedLeadId : null;
+async function refreshPane(p, force, runScript) {
+  const slot = paneSlot(p);
+  if (!slot || spEl.hidden || p.editing) return;
+  const paneLead = paneLeadId(p);
+  if (panelLayout.pins[p.idx] && !paneLead) { p.metaEl.textContent = '⚠ 고정한 팀장을 찾을 수 없습니다 — 📌을 눌러 풀 수 있습니다'; return; }
+  const leadId = (slot.mode === 'auto' && slot.scope === 'selected') || slot.mode === 'script' ? paneLead : null;
   let c;
-  const mySeq = ++panelFetchSeq;
-  try { c = await window.api.getPanelContent(slot.id, leadId, runScript === true && slot.mode === 'script'); } catch (err) { if (mySeq === panelFetchSeq) spMetaEl.textContent = `불러오지 못했습니다: ${errMsg(err)}`; return; }
-  if (mySeq !== panelFetchSeq) return; // 그 사이에 더 새로 요청한 조회(탭·팀장 전환)가 있다 — 늦게 온 옛 결과로 화면을 덮지 않는다
+  const mySeq = ++p.fetchSeq;
+  try { c = await window.api.getPanelContent(slot.id, leadId, runScript === true && slot.mode === 'script'); } catch (err) { if (mySeq === p.fetchSeq) p.metaEl.textContent = `불러오지 못했습니다: ${errMsg(err)}`; return; }
+  if (mySeq !== p.fetchSeq) return; // 그 사이에 더 새로 요청한 조회(탭·팀장 전환)가 있다 — 늦게 온 옛 결과로 화면을 덮지 않는다
+  const now = paneSlot(p);
+  if (!now || now.id !== slot.id) return; // 그 사이 이 칸의 슬롯이 바뀌었다
   const auto = slot.mode === 'auto' && Array.isArray(c.items);
-  const key = `${slot.id}|${leadId || ''}|${c.updatedAt || ''}|${c.markdown.length}|${c.markdown.slice(0, 64)}|${hashStr(c.markdown)}|${c.format || ''}|${auto ? `${panelFilter.lead}|${panelFilter.range}|${panelFilter.current ? selectedLeadId : ''}` : ''}`;
-  panelContent = c;
-  if (!force && key === panelLastKey) return;
-  panelLastKey = key;
-  renderPanelBody(slot, c);
+  const key = `${slot.id}|${leadId || ''}|${c.updatedAt || ''}|${c.markdown.length}|${c.markdown.slice(0, 64)}|${hashStr(c.markdown)}|${c.format || ''}|${auto ? `${p.filter.lead}|${p.filter.range}|${p.filter.current ? paneLead : ''}` : ''}`;
+  p.content = c;
+  if (!force && key === p.lastKey) return;
+  p.lastKey = key;
+  renderPaneBody(p, slot, c);
 }
+// 보이는 모든 칸을 새로 고친다(기존 호출부 — 슬롯 저장·탭 전환·접기 해제 등 — 가 그대로 쓴다)
+function refreshPanelContent(force, runScript) { return Promise.all(visiblePanes().map(p => refreshPane(p, force, runScript))); }
 
 // ---- 자동 수집 슬롯의 화면 필터(리더별·기간별·현재 리더만). 보이는 것만 거르고, AI에 넘기는 재료는 거르지 않는다. ----
-const panelFilter = { lead: '', range: 'all', current: false };
-const spFilterEl = document.getElementById('sp-filter');
-const spFilterLeadEl = document.getElementById('sp-filter-lead');
-const spFilterRangeEl = document.getElementById('sp-filter-range');
-const spFilterCurrentEl = document.getElementById('sp-filter-current');
+// (필터 상태와 선택 칸은 칸마다 따로 갖는다: 각 칸 객체 p.filter와 칸 안의 선택 상자)
 
 function panelRangeStartMs(range) {
   const now = new Date();
@@ -910,15 +1104,15 @@ function panelItemsMarkdown(items, total) {
   const head = items.length === total ? `총 ${total}개 · 최신순` : `${total}개 중 ${items.length}개 · 최신순`;
   return `${head}\n\n` + items.map(it => `- [${esc(it.title)}](${it.url}) — ${esc(it.leadLabel)}${stamp(it.ts)}${it.version > 1 ? ` · v${it.version}` : ''}`).join('\n');
 }
-function renderPanelFilterBar(items) {
+function renderPaneFilterBar(p, items) {
   const seen = new Map();
   for (const it of items) if (!seen.has(it.leadId)) seen.set(it.leadId, it.leadLabel);
-  if (panelFilter.lead && !seen.has(panelFilter.lead)) panelFilter.lead = '';
-  spFilterLeadEl.innerHTML = '<option value="">전체 리더</option>' + [...seen].map(([id, label]) => `<option value="${escapeHtml(id)}">${escapeHtml(label)}</option>`).join('');
-  spFilterLeadEl.value = panelFilter.lead;
-  spFilterLeadEl.disabled = panelFilter.current;
-  spFilterRangeEl.value = panelFilter.range;
-  spFilterCurrentEl.checked = panelFilter.current;
+  if (p.filter.lead && !seen.has(p.filter.lead)) p.filter.lead = '';
+  p.filterLeadEl.innerHTML = '<option value="">전체 리더</option>' + [...seen].map(([id, label]) => `<option value="${escapeHtml(id)}">${escapeHtml(label)}</option>`).join('');
+  p.filterLeadEl.value = p.filter.lead;
+  p.filterLeadEl.disabled = p.filter.current;
+  p.filterRangeEl.value = p.filter.range;
+  p.filterCurrentEl.checked = p.filter.current;
 }
 // ---- 그래픽(HTML) 출력: 스크립트가 막힌 격리 프레임에 그린다 ----
 // 스크립트가 낸 HTML은 (1) 파싱해서 script·iframe·form·meta 등과 on* 속성, 외부 주소(href/src)를 먼저 걷어 내고, (2) sandbox 속성에 allow-scripts를 주지 않아
@@ -1017,12 +1211,13 @@ const JS_FRAME_BRIDGE = String.raw`(function(){
 let jsFrameSeq = 0;
 // 그래픽(JS 프레임)이 맡겨 둔 화면 상태(보던 탭·선택 등) — 패널이 내용을 다시 그려도 돌려준다. 키: 슬롯|팀장. 앱을 닫으면 사라진다.
 const jsFrameStates = new Map();
-let panelMetaText = '';
-let panelToastTimer = null;
-function showPanelToast(msg) {
-  spMetaEl.textContent = `⚠ ${msg}`;
-  clearTimeout(panelToastTimer);
-  panelToastTimer = setTimeout(() => { spMetaEl.textContent = panelMetaText; }, 6000);
+// 프레임이 보낸 요청의 오류를 그 프레임이 있는 칸의 메타 줄에 잠깐 보여 준다(어느 칸인지 모르면 첫 칸)
+function showPanelToast(msg, frame) {
+  const p = (frame && panes.find(x => x.root.contains(frame))) || panes[0];
+  if (!p) return;
+  p.metaEl.textContent = `⚠ ${msg}`;
+  clearTimeout(p.toastTimer);
+  p.toastTimer = setTimeout(() => { p.metaEl.textContent = p.metaText; }, 6000);
 }
 // ---- 멈춘 JS 프레임 대응: 프레임의 연결 코드가 1초마다 보내는 신호가 끊기면(무한 루프 등) 멈춘 것으로 보고, 같은 내용을 JavaScript 없는 격리 프레임으로 대신 보여 준다 ----
 // 멈춘 프레임 프로세스는 앱을 다시 시작해야 정리되고(시험 확인), 그 전까지는 새 JS 프레임도 뜨지 못하므로 이후에는 곧바로 대체 화면을 쓴다.
@@ -1055,15 +1250,15 @@ setInterval(() => {
     }
   }
 }, 1000);
-async function renderJsFrame(container, fragment, leadId, stateKey) {
+async function renderJsFrame(container, fragment, leadId, stateKey, paneKey) {
   const seq = ++jsFrameSeq;
   container.dataset.jsSeq = String(seq);
   if (jsFramesBroken) { showJsHungFallback(container, fragment); return; }
   const base = "html,body{margin:0}body{padding:6px 2px;background:transparent;color:var(--text);font:12px/1.5 system-ui,-apple-system,'Segoe UI','Malgun Gothic',sans-serif;word-break:break-word}a{color:var(--accent)}img,svg{max-width:100%}table{border-collapse:collapse}button{font:inherit}";
-  const fullKey = `${stateKey || ''}|${leadId || ''}`;
+  const fullKey = `${stateKey || ''}|${leadId || ''}${paneKey ? `|${paneKey}` : ''}`; // 같은 슬롯을 여러 칸에 띄워도 칸마다 보던 화면 상태가 따로 남는다
   const saved = jsFrameStates.get(fullKey);
   const initJson = saved === undefined ? 'null' : JSON.stringify(saved).replace(/</g, '\\u003c');
-  const vp0 = Math.max(0, Math.floor(viewportHeightFor(stateKey === 'test'))); // 패널에서 보이는 높이(정수) — 그래픽이 첫 화면부터 맞는 높이로 그릴 수 있게
+  const vp0 = Math.max(0, Math.floor(viewportHeightFor(stateKey === 'test', container))); // 패널에서 보이는 높이(정수) — 그래픽이 첫 화면부터 맞는 높이로 그릴 수 있게
   const doc = `<!doctype html><html><head><meta charset="utf-8"><style>${panelThemeCss()}${base}</style></head><body><script>window.__ctmInit=${initJson};window.__ctmVp0=${vp0};<\/script><script>${JS_FRAME_BRIDGE}<\/script>${fragment}</body></html>`;
   let url;
   try { url = await window.api.registerPanelFrame(doc); }
@@ -1115,7 +1310,7 @@ window.addEventListener('message', async e => {
     return;
   }
   const leadId = frame.dataset.leadId || null;
-  const report = msg => { if (typeof psTestPreview !== 'undefined' && psTestPreview.contains(frame)) psStatus.textContent = msg; else showPanelToast(msg); };
+  const report = msg => { if (typeof psTestPreview !== 'undefined' && psTestPreview.contains(frame)) psStatus.textContent = msg; else showPanelToast(msg, frame); };
   if (d.t !== 'size' && !allowFrameAction(frame)) {
     const now = Date.now();
     if (now - (frameActionLog.warnedAt || 0) > FRAME_ACTION_WINDOW_MS) { frameActionLog.warnedAt = now; report('그래픽의 요청이 너무 많아 일부를 무시했습니다(3초에 5번까지)'); }
@@ -1141,20 +1336,26 @@ ${url.length > 600 ? url.slice(0, 600) + '…(길어서 잘림)' : url}`)) await
 let frameUrlConfirming = false;
 // ---- 패널에서 보이는 높이를 그래픽에 알려 준다(ctm.onViewport): 그래픽이 그 높이에 맞는 스크롤 영역을 만들어 위쪽 박스를 고정할 수 있게 ----
 const frameViewportSent = new WeakMap(); // frame -> 마지막으로 보낸 높이
-function frameViewportHeight(frame) { return viewportHeightFor(frame.dataset.callKey === 'test'); }
-function viewportHeightFor(isTest) {
+function frameViewportHeight(frame) { return viewportHeightFor(frame.dataset.callKey === 'test', frame.closest('.sp-body')); }
+function viewportHeightFor(isTest, bodyEl) {
   if (isTest) return Math.max(240, Math.min(700, window.innerHeight - 300)); // 설정 화면의 시험 미리보기
-  // 패널은 화면 높이 − 92px까지 커질 수 있다: 거기서 머리글(탭·메타)과 본문 위아래 여백을 뺀 것이 그래픽이 쓸 수 있는 높이다.
-  const cs = getComputedStyle(spBodyEl);
+  const body = bodyEl && bodyEl.classList && bodyEl.classList.contains('sp-body') ? bodyEl : spEl.querySelector('.sp-body');
+  if (!body) return 560;
+  const cs = getComputedStyle(body);
   const pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  // 분할해서 칸 높이가 정해져 있으면: 그 칸 본문의 보이는 높이에서 여백을 뺀 것이 그래픽이 쓸 수 있는 높이다(마지막 8px: 프레임이 내용 높이 + 4px로 커지므로 칸 안 스크롤바가 생기지 않게 여유).
+  if (spEl.classList.contains('split')) return Math.max(120, Math.floor(body.clientHeight - pad - 8));
+  // 칸이 하나면 패널은 화면 높이 − 92px까지 커질 수 있다: 거기서 머리글들(도구줄·탭·메타)과 본문 위아래 여백을 뺀 것이 그래픽이 쓸 수 있는 높이다.
   let others = 0;
   for (const c of spEl.children) {
-    if (c === spBodyEl || c.hidden) continue;
+    if (c === spPanesEl || c.hidden) continue;
     const pos = getComputedStyle(c).position;
     if (pos === 'absolute' || pos === 'fixed') continue; // 크기 조절 손잡이 같은 겹쳐 놓은 요소는 높이를 차지하지 않는다
     others += c.offsetHeight;
   }
-  const h = (window.innerHeight - 92) - 2 - others - pad - 8; // 마지막 8px: 프레임이 내용 높이 + 4px로 커지므로 바깥 스크롤바가 생기지 않게 여유를 둔다
+  const pane = body.closest('.sp-pane');
+  if (pane) for (const c of pane.children) { if (c === body || c.hidden) continue; others += c.offsetHeight; }
+  const h = (window.innerHeight - 92) - 2 - others - pad - 8;
   return Math.max(200, Math.floor(h));
 }
 function sendFrameViewport(frame) {
@@ -1168,9 +1369,11 @@ function sendAllFrameViewports() { document.querySelectorAll('iframe.sp-html-fra
 let viewportTimer = null;
 window.addEventListener('resize', () => { clearTimeout(viewportTimer); viewportTimer = setTimeout(sendAllFrameViewports, 120); });
 if (window.ResizeObserver) {
-  const vpObserver = new ResizeObserver(() => { clearTimeout(viewportTimer); viewportTimer = setTimeout(sendAllFrameViewports, 60); });
-  vpObserver.observe(spEl);
-  for (const c of spEl.children) vpObserver.observe(c);
+  paneObserver = new ResizeObserver(() => { clearTimeout(viewportTimer); viewportTimer = setTimeout(sendAllFrameViewports, 60); });
+  paneObserver.observe(spEl);
+  paneObserver.observe(spToolbarEl);
+  paneObserver.observe(spPanesEl);
+  panes.forEach(observePane); // 이 설정보다 먼저 만들어진 칸도 지켜본다
 }
 // ---- ctm.call: 그래픽이 자기 슬롯의 스크립트를 요청과 함께 다시 불러 결과를 받는 통로(앱은 요청의 뜻을 모른다) ----
 const FRAME_CALL_MAX_CHARS = 20000;
@@ -1225,30 +1428,28 @@ function handleFrameMarkdown(frame, d) {
   times.push(now); frameMdLog.set(frame, times);
   try { reply(true, { text: renderMarkdown(d.text) }); } catch (err) { reply(false, { err: errMsg(err) }); }
 }
-function renderPanelBody(slot, c) {
+function renderPaneBody(p, slot, c) {
   const auto = slot.mode === 'auto' && Array.isArray(c.items);
-  spFilterEl.hidden = !auto;
+  p.filterEl.hidden = !auto;
   let md = c.markdown;
   if (auto) {
-    renderPanelFilterBar(c.items);
-    md = panelItemsMarkdown(filterPanelItems(c.items, panelFilter, selectedLeadId), c.items.length) || c.markdown;
+    renderPaneFilterBar(p, c.items);
+    md = panelItemsMarkdown(filterPanelItems(c.items, p.filter, paneLeadId(p)), c.items.length) || c.markdown;
   }
-  if (c.format === 'html' && md.trim()) { if (slot.allowJs) renderJsFrame(spBodyEl, md, selectedLeadId, 'slot:' + slot.id); else renderHtmlFrame(spBodyEl, md); }
-  else spBodyEl.innerHTML = md.trim() ? renderMarkdown(md) : '<p class="empty-hint">아직 내용이 없습니다.</p>';
+  if (c.format === 'html' && md.trim()) { if (slot.allowJs) renderJsFrame(p.bodyEl, md, paneLeadId(p), 'slot:' + slot.id, 'p' + p.idx); else renderHtmlFrame(p.bodyEl, md); }
+  else p.bodyEl.innerHTML = md.trim() ? renderMarkdown(md) : '<p class="empty-hint">아직 내용이 없습니다.</p>';
   const when = c.updatedAt ? ` · ${formatAgo(c.updatedAt)} 갱신` : '';
-  spMetaEl.textContent = `${PANEL_MODE_LABELS[slot.mode] || slot.mode} · ${c.note}${when}`;
-  panelMetaText = spMetaEl.textContent;
+  const pinned = panelLayout.pins[p.idx];
+  p.metaText = `${pinned ? `📌 ${pinLabel(pinned)} · ` : ''}${PANEL_MODE_LABELS[slot.mode] || slot.mode} · ${c.note}${when}`;
+  p.metaEl.textContent = p.metaText;
 }
-function onPanelFilterChange() {
-  panelFilter.lead = spFilterLeadEl.value;
-  panelFilter.range = spFilterRangeEl.value;
-  panelFilter.current = spFilterCurrentEl.checked;
-  const slot = activePanelSlot();
-  if (slot && panelContent) { panelLastKey = ''; renderPanelBody(slot, panelContent); }
+function onPaneFilterChange(p) {
+  p.filter.lead = p.filterLeadEl.value;
+  p.filter.range = p.filterRangeEl.value;
+  p.filter.current = p.filterCurrentEl.checked;
+  const slot = paneSlot(p);
+  if (slot && p.content) { p.lastKey = ''; renderPaneBody(p, slot, p.content); }
 }
-spFilterLeadEl.addEventListener('change', onPanelFilterChange);
-spFilterRangeEl.addEventListener('change', onPanelFilterChange);
-spFilterCurrentEl.addEventListener('change', onPanelFilterChange);
 
 async function loadPanelConfig() {
   try { panelConfig = await window.api.getPanelConfig(); } catch (err) { console.error('패널 설정 조회 실패:', err); return; }
@@ -1257,18 +1458,6 @@ async function loadPanelConfig() {
   refreshPanelContent(true);
 }
 
-spTabsEl.addEventListener('click', e => {
-  const t = e.target.closest('[data-sp-tab]');
-  if (!t) return;
-  panelActiveId = t.dataset.spTab; panelEditing = false; spEditorEl.hidden = true; spBodyEl.hidden = false; panelLastKey = '';
-  renderPanelChrome(); refreshPanelContent(true);
-});
-spBodyEl.addEventListener('click', async e => {
-  const a = e.target.closest('a[data-url]');
-  if (!a) return;
-  e.preventDefault();
-  try { await window.api.openExternalUrl(a.dataset.url); } catch (err) { console.error('링크 열기 실패:', err); }
-});
 // 패널 너비 조절: 왼쪽 가장자리를 끌면 바뀌고, 값은 이 PC에 저장한다(더블클릭하면 기본 340px).
 const PANEL_WIDTH_KEY = 'ctm.panelWidth';
 const PANEL_WIDTH_DEFAULT = 340, PANEL_WIDTH_MIN = 240, PANEL_MAIN_MIN = 420;
@@ -1307,43 +1496,31 @@ spResizeEl.addEventListener('dblclick', () => {
 });
 spCollapseBtn.addEventListener('click', () => setPanelCollapsed(true));
 spExpandBtn.addEventListener('click', () => setPanelCollapsed(false));
-spRefreshBtn.addEventListener('click', async () => {
-  const slot = activePanelSlot();
-  if (!slot || panelBusy) return;
-  if (slot.mode !== 'ai') { refreshPanelContent(true, true); return; }
-  panelBusy = true; spRefreshBtn.disabled = true; spMetaEl.textContent = 'AI가 정리하는 중입니다(최대 2분)...';
-  try { await window.api.refreshPanelSlot(slot.id); panelLastKey = ''; } catch (err) { spMetaEl.textContent = errMsg(err); }
-  finally { panelBusy = false; spRefreshBtn.disabled = false; await refreshPanelContent(true, true); }
-});
-spEditBtn.addEventListener('click', () => {
-  const slot = activePanelSlot();
-  if (!slot) return;
-  panelEditing = true; spEditorText.value = panelContent ? panelContent.markdown : '';
-  spEditorEl.hidden = false; spBodyEl.hidden = true; spEditorText.focus();
-});
-document.getElementById('sp-editor-cancel').addEventListener('click', () => { panelEditing = false; spEditorEl.hidden = true; spBodyEl.hidden = false; refreshPanelContent(true); });
-document.getElementById('sp-editor-save').addEventListener('click', async () => {
-  const slot = activePanelSlot();
-  if (!slot) return;
-  try { await window.api.savePanelContent(slot.id, spEditorText.value); } catch (err) { spMetaEl.textContent = errMsg(err); return; }
-  panelEditing = false; spEditorEl.hidden = true; spBodyEl.hidden = false; panelLastKey = ''; refreshPanelContent(true, true);
-});
 document.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => setTimeout(() => { renderPanelChrome(); refreshPanelContent(true); }, 0)));
 window.addEventListener('resize', () => renderPanelChrome());
-setInterval(() => { if (!spEl.hidden) refreshPanelContent(false); }, 3000);
+setInterval(() => { if (!spEl.hidden) refreshPanelContent(false); }, 3000); // 보이는 모든 칸을 같은 주기로
 // 팀장을 바꾸면 3초 주기를 기다리지 않고 바로 반영한다. selectedLeadId는 여러 곳에서 바뀌므로 바뀐 순간을 한 곳에서 지켜본다.
 let panelSeenLeadId = selectedLeadId;
 setInterval(() => {
   if (selectedLeadId === panelSeenLeadId) return;
   panelSeenLeadId = selectedLeadId;
-  const slot = activePanelSlot();
-  if (spEl.hidden || !slot || (slot.mode !== 'auto' && slot.mode !== 'script')) return;
-  if (slot.mode === 'script' || slot.scope === 'selected') { panelLastKey = ''; refreshPanelContent(true); } // 서버가 팀장별로 모아 주는 슬롯은 다시 불러온다
-  else if (panelFilter.current && panelContent) { panelLastKey = ''; renderPanelBody(slot, panelContent); } // 이미 가진 목록을 다시 거르기만 하면 된다
+  if (spEl.hidden) return;
+  for (const p of visiblePanes()) {
+    if (panelLayout.pins[p.idx]) continue; // 고정한 칸은 선택한 팀장이 바뀌어도 그대로
+    const slot = paneSlot(p);
+    if (!slot || (slot.mode !== 'auto' && slot.mode !== 'script')) continue;
+    if (slot.mode === 'script' || slot.scope === 'selected') { p.lastKey = ''; refreshPane(p, true); } // 서버가 팀장별로 모아 주는 슬롯은 다시 불러온다
+    else if (p.filter.current && p.content) { p.lastKey = ''; renderPaneBody(p, slot, p.content); } // 이미 가진 목록을 다시 거르기만 하면 된다
+  }
 }, 100);
 
 // ---- 설정 화면(앱 설정 탭 > 오른쪽 패널) ----
 const panelEnabledEl = document.getElementById('panel-enabled-input');
+const panelMaxSplitEl = document.getElementById('panel-maxsplit-input');
+panelMaxSplitEl.addEventListener('change', () => {
+  panelMaxSplitEl.value = String(setPanelMaxSplit(panelMaxSplitEl.value));
+  renderPanelChrome(); refreshPanelContent(true);
+});
 const panelScriptsEl = document.getElementById('panel-scripts-input');
 const panelSlotListEl = document.getElementById('panel-slot-list');
 const psName = document.getElementById('ps-name');
@@ -1405,6 +1582,7 @@ psAllowJs.addEventListener('change', updatePsJsUi);
 
 function renderPanelSettings() {
   panelEnabledEl.checked = !!panelConfig.enabled;
+  panelMaxSplitEl.value = String(panelMaxSplit());
   panelScriptsEl.checked = !!panelConfig.scriptsAllowed;
   // 꺼져 있으면 "스크립트" 방식을 고를 수 없게 한다(백엔드도 저장·실행을 막는다)
   const scriptOpt = psMode.querySelector('option[value="script"]');
@@ -1469,7 +1647,7 @@ psSaveBtn.addEventListener('click', async () => {
     // 음수·소수 같은 값은 백엔드가 영어 기술 메시지로 거부하므로 여기서 먼저 알기 쉽게 알려 준다
     if (input.mode === 'script' && !(Number.isInteger(input.timeoutMs) && input.timeoutMs >= 500 && input.timeoutMs <= 600000)) throw new Error('제한 시간은 500~600000ms 사이의 정수로 입력하세요.');
     panelConfig = await window.api.savePanelSlot(input);
-    resetPsForm(); renderPanelChrome(); renderPanelSettings(); panelLastKey = ''; refreshPanelContent(true);
+    resetPsForm(); renderPanelChrome(); renderPanelSettings(); resetPanelCache(); refreshPanelContent(true);
     psStatus.textContent = '저장했습니다.'; setTimeout(() => { psStatus.textContent = ''; }, 3000);
   } catch (err) { psStatus.textContent = errMsg(err); }
   finally { psSaveBtn.disabled = false; }
@@ -1506,7 +1684,7 @@ panelSlotListEl.addEventListener('change', async e => {
   if (!s) return;
   try {
     panelConfig = await window.api.savePanelSlot({ id: s.id, name: s.name, mode: s.mode, scope: s.scope, preset: s.preset, instruction: s.instruction, autoUpdate: s.autoUpdate, aiModel: s.aiModel, aiInclude: s.aiInclude || 'none', interpreter: s.interpreter || 'node', script: s.script || '', timeoutMs: s.timeoutMs || PS_DEFAULT_TIMEOUT_MS, outputFormat: s.outputFormat || 'markdown', allowJs: !!s.allowJs, enabled: t.checked });
-    renderPanelChrome(); renderPanelSettings(); panelLastKey = ''; refreshPanelContent(true);
+    renderPanelChrome(); renderPanelSettings(); resetPanelCache(); refreshPanelContent(true);
   } catch (err) { psStatus.textContent = errMsg(err); t.checked = !t.checked; }
 });
 // 스크립트 작성 안내 — 앱이 주는 정보 목록은 백엔드가 하나로 관리하고(AI 요청문에도 같은 글이 들어간다), 여기서는 가져와 보여 주기만 한다.

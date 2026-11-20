@@ -331,6 +331,7 @@
         <h2>오른쪽 패널</h2>
         <p class="form-hint">작업 탭 오른쪽에 내가 정한 내용을 띄웁니다(정적인 글만 표시). 슬롯마다 채우는 방법을 고릅니다 — 자동 수집은 앱이 대화 기록에서 모으고, 팀장이 채움은 내가 적은 지침을 모든 팀장이 따르고, AI가 정리는 팀장이 일을 마칠 때마다 선택한 모델이 내가 적은 요청대로 갱신합니다.</p>
         <label class="settings-check"><input type="checkbox" id="panel-enabled-input" /> 오른쪽 패널 표시</label>
+        <label class="settings-check" id="panel-maxsplit-row" title="패널 위쪽의 '화면 분할' 버튼이 1부터 이 숫자까지 나옵니다. 이 PC에만 저장됩니다."><input type="number" id="panel-maxsplit-input" min="1" max="6" step="1" style="width:56px" /> 화면 분할 최대 개수 <span class="form-hint" style="display:inline">패널을 위아래로 나눠 슬롯을 동시에 띄웁니다(같은 슬롯을 여러 칸에 띄워도 됩니다). 1이면 분할 버튼이 없습니다. 칸마다 경계선을 끌어 높이를 조절합니다.</span></label>
         <label class="settings-check" id="panel-scripts-row"><input type="checkbox" id="panel-scripts-input" /> 스크립트 슬롯 사용 허용 <span class="ps-risk">⚠ 이 PC에서 내 계정 권한으로 코드를 실행합니다 — 꺼 두면 스크립트 슬롯을 만들거나 실행할 수 없습니다</span></label>
         <div id="panel-slot-list"></div>
         <div class="skill-form" id="panel-form">
@@ -589,6 +590,8 @@
           <li><strong>직접 쓰기</strong> — 내가 마크다운으로 직접 씁니다.</li>
           <li><strong>스크립트</strong> — 내가 만든(또는 AI가 만든) 프로그램을 이 PC에서 실행해 그 결과를 표시합니다. 다음 "9. 스크립트 슬롯" 참고.</li>
         </ul>
+        <p><strong>화면 분할</strong> — 패널 위쪽 “화면 분할” 버튼(1·2·3…)으로 패널을 위아래 여러 칸으로 나눠 슬롯을 동시에 띄웁니다. 칸마다 자기 탭에서 슬롯을 따로 고르고(같은 슬롯을 여러 칸에 띄워도 됩니다) 칸 사이의 경계선을 끌어 높이를 조절합니다(더블클릭: 같은 높이로). 버튼이 1부터 몇까지 나올지는 앱 설정의 “오른쪽 패널”에서 “화면 분할 최대 개수”(1~6, 기본 3)로 정합니다. 칸 수·칸별 슬롯·높이는 이 PC에 저장됩니다.</p>
+        <p><strong>📌 팀장 고정</strong> — 칸 머리글의 📌을 누르면 그 칸이 <u>지금 선택한 팀장</u>에 고정됩니다. 작업 탭에서 다른 팀장을 골라도 고정한 칸은 바뀌지 않고, 고정하지 않은 칸만 선택한 팀장을 따라갑니다(예: 한 칸은 g1cl-mgt-leader에 고정해 두고 다른 칸으로 다른 팀장을 둘러보기). 팀장이 재개돼 짧은 id가 바뀌어도 따라가고, 고정한 팀장이 목록에서 사라지면 칸에 안내가 뜹니다. 다시 눌러 풀면 선택한 팀장을 따라갑니다.</p>
         <p><strong>조작</strong> — 패널 왼쪽 가장자리를 끌면 너비가 바뀌고(더블클릭: 기본 너비), ▸ 로 접었다가 "◂ 패널"로 다시 엽니다. ⟳는 새로고침, ✎는 내용 고치기입니다(자동 수집 슬롯을 뺀 슬롯에서 보입니다).</p>
         <p><strong>화면 필터(자동 수집 슬롯)</strong> — 리더별, 기간별(전체·오늘·최근 7일·30일)로 골라 볼 수 있고, <strong>"현재 리더만"</strong>을 켜면 지금 대화창에 띄운 리더의 항목만 보입니다. 필터는 <u>보이는 것만</u> 거르고 모아 둔 자료는 줄이지 않으며, 바꾸면 3초 갱신을 기다리지 않고 바로 반영됩니다.</p>
       </section>
@@ -654,29 +657,39 @@
 
   <aside id="side-panel" hidden>
     <div id="sp-resize" class="sp-resize" title="끌어서 너비 조절 (더블클릭: 기본 너비)"></div>
-    <div class="sp-head">
-      <div id="sp-tabs" class="sp-tabs"></div>
-      <button id="sp-refresh-btn" class="sp-icon" title="새로고침" aria-label="패널 새로고침">⟳</button>
-      <button id="sp-edit-btn" class="sp-icon" title="내용 고치기" aria-label="패널 내용 고치기" hidden>✎</button>
+    <div id="sp-toolbar" class="sp-toolbar">
+      <span id="sp-split-wrap" class="sp-split-wrap" hidden><span class="sp-split-label">화면 분할</span><span id="sp-split-btns" class="sp-split-btns"></span></span>
+      <span class="sp-toolbar-spacer"></span>
       <button id="sp-collapse-btn" class="sp-icon" title="패널 접기" aria-label="패널 접기">▸</button>
     </div>
-    <div id="sp-meta" class="sp-meta"></div>
-    <div id="sp-filter" class="sp-filter" hidden>
-      <select id="sp-filter-lead" title="리더별로 보기"></select>
-      <select id="sp-filter-range" title="기간별로 보기">
-        <option value="all">전체 기간</option>
-        <option value="today">오늘</option>
-        <option value="7d">최근 7일</option>
-        <option value="30d">최근 30일</option>
-      </select>
-      <label class="sp-filter-cur" title="지금 대화창에 띄운 리더의 항목만 봅니다"><input type="checkbox" id="sp-filter-current"> 현재 리더만</label>
-    </div>
-    <div id="sp-body" class="sp-body md"></div>
-    <div id="sp-editor" class="sp-editor" hidden>
-      <textarea id="sp-editor-text"></textarea>
-      <div class="sp-editor-actions"><button id="sp-editor-save">저장</button><button id="sp-editor-cancel">취소</button></div>
-    </div>
+    <div id="sp-panes" class="sp-panes"></div>
   </aside>
+  <template id="sp-pane-template">
+    <section class="sp-pane">
+      <div class="sp-head">
+        <div class="sp-tabs"></div>
+        <button class="sp-icon sp-pin" aria-label="이 칸을 팀장에 고정">📌</button>
+        <button class="sp-icon sp-refresh" title="새로고침" aria-label="패널 새로고침">⟳</button>
+        <button class="sp-icon sp-edit" title="내용 고치기" aria-label="패널 내용 고치기" hidden>✎</button>
+      </div>
+      <div class="sp-meta"></div>
+      <div class="sp-filter" hidden>
+        <select class="sp-filter-lead" title="리더별로 보기"></select>
+        <select class="sp-filter-range" title="기간별로 보기">
+          <option value="all">전체 기간</option>
+          <option value="today">오늘</option>
+          <option value="7d">최근 7일</option>
+          <option value="30d">최근 30일</option>
+        </select>
+        <label class="sp-filter-cur" title="지금 대화창에 띄운 리더의 항목만 봅니다"><input type="checkbox" class="sp-filter-current"> 현재 리더만</label>
+      </div>
+      <div class="sp-body md"></div>
+      <div class="sp-editor" hidden>
+        <textarea class="sp-editor-text"></textarea>
+        <div class="sp-editor-actions"><button class="sp-editor-save">저장</button><button class="sp-editor-cancel">취소</button></div>
+      </div>
+    </section>
+  </template>
   <button id="sp-expand-btn" class="sp-expand" hidden title="패널 열기">◂ 패널</button>
 
   <script src="lib/markdown.js"></script>

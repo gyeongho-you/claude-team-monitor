@@ -206,10 +206,6 @@
       "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
     },
     {
-      "expr": "s.id === panelActiveId ? 'active' : ''",
-      "basis": "클래스 이름·고정 문구 선택(외부 입력 아님)"
-    },
-    {
       "expr": "sanitizeHtmlFragment(fragment)",
       "basis": "격리 프레임 문서 조립(프레임 CSP·sandbox 안, 앱 화면 DOM에 넣지 않음)"
     },

@@ -241,7 +241,7 @@ async function main() {
     ok(/^ERR:/.test(denied) && denied.includes('ctm.call을 쓸 수 없습니다'), `JS 허용이 꺼진 슬롯이 거절되지 않았습니다: ${denied}`);
     // 화면 경로: 프레임 안에서 ctm.call
     await app.eval(`document.querySelector('.tab-btn[data-tab="work"]').click(); 1`); await sleep(300); // 패널은 작업 탭에서만 보인다
-    await app.eval(`(async () => { await window.api.setPanelEnabled(true); panelConfig = await window.api.getPanelConfig(); panelActiveId = ${JSON.stringify(slotId)}; try { localStorage.setItem('ctm.panelCollapsed', '0'); } catch (e) {} renderPanelChrome(); await refreshPanelContent(true, true); return 1 })()`);
+    await app.eval(`(async () => { await window.api.setPanelEnabled(true); panelConfig = await window.api.getPanelConfig(); panelLayout = { count: 1, slots: [${JSON.stringify(slotId)}], weights: [], pins: [] }; try { localStorage.setItem('ctm.panelCollapsed', '0'); } catch (e) {} renderPanelChrome(); await refreshPanelContent(true, true); return 1 })()`);
     let fsx = null;
     for (let i = 0; i < 40 && !fsx; i++) { await sleep(500); fsx = await app.frameSession('ctmframe'); }
     ok(fsx, '패널 그래픽 프레임이 뜨지 않았습니다');
@@ -266,6 +266,88 @@ async function main() {
     console.log(`      · 요청 왕복(스크립트 실행 포함, 작은 요청 5번): ${times.join(', ')}ms`);
     ok(Math.max(...times) < 5000, `요청이 너무 느립니다: ${times}`);
     await app.eval('(async () => { const c = await window.api.getPanelConfig(); for (const sl of c.slots) await window.api.deletePanelSlot(sl.id); })()');
+  });
+
+  console.log('\n화면 분할');
+  await check('오른쪽 패널을 1~최대 개수 칸으로 나누고, 칸마다 슬롯을 따로 고르며, 경계선을 끌어 칸 높이를 조절하고, 최대 개수 설정이 반영된다', async () => {
+    await app.eval('(async () => { const c = await window.api.getPanelConfig(); for (const sl of c.slots) await window.api.deletePanelSlot(sl.id); })()');
+    const mkSlot = (name, text) => JSON.stringify({ name, mode: 'script', scope: 'all', preset: 'artifact-reports', instruction: '', autoUpdate: false, aiModel: 'sonnet', aiInclude: 'none', enabled: true, interpreter: 'node', script: `console.log(${JSON.stringify(text)})`, timeoutMs: 8000, outputFormat: 'markdown', allowJs: false });
+    await app.eval(`window.api.savePanelSlot(${mkSlot('슬롯A', '# 슬롯 A 내용')}).then(() => 1)`);
+    await app.eval(`window.api.savePanelSlot(${mkSlot('슬롯B', '# 슬롯 B 내용')}).then(() => 1)`);
+    await app.eval(`document.querySelector('.tab-btn[data-tab="work"]').click(); 1`); await sleep(300);
+    const ids = JSON.parse(await app.eval(`(async () => { await window.api.setPanelEnabled(true); panelConfig = await window.api.getPanelConfig(); try { localStorage.setItem('ctm.panelCollapsed', '0'); localStorage.removeItem('ctm.panelMaxSplit'); localStorage.removeItem('ctm.panelLayout'); } catch (e) {} panelLayout = { count: 1, slots: [], weights: [], pins: [] }; renderPanelChrome(); await refreshPanelContent(true, true); return JSON.stringify(panelConfig.slots.map(s => s.id)); })()`));
+    ok(ids.length === 2, `슬롯이 둘이어야 합니다: ${ids}`);
+    const info = async () => JSON.parse(await app.eval(`JSON.stringify({ panes: [...document.querySelectorAll('#sp-panes .sp-pane')].map(p => ({ h: Math.round(p.getBoundingClientRect().height), body: p.querySelector('.sp-body').textContent, active: (p.querySelector('.sp-tab.active') || {}).textContent })), dividers: document.querySelectorAll('#sp-panes .sp-divider').length, split: document.getElementById('side-panel').classList.contains('split'), btns: [...document.querySelectorAll('[data-sp-split]')].map(b => b.dataset.spSplit + (b.classList.contains('active') ? '*' : '')), wrapHidden: document.getElementById('sp-split-wrap').hidden })`));
+    let r = await info();
+    ok(r.panes.length === 1 && r.dividers === 0 && !r.split && r.btns.join(',') === '1*,2,3', `처음에는 한 칸이고 분할 버튼은 1~3(기본 최대 3)이어야 합니다: ${JSON.stringify(r)}`);
+    // 3칸으로: 슬롯은 서로 다른 것부터 차례로 배정(2개뿐이라 셋째 칸은 첫 슬롯을 다시), 높이는 비슷하고 각각 최소 높이 이상
+    await app.eval(`document.querySelector('[data-sp-split="3"]').click(); 1`);
+    for (let i = 0; i < 20; i++) { await sleep(300); r = await info(); if (r.panes.length === 3 && r.panes.every(p => p.body.includes('슬롯'))) break; }
+    ok(r.panes.length === 3 && r.dividers === 2 && r.split, `3칸이어야 합니다: ${JSON.stringify(r)}`);
+    ok(r.panes[0].body.includes('슬롯 A') && r.panes[1].body.includes('슬롯 B') && r.panes[2].body.includes('슬롯 A'), `칸마다 슬롯 내용이 달라야 합니다(같은 슬롯도 가능): ${JSON.stringify(r.panes.map(p => p.body))}`);
+    ok(Math.max(...r.panes.map(p => p.h)) - Math.min(...r.panes.map(p => p.h)) <= 6 && r.panes.every(p => p.h >= 110), `처음에는 칸 높이가 비슷해야 합니다: ${r.panes.map(p => p.h)}`);
+    // 둘째 칸을 첫 슬롯으로 바꾸면 그 칸만 바뀐다(같은 슬롯을 여러 칸에)
+    await app.eval(`panes[1].tabsEl.querySelector('[data-sp-tab="${ids[0]}"]').click(); 1`);
+    for (let i = 0; i < 20; i++) { await sleep(300); r = await info(); if (r.panes[1].body.includes('슬롯 A')) break; }
+    ok(r.panes[0].body.includes('슬롯 A') && r.panes[1].body.includes('슬롯 A') && r.panes[2].body.includes('슬롯 A') && r.panes.map(p => p.active).join(',') === '슬롯A,슬롯A,슬롯A', `같은 슬롯을 여러 칸에 띄울 수 있어야 합니다: ${JSON.stringify(r.panes)}`);
+    // 경계선 끌기: 첫 경계선을 60px 내리면 첫 칸은 커지고 둘째 칸은 줄며 셋째 칸은 그대로
+    const before = r.panes.map(p => p.h);
+    await app.eval(`(() => { const d = document.querySelectorAll('#sp-panes .sp-divider')[0]; const b = d.getBoundingClientRect(); const y = b.top + b.height / 2; const ev = (t, dy) => d.dispatchEvent(new PointerEvent(t, { bubbles: true, clientY: y + dy, pointerId: 7 })); ev('pointerdown', 0); ev('pointermove', 60); ev('pointerup', 60); return 1; })()`);
+    await sleep(300);
+    r = await info();
+    ok(Math.abs((r.panes[0].h - before[0]) - 60) <= 4 && Math.abs((before[1] - r.panes[1].h) - 60) <= 4 && Math.abs(r.panes[2].h - before[2]) <= 3, `경계선을 끌면 이웃한 두 칸만 바뀌어야 합니다: ${before} → ${r.panes.map(p => p.h)}`);
+    const saved = JSON.parse(await app.eval(`localStorage.getItem('ctm.panelLayout')`));
+    ok(saved.count === 3 && saved.weights.length === 3 && saved.weights[0] > saved.weights[1] && saved.slots.length >= 3, `칸 수·높이 비율·슬롯이 저장돼야 합니다: ${JSON.stringify(saved)}`);
+    // 너무 작게 끌지는 못한다(최소 110px)
+    await app.eval(`(() => { const d = document.querySelectorAll('#sp-panes .sp-divider')[0]; const b = d.getBoundingClientRect(); const y = b.top + b.height / 2; const ev = (t, dy) => d.dispatchEvent(new PointerEvent(t, { bubbles: true, clientY: y + dy, pointerId: 8 })); ev('pointerdown', 0); ev('pointermove', -2000); ev('pointerup', -2000); return 1; })()`);
+    await sleep(300);
+    r = await info();
+    ok(r.panes[0].h >= 108 && r.panes[0].h <= 114, `칸은 최소 높이 아래로 줄지 않아야 합니다: ${r.panes.map(p => p.h)}`);
+    // 앱 설정의 최대 개수를 2로 줄이면 버튼은 1~2, 보이는 칸도 2개로(저장된 칸 수 3은 그대로 두되 최대 안으로 줄여 보인다)
+    await app.eval(`(() => { const i = document.getElementById('panel-maxsplit-input'); i.value = '2'; i.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
+    await sleep(500); r = await info();
+    ok(r.panes.length === 2 && r.dividers === 1 && r.btns.join(',') === '1,2*', `최대 개수 2: ${JSON.stringify({ n: r.panes.length, d: r.dividers, b: r.btns })}`);
+    await app.eval(`(() => { const i = document.getElementById('panel-maxsplit-input'); i.value = '1'; i.dispatchEvent(new Event('change', { bubbles: true })); return 1; })()`);
+    await sleep(500); r = await info();
+    ok(r.panes.length === 1 && !r.split && r.wrapHidden, `최대 개수 1이면 분할 버튼이 없어야 합니다: ${JSON.stringify({ n: r.panes.length, wrap: r.wrapHidden })}`);
+    const v99 = await app.eval(`(() => { const i = document.getElementById('panel-maxsplit-input'); i.value = '99'; i.dispatchEvent(new Event('change', { bubbles: true })); return document.getElementById('panel-maxsplit-input').value; })()`);
+    ok(v99 === '6', `최대 개수는 6까지만(입력 99 → ${v99})`);
+    // 정리
+    await app.eval(`(() => { const i = document.getElementById('panel-maxsplit-input'); i.value = '3'; i.dispatchEvent(new Event('change', { bubbles: true })); try { localStorage.removeItem('ctm.panelLayout'); localStorage.removeItem('ctm.panelMaxSplit'); } catch (e) {} panelLayout = { count: 1, slots: [], weights: [], pins: [] }; return 1; })()`);
+    await app.eval('(async () => { const c = await window.api.getPanelConfig(); for (const sl of c.slots) await window.api.deletePanelSlot(sl.id); })()');
+  });
+
+  await check('칸에 팀장을 고정(📌)하면 다른 팀장을 골라도 그 칸은 따라가지 않고, 고정한 팀장의 짧은 id가 바뀌어도(재개) 따라가며, 풀면 다시 선택한 팀장을 따라간다', async () => {
+    const r = JSON.parse(await app.eval(`(() => {
+      const saved = { rows: lastRows, sel: selectedLeadId, pins: panelLayout.pins };
+      const out = {};
+      try {
+        syncPaneDom(1);
+        const rows = ids => ids.map(([id, internalId, label]) => ({ id, isLead: true, internalId, label }));
+        lastRows = rows([['L1', 'I1', '가팀장'], ['L2', 'I2', '나팀장']]);
+        selectedLeadId = 'L1'; panelLayout.pins = [];
+        out.unpinned = paneLeadId(panes[0]);
+        panes[0].pinBtn.click(); // 지금 선택한 팀장(L1)에 고정
+        out.pin = JSON.stringify(panelLayout.pins[0]);
+        out.pressed = panes[0].pinBtn.classList.contains('on');
+        selectedLeadId = 'L2'; out.afterSwitch = paneLeadId(panes[0]); // 다른 팀장을 골라도 L1
+        lastRows = rows([['L1b', 'I1', '가팀장'], ['L2', 'I2', '나팀장']]); out.afterResume = paneLeadId(panes[0]); // 짧은 id가 L1b로 바뀌어도 따라간다
+        lastRows = rows([['L2', 'I2', '나팀장']]); out.gone = paneLeadId(panes[0]); // 고정한 팀장이 사라지면 null
+        lastRows = rows([['L1b', 'I1', '가팀장'], ['L2', 'I2', '나팀장']]);
+        panes[0].pinBtn.click(); // 풀기
+        out.released = paneLeadId(panes[0]); out.pin2 = JSON.stringify(panelLayout.pins[0] || null);
+        selectedLeadId = null; panelLayout.pins = [];
+        panes[0].pinBtn.click(); // 팀장을 고르지 않았으면 고정할 수 없다
+        out.noLead = JSON.stringify(panelLayout.pins[0] || null);
+      } finally { lastRows = saved.rows; selectedLeadId = saved.sel; panelLayout.pins = saved.pins; savePanelLayout(); }
+      return JSON.stringify(out);
+    })()`));
+    ok(r.unpinned === 'L1' && JSON.parse(r.pin).internalId === 'I1' && r.pressed, `고정: ${JSON.stringify(r)}`);
+    ok(r.afterSwitch === 'L1', `다른 팀장을 골라도 고정한 칸은 그대로여야 합니다: ${r.afterSwitch}`);
+    ok(r.afterResume === 'L1b', `고정한 팀장의 짧은 id가 바뀌어도 따라가야 합니다: ${r.afterResume}`);
+    ok(r.gone === null, `고정한 팀장이 목록에 없으면 null이어야 합니다: ${r.gone}`);
+    ok(r.released === 'L2' && r.pin2 === 'null', `풀면 선택한 팀장을 따라가야 합니다: ${JSON.stringify(r)}`);
+    ok(r.noLead === 'null', `팀장을 고르지 않았으면 고정되면 안 됩니다: ${r.noLead}`);
   });
 
   console.log('\n승인 요청 표시');
