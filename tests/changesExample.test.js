@@ -71,7 +71,8 @@ const page = ctx => {
   return { out, data: JSON.parse(dm[1]) };
 };
 const call = (ctx, req) => JSON.parse(runScript(ctx, req));
-const norm = p => String(p).replace(/\\/g, '/').toLowerCase();
+const real = p => { try { return fs.realpathSync.native(p); } catch { return String(p); } };
+const norm = p => real(p).replace(/\\/g, '/').toLowerCase();
 
 test('페이지 방식: 팀장 폴더와 워크트리, 세션의 현재 작업 폴더에서 변경 파일을 상태별로 모은다', () => {
   const ctx = setup();
@@ -92,6 +93,24 @@ test('페이지 방식: 팀장 폴더와 워크트리, 세션의 현재 작업 �
   assert.ok(wtDir.role.includes('작업 폴더'), '세션의 현재 작업 폴더(워크트리)는 "팀장 작업 폴더"로 표시: ' + wtDir.role);
   assert.ok(!byDir.has(norm(ctx.outside)), '허용한 팀원 폴더라도 떠 있는 팀원이 아니면 보지 않는다');
   assert.ok(out.includes('<script>(function frameMain'), '화면 스크립트가 들어 있다');
+  fs.rmSync(ctx.base, { recursive: true, force: true });
+});
+
+test('같은 폴더는 이름이 달라도(별명·짧은 이름·심볼릭 링크) 목록에 한 번만 나온다', () => {
+  const ctx = setup();
+  const { data } = page(ctx);
+  const keys = data.dirs.map(d => norm(d.dir));
+  assert.strictEqual(new Set(keys).size, keys.length, '같은 폴더가 둘 이상 나왔다: ' + data.dirs.map(d => d.dir).join(' | '));
+  fs.rmSync(ctx.base, { recursive: true, force: true });
+});
+
+test('폴더 안의 바로가기(심볼릭 링크·정션)가 폴더 밖 폴더를 가리켜도 그 안의 파일 내용을 읽지 않는다', () => {
+  const ctx = setup();
+  // 디렉터리 정션/링크는 윈도에서도 관리자 권한 없이 만들 수 있다
+  fs.symlinkSync(ctx.outside, path.join(ctx.lead, 'outlink'), 'junction');
+  const out = runScript(ctx, { op: 'file', dir: ctx.lead, path: 'outlink/secret.txt', st: '?' });
+  assert.ok(!out.includes('남의 비밀'), '폴더 밖 파일의 내용이 새어 나왔다: ' + out.slice(0, 200));
+  assert.strictEqual(JSON.parse(out).ok, false);
   fs.rmSync(ctx.base, { recursive: true, force: true });
 });
 

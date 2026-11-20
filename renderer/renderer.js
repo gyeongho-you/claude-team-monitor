@@ -2597,7 +2597,9 @@ const MAX_FILES_PER_DIR = 400; // 폴더 하나에서 목록에 올리는 변경
 const MAX_BYTES = 400000; // 파일 하나에서 읽는 최대 크기(넘으면 앞부분만)
 const MAX_ROWS = 8000; // 파일 하나에서 보내는 최대 줄 수
 const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-const norm = p => String(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+// 폴더 비교용 이름: 실제 경로(심볼릭 링크·바로가기·8.3 짧은 이름을 푼 것)를 소문자 슬래시로. git worktree list는 실제 경로를 돌려주므로, 같은 폴더가 다른 이름으로 알려져 있어도 하나로 묶인다.
+const real = p => { try { return fs.realpathSync.native(p); } catch { return String(p); } };
+const norm = p => real(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 const REQ = process.env.CTM_REQUEST || '';
 const leadDir = process.env.CTM_LEAD_DIR;
 const fail = msg => { console.log(REQ ? JSON.stringify({ ok: false, error: msg }) : '<p style="color:var(--text-soft)">' + esc(msg) + '</p>'); process.exit(0); };
@@ -2771,7 +2773,10 @@ function validRel(p) {
 }
 async function fileDetail(dir, rel, status, scope) {
   const abs = path.resolve(dir, rel);
-  if (norm(abs).indexOf(norm(path.resolve(dir)) + '/') !== 0) return { ok: false, error: '폴더 밖의 경로입니다' };
+  const lex = path.relative(path.resolve(dir), abs);
+  if (!lex || lex.startsWith('..') || path.isAbsolute(lex)) return { ok: false, error: '폴더 밖의 경로입니다' };
+  // 저장소 안에 폴더 밖을 가리키는 바로가기(심볼릭 링크)가 있어도 그 밖의 파일을 읽지 않는다
+  if (fs.existsSync(abs) && norm(abs).indexOf(norm(dir) + '/') !== 0) return { ok: false, error: '폴더 밖을 가리키는 파일입니다' };
   const isMd = /\.(md|markdown)$/i.test(rel);
   let rows = [], raw = '', binary = false, truncated = false, st = status || 'M';
   const base = await baseFor(dir, scope); // 목록과 같은 기준(커밋한 변경까지 포함)과 비교한다
