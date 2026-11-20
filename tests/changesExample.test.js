@@ -55,22 +55,24 @@ function setup() {
   return { base, lead, wt, outside, session, leadsFile, scriptFile, tmp: path.join(base, 'tmp') };
 }
 
-function runScript(ctx, request) {
+function runScript(ctx, request, extra = {}) {
   mk(ctx.tmp);
   const env = { ...process.env, TMPDIR: ctx.tmp, TEMP: ctx.tmp, TMP: ctx.tmp, CTM_LEAD_DIR: ctx.lead, CTM_LEAD_ID: 'L1', CTM_SESSION_ID: 's1', CTM_LEADS_FILE: ctx.leadsFile, CTM_SESSION_FILE: ctx.session, CTM_LEAD_LABEL: '시험 팀장' };
-  delete env.CTM_CLAUDE_HOME; // 시험에서는 떠 있는 팀원 조회(claude)를 건너뛴다
+  delete env.CTM_CLAUDE_HOME; // 기본: 시험에서는 떠 있는 팀원 조회(claude)를 건너뛴다
+  Object.assign(env, extra.env || {});
   if (request !== undefined) env.CTM_REQUEST = typeof request === 'string' ? request : JSON.stringify(request);
-  const r = spawnSync(process.execPath, [ctx.scriptFile], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env });
+  const r = spawnSync(process.execPath, [ctx.scriptFile], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, env, cwd: extra.cwd });
   assert.strictEqual(r.status, 0, r.stderr);
   return r.stdout;
 }
-const page = ctx => {
-  const out = runScript(ctx);
+const page = (ctx, extra) => {
+  const out = runScript(ctx, undefined, extra);
   const dm = /<script type="application\/json" id="data">([\s\S]*?)<\/script>/.exec(out);
   assert.ok(dm, '데이터 JSON이 출력에 없다: ' + out.slice(0, 300));
   return { out, data: JSON.parse(dm[1]) };
 };
 const call = (ctx, req) => JSON.parse(runScript(ctx, req));
+const call2 = (ctx, req, extra) => JSON.parse(runScript(ctx, req, extra));
 const real = p => { try { return fs.realpathSync.native(p); } catch { return String(p); } };
 const norm = p => real(p).replace(/\\/g, '/').toLowerCase();
 
@@ -190,6 +192,64 @@ test('질의 방식: 잘못된·악의적 요청(허용 안 된 폴더, 경로 �
     assert.strictEqual(r.ok, false, JSON.stringify(req) + ' → ' + out.slice(0, 200));
     assert.ok(!out.includes('남의 비밀') && !out.includes('"id":"L1"'), '남의 내용이 새어 나오면 안 된다');
   }
+  fs.rmSync(ctx.base, { recursive: true, force: true });
+});
+
+// 팀원은 시작한 폴더가 아니라 도중에 들어간 git 워크트리에서 일하고 커밋하는 일이 흔하다(실사용: g1cl-mgt-leader의 팀원이 g1cl-fo의 워크트리에서 고쳤는데 목록에 안 나왔다).
+// 시험: 가짜 claude(= node 복사본)가 "claude agents --json"에 팀원의 시작 폴더를 돌려주고, 대화 기록의 마지막 cwd는 워크트리다.
+function setupMember(ctx, { withTranscript = true } = {}) {
+  const repo = path.join(ctx.base, '팀원 저장소'); mk(repo);
+  git(repo, 'init', '-q', '-b', 'main');
+  fs.writeFileSync(path.join(repo, 'a.txt'), '원래 내용\n'); git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', '처음');
+  const wt = path.join(repo, '.claude', 'worktrees', 'work');
+  git(repo, 'worktree', 'add', '-q', '-b', 'feat/member-work', wt, 'main');
+  fs.writeFileSync(path.join(wt, 'a.txt'), '팀원이 고친 내용\n'); fs.writeFileSync(path.join(wt, 'sink.md'), '# 새 문서\n');
+  git(wt, 'add', '-A'); git(wt, 'commit', '-q', '-m', '팀원 작업 커밋');
+  const home = path.join(ctx.base, 'claude-home');
+  mk(path.join(home, 'claude-team-monitor', 'members'));
+  fs.writeFileSync(path.join(home, 'claude-team-monitor', 'members', 'mm01.json'), JSON.stringify({ memberId: 'mm01', leadId: 'L1', label: '멤버A', sessionId: 'aaaaaaaa-0000-4000-8000-000000000001' }));
+  fs.writeFileSync(path.join(home, 'claude-team-monitor', 'members', 'other.json'), JSON.stringify({ memberId: 'mm02', leadId: 'L9', label: '남의 팀원', sessionId: 'bbbbbbbb-0000-4000-8000-000000000002' }));
+  if (withTranscript) {
+    mk(path.join(home, 'projects', 'proj'));
+    fs.writeFileSync(path.join(home, 'projects', 'proj', 'aaaaaaaa-0000-4000-8000-000000000001.jsonl'),
+      JSON.stringify({ type: 'user', cwd: repo }) + '\n' + '{"type":"assistant","cwd":"' + jsonEsc(wt) + '"}\n');
+  }
+  // 가짜 claude: node 실행 파일을 claude 이름으로 복사하고, 작업 폴더의 "agents" 파일이 agents --json 대신 돈다
+  const bin = path.join(ctx.base, 'fakebin'); mk(bin);
+  const fake = path.join(bin, process.platform === 'win32' ? 'claude.exe' : 'claude');
+  fs.copyFileSync(process.execPath, fake); try { fs.chmodSync(fake, 0o755); } catch { /* 윈도 */ }
+  fs.writeFileSync(path.join(ctx.base, 'agents'), 'console.log(JSON.stringify(' + JSON.stringify([
+    { id: 'mm01', sessionId: 'aaaaaaaa-0000-4000-8000-000000000001', cwd: repo, status: 'idle', state: 'done' },
+    { id: 'mm02', sessionId: 'bbbbbbbb-0000-4000-8000-000000000002', cwd: ctx.outside, status: 'idle', state: 'done' },
+  ]) + '));');
+  return { repo, wt, extra: { cwd: ctx.base, env: { CTM_CLAUDE_HOME: home, PATH: bin + path.delimiter + process.env.PATH } } };
+}
+
+test('팀원이 도중에 들어간 워크트리에서 한 작업(커밋 포함)이 "팀원" 폴더로 나오고, 시작 폴더는 따로 나온다', () => {
+  const ctx = setup(); const m = setupMember(ctx);
+  const { data } = page(ctx, m.extra);
+  const byDir = new Map(data.dirs.map(d => [norm(d.dir), d]));
+  const work = byDir.get(norm(m.wt));
+  assert.ok(work, '팀원의 워크트리가 목록에 있어야 한다: ' + data.dirs.map(d => d.role + ' ' + d.dir).join(' | '));
+  assert.strictEqual(work.role, '팀원 멤버A');
+  assert.deepStrictEqual(work.files.map(f => f.p + ':' + f.s).sort(), ['a.txt:M', 'sink.md:A'], '커밋한 팀원 작업이 보여야 한다');
+  assert.ok(work.base.includes('main'), work.base);
+  const start = byDir.get(norm(m.repo));
+  assert.ok(start && start.role === '팀원 멤버A (시작 폴더)', '시작 폴더도 따로 있어야 한다: ' + (start && start.role));
+  assert.ok(![...byDir.values()].some(d => d.role.includes('남의 팀원')), '다른 팀장 소속 팀원은 보이면 안 된다');
+  // 그 워크트리의 파일 내용도 열린다(요청은 목록에 있는 폴더만 허용)
+  const f = call2(ctx, { op: 'file', dir: m.wt, path: 'sink.md', st: 'A', scope: 'branch' }, m.extra);
+  assert.ok(f.ok && f.raw.startsWith('# 새 문서'), JSON.stringify(f).slice(0, 200));
+  fs.rmSync(ctx.base, { recursive: true, force: true });
+});
+
+test('팀원의 대화 기록을 못 찾으면 시작 폴더만 보여 준다', () => {
+  const ctx = setup(); const m = setupMember(ctx, { withTranscript: false });
+  const { data } = page(ctx, m.extra);
+  const mine = data.dirs.filter(d => d.role.startsWith('팀원 멤버A'));
+  assert.strictEqual(mine.length, 1);
+  assert.strictEqual(mine[0].role, '팀원 멤버A');
+  assert.strictEqual(norm(mine[0].dir), norm(m.repo));
   fs.rmSync(ctx.base, { recursive: true, force: true });
 });
 

@@ -2616,7 +2616,7 @@ const PS_EXAMPLE_CHANGES_JS = String.raw`// 작업 중 변경 보기(팀장+팀�
 // 이 슬롯은 "출력: HTML"과 "JavaScript 허용"을 켜야 합니다(읽기만 하는 git 명령을 쓰고 파일을 고치지 않습니다).
 // 동작 방식: 환경 변수 CTM_REQUEST가 비어 있으면 페이지 전체(변경 목록)를 출력하고, 채워져 있으면(화면이 ctm.call로 부른 것) 요청에 맞는 JSON만 출력합니다.
 //   요청 {op:"list"}: 변경 목록을 다시 모읍니다 / 요청 {op:"file", dir, path}: 파일 하나의 전체 내용과 줄별 변경 표시.
-// 어떤 폴더를 보나: ① 이 팀장 세션의 현재 작업 폴더(대화 기록에서 읽음) ② 팀장 등록 폴더와 그 git 워크트리 전부 ③ 지금 떠 있는 팀원 세션의 작업 폴더(claude agents --json).
+// 어떤 폴더를 보나: ① 이 팀장 세션의 현재 작업 폴더(대화 기록에서 읽음) ② 팀장 등록 폴더와 그 git 워크트리 전부 ③ 지금 떠 있는 팀원 세션의 작업 폴더 — 시작 폴더(claude agents --json)와, 팀원이 도중에 들어간 워크트리(대화 기록의 마지막 cwd).
 //   ①과 ③은 처음부터 펼쳐 보이고 ②의 나머지 워크트리는 접혀 있습니다(제목줄을 누르면 펼침).
 const { execFile } = require('child_process');
 const fs = require('fs');
@@ -2636,9 +2636,9 @@ if (!leadDir) fail('작업 탭에서 팀장을 선택하세요.');
 const run = (cmd, args, cwd, timeout) => new Promise(res => execFile(cmd, args, { cwd, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, windowsHide: true, timeout: timeout || 20000 }, (e, out) => res(e ? null : out)));
 const git = (cwd, ...a) => run('git', ['-c', 'core.quotePath=false', '--no-optional-locks', ...a], cwd);
 
-// 1) 이 팀장 세션의 현재 작업 폴더 — 대화 기록 맨 끝쪽에서 마지막으로 적힌 cwd
-function currentCwd() {
-  const f = process.env.CTM_SESSION_FILE;
+// 1) 세션의 현재 작업 폴더 — 대화 기록 맨 끝쪽에서 마지막으로 적힌 cwd. 세션은 시작한 폴더가 아니라 도중에 들어간 git 워크트리에서 일하는 일이 흔하다(팀원이 자기 워크트리를 만들어 거기서 고치고 커밋함).
+const currentCwd = () => lastCwdOf(process.env.CTM_SESSION_FILE);
+function lastCwdOf(f) {
   if (!f) return null;
   try {
     const fd = fs.openSync(f, 'r');
@@ -2665,7 +2665,18 @@ async function worktrees(dir) {
   return list;
 }
 
-// 3) 떠 있는 팀원(이 팀장 소속): 등록 파일의 leadId + claude agents --json 의 작업 폴더
+// 세션 id로 그 세션의 대화 기록 파일을 찾는다(기록은 세션을 시작한 폴더 이름의 프로젝트 폴더 아래에 있다). id는 모양을 검사해 경로 조작을 막는다.
+function findSessionFile(sessionId) {
+  const home = process.env.CTM_CLAUDE_HOME;
+  if (!home || typeof sessionId !== 'string' || !/^[0-9a-f][0-9a-f-]{7,}$/i.test(sessionId)) return null;
+  try {
+    const pd = path.join(home, 'projects');
+    for (const d of fs.readdirSync(pd)) { const f = path.join(pd, d, sessionId + '.jsonl'); if (fs.existsSync(f)) return f; }
+  } catch { /* 기록 폴더가 없으면 건너뜀 */ }
+  return null;
+}
+
+// 3) 떠 있는 팀원(이 팀장 소속): 등록 파일의 leadId + claude agents --json 의 시작 폴더·세션 id
 async function liveMembers() {
   const home = process.env.CTM_CLAUDE_HOME;
   const leadId = process.env.CTM_LEAD_ID;
@@ -2687,7 +2698,7 @@ async function liveMembers() {
   try { agents = JSON.parse(out || '[]'); } catch { return []; }
   const res = [];
   for (const a of Array.isArray(agents) ? agents : []) {
-    if (a && mine.has(String(a.id)) && typeof a.cwd === 'string' && a.cwd) res.push({ dir: a.cwd, label: mine.get(String(a.id)) });
+    if (a && mine.has(String(a.id)) && typeof a.cwd === 'string' && a.cwd) res.push({ dir: a.cwd, label: mine.get(String(a.id)), sessionId: a.sessionId });
   }
   return res;
 }
@@ -2699,7 +2710,12 @@ async function sources() {
   add(currentCwd(), '팀장 작업 폴더');
   add(leadDir, '팀장 폴더');
   for (const w of await worktrees(leadDir)) add(w, '팀장 워크트리');
-  for (const m of await liveMembers()) add(m.dir, '팀원 ' + m.label);
+  for (const m of await liveMembers()) {
+    // 팀원은 시작한 폴더(agents의 cwd)가 아니라 도중에 들어간 워크트리에서 일했을 수 있다 — 대화 기록의 마지막 cwd가 실제 작업 폴더다
+    const cur = lastCwdOf(findSessionFile(m.sessionId));
+    if (cur && fs.existsSync(cur) && norm(cur) !== norm(m.dir)) { add(cur, '팀원 ' + m.label); add(m.dir, '팀원 ' + m.label + ' (시작 폴더)'); }
+    else add(m.dir, '팀원 ' + m.label);
+  }
   return list;
 }
 
