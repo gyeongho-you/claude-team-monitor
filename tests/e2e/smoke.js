@@ -372,12 +372,14 @@ async function main() {
         panes[0].pinBtn.click(); // 지금 선택한 팀장(L1)에 고정
         out.pin = JSON.stringify(panelLayout.pins[0]);
         out.pressed = panes[0].pinBtn.classList.contains('on');
+        const svg = panes[0].pinBtn.querySelector('svg'); out.upright = getComputedStyle(svg).transform; out.pinColor = getComputedStyle(panes[0].pinBtn).color; // 고정하면 핀이 똑바로 서고 색이 들어온다
         selectedLeadId = 'L2'; out.afterSwitch = paneLeadId(panes[0]); // 다른 팀장을 골라도 L1
         lastRows = rows([['L1b', 'I1', '가팀장'], ['L2', 'I2', '나팀장']]); out.afterResume = paneLeadId(panes[0]); // 짧은 id가 L1b로 바뀌어도 따라간다
         lastRows = rows([['L2', 'I2', '나팀장']]); out.gone = paneLeadId(panes[0]); // 고정한 팀장이 사라지면 null
         lastRows = rows([['L1b', 'I1', '가팀장'], ['L2', 'I2', '나팀장']]);
         panes[0].pinBtn.click(); // 풀기
         out.released = paneLeadId(panes[0]); out.pin2 = JSON.stringify(panelLayout.pins[0] || null);
+        out.tilted = getComputedStyle(panes[0].pinBtn.querySelector('svg')).transform; out.offColor = getComputedStyle(panes[0].pinBtn).color; // 풀면 다시 비스듬히 눕고 색이 빠진다
         selectedLeadId = null; panelLayout.pins = [];
         panes[0].pinBtn.click(); // 팀장을 고르지 않았으면 고정할 수 없다
         out.noLead = JSON.stringify(panelLayout.pins[0] || null);
@@ -385,6 +387,9 @@ async function main() {
       return JSON.stringify(out);
     })()`));
     ok(r.unpinned === 'L1' && JSON.parse(r.pin).internalId === 'I1' && r.pressed, `고정: ${JSON.stringify(r)}`);
+    ok(r.upright === 'none' || r.upright === 'matrix(1, 0, 0, 1, 0, 0)', `고정하면 핀이 똑바로 서야 합니다: ${r.upright}`);
+    ok(r.pinColor === 'rgb(229, 72, 77)' && r.offColor !== r.pinColor, `고정하면 빨간색이어야 하고 풀면 색이 빠져야 합니다: ${r.pinColor} / ${r.offColor}`);
+    ok(/^matrix\(0\.70\d*, 0\.70\d*, -0\.70\d*, 0\.70\d*, 0, 0\)$/.test(r.tilted), `풀면 핀이 45도 기울어야 합니다: ${r.tilted}`);
     ok(r.afterSwitch === 'L1', `다른 팀장을 골라도 고정한 칸은 그대로여야 합니다: ${r.afterSwitch}`);
     ok(r.afterResume === 'L1b', `고정한 팀장의 짧은 id가 바뀌어도 따라가야 합니다: ${r.afterResume}`);
     ok(r.gone === null, `고정한 팀장이 목록에 없으면 null이어야 합니다: ${r.gone}`);

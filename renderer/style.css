@@ -969,9 +969,12 @@ body.sp-vresizing iframe, body.sp-hresizing iframe { pointer-events: none; }
 .sp-tab.active { border-color: var(--accent-2); color: var(--accent-2); }
 .sp-icon { background: transparent; border: none; color: var(--text-soft); padding: 2px 6px; font-size: 14px; }
 .sp-icon:hover { color: var(--accent-2); background: transparent; }
-.sp-pin { font-size: 12px; opacity: 0.4; filter: grayscale(1); }
-.sp-pin:hover { opacity: 0.8; }
-.sp-pin.on { opacity: 1; filter: none; }
+/* 📌 고정핀: 고정 전에는 비스듬히 누운 회색 핀, 고정하면 똑바로 세워진 빨간 핀 */
+.sp-pin { display: inline-flex; align-items: center; color: var(--text-faint); }
+.sp-pin svg { display: block; transform: rotate(45deg); }
+.sp-pin:hover { color: var(--text-soft); }
+.sp-pin.on { color: #e5484d; }
+.sp-pin.on svg { transform: none; }
 .sp-meta { font-size: 10px; color: var(--text-faint); padding: 5px 12px 0; }
 .sp-body { padding: 8px 12px 12px; overflow-y: auto; font-size: 12px; line-height: 1.55; color: var(--text); word-break: break-word; }
 .sp-body h2, .sp-body h3, .sp-body h4 { font-size: 13px; margin: 10px 0 4px; color: var(--text-bright); text-transform: none; }
