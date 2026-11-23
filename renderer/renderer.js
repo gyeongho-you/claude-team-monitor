@@ -2313,6 +2313,7 @@ function frameMain() {
   var paneOff = false, scrollTimer = null, pendingScroll = null;
   var below = document.getElementById('below');
   var detailEl = document.getElementById('detail'), dtool = document.getElementById('dtool'), dbody = document.getElementById('dbody');
+  var SZ = { ph: 0, dh: 0 }; // 사용자가 끌어서 정한 높이(0이면 기본값): ph=커밋 설명 칸, dh=변경 내용 칸
   var DV = { sha: null, path: null, st: null, mode: 'full', cur: null, seq: 0, max: false, closed: false, want: null }; // 커밋 안 파일의 변경 내용 보기
   var R = null, curR = -1, curRev = '';
   var sel = null, selSha = null, restoring = false, busy = false, pendingSha = null;
@@ -2333,7 +2334,7 @@ function frameMain() {
   // 패널이 다시 그려져도(다른 탭에 갔다 와도) 보던 저장소·브랜치·커밋·정렬·검색어를 되살린다 — 앱이 상태를 기억해 두었다가 돌려준다(ctm.getState/setState).
   function saveState() {
     if (restoring || !R || !window.ctm || !window.ctm.setState) return;
-    try { window.ctm.setState({ repo: R.name + '|' + R.dir, rev: curRev, sha: selSha, sk: sortKey, sd: dir, tab: tab, q: filterText, pc: paneOff, sy: scrollEl.scrollTop, df: DV.path, dm: DV.mode, dc: DV.closed ? 1 : 0, dx: DV.max ? 1 : 0 }); } catch (e) { /* 저장 못 해도 화면은 그대로 */ }
+    try { window.ctm.setState({ repo: R.name + '|' + R.dir, rev: curRev, sha: selSha, sk: sortKey, sd: dir, tab: tab, q: filterText, pc: paneOff, sy: scrollEl.scrollTop, df: DV.path, dm: DV.mode, dc: DV.closed ? 1 : 0, dx: DV.max ? 1 : 0, ph: SZ.ph, dh: SZ.dh }); } catch (e) { /* 저장 못 해도 화면은 그대로 */ }
   }
   function setPane(off) {
     paneOff = !!off;
@@ -2350,6 +2351,29 @@ function frameMain() {
       appEl.style.setProperty('--vh', Math.max(320, Math.min(2000, Math.floor(h))) + 'px');
       appEl.className = h < 520 ? 'compact' : '';
     });
+  }
+  // ---- 영역 크기 조절: 칸 사이의 가는 막대를 끌면 높이가 바뀐다(더블클릭하면 기본 크기) ----
+  function applySizes() {
+    pane.style.height = SZ.ph ? SZ.ph + 'px' : '';
+    if (SZ.dh) { detailEl.style.flex = 'none'; detailEl.style.height = SZ.dh + 'px'; } else { detailEl.style.flex = ''; detailEl.style.height = ''; }
+  }
+  function bindSplitter(bar, which) {
+    bar.addEventListener('pointerdown', function (e) {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      var y0 = e.clientY, startPane = pane.offsetHeight, startDet = detailEl.offsetHeight, total = appEl.clientHeight;
+      try { bar.setPointerCapture(e.pointerId); } catch (x) { /* 캡처 실패해도 끌기는 동작 */ }
+      bar.classList.add('drag');
+      function move(ev) {
+        var dy = ev.clientY - y0;
+        if (which === 'p') { SZ.ph = Math.max(36, Math.min(Math.max(60, total - 220), Math.round(startPane + dy))); }
+        else { SZ.dh = Math.max(60, Math.min(Math.max(80, total - document.getElementById('top').offsetHeight - 90), Math.round(startDet - dy))); }
+        applySizes();
+      }
+      function up() { bar.classList.remove('drag'); bar.removeEventListener('pointermove', move); bar.removeEventListener('pointerup', up); bar.removeEventListener('pointercancel', up); saveState(); }
+      bar.addEventListener('pointermove', move); bar.addEventListener('pointerup', up); bar.addEventListener('pointercancel', up);
+    });
+    bar.addEventListener('dblclick', function () { if (which === 'p') SZ.ph = 0; else SZ.dh = 0; applySizes(); saveState(); });
   }
   function resetPane() { pane.textContent = ''; pane.appendChild(el('span', 'empty', '아래 그래프에서 커밋을 클릭하세요.')); closeDetail(true); }
   function show(sha) {
@@ -2692,6 +2716,9 @@ function frameMain() {
     if (st.pc === true) paneOff = true;
     for (var ri = 0; ri < data.repos.length; ri++) { var rr = data.repos[ri]; if (!rr.err && rr.name + '|' + rr.dir === st.repo) { startRepo = ri; break; } }
   }
+  if (st && typeof st === 'object') { SZ.ph = Math.max(0, Math.min(2000, Number(st.ph) || 0)); SZ.dh = Math.max(0, Math.min(3000, Number(st.dh) || 0)); }
+  bindSplitter(document.getElementById('sph1'), 'p'); bindSplitter(document.getElementById('sph2'), 'd');
+  applySizes();
   restoring = true;
   setRepo(startRepo);
   if (paneOff) setPane(true);
@@ -2757,6 +2784,8 @@ function frameMain() {
     + '#info{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text-soft);margin-bottom:4px}'
     + '#app.compact #pane{height:84px;margin:4px 0}#app.compact #repos{margin-bottom:2px}'
     + '#app.dopen #pane{height:76px}#app.dopen.compact #pane{height:60px}#app.dmax #scroll{display:none}.fr{cursor:pointer}.fr:hover,.fr.on{background:var(--surface)}'
+    + '.sph{flex:none;height:7px;margin:1px 0;cursor:row-resize;touch-action:none;position:relative;background:transparent}.sph::after{content:"";position:absolute;left:30%;right:30%;top:3px;height:2px;border-radius:1px;background:var(--border-2)}.sph:hover::after,.sph.drag::after{background:var(--accent)}'
+    + '#pane[style*="display: none"]+#sph1{display:none}#app:not(.dopen) #sph2,#app.dmax #sph2{display:none}'
     + '#detail{flex:1 1 0;min-height:0;display:flex;flex-direction:column;border-top:2px solid var(--border-2);margin-top:4px}#detail[hidden]{display:none}'
     + '#dtool{flex:none;display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;padding:3px 0;border-bottom:1px solid var(--border);font-size:11px}.dtitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#dtool .chips{flex-basis:100%}'
     + '#dbody{flex:1;min-height:0;overflow:auto;padding-top:4px}.chips{display:flex;flex-wrap:wrap;gap:4px}'
@@ -2772,13 +2801,13 @@ function frameMain() {
   console.log('<div id="app"><div id="top">');
   console.log('<div id="info"><span style="flex:1;min-width:0">' + esc(process.env.CTM_LEAD_LABEL || '팀장') + ' · 저장소 ' + repos.length + '개 (팀원 ' + nMem + ') · 브랜치 ' + nBr + '개 · 브랜치나 워크트리를 누르면 그 그래프를 불러옵니다</span><button id="ptoggle" class="ib" title="커밋 설명 박스를 접거나 폅니다">커밋 설명 ▾</button></div>');
   console.log('<div id="repos"></div>');
-  console.log('<div id="pane"><span class="empty">아래 그래프에서 커밋을 클릭하세요.</span></div>');
+  console.log('<div id="pane"><span class="empty">아래 그래프에서 커밋을 클릭하세요.</span></div><div id="sph1" class="sph" title="끌어서 설명 칸 높이 조절 (더블클릭: 기본)"></div>');
   console.log('<div id="gbar"><b id="gtitle">그래프를 그리는 중…</b><button id="gall" class="ib" style="display:none">전체 보기</button><button id="gmore" class="ib" style="display:none">더 보기</button><button id="gre" class="ib" title="이 그래프를 다시 불러와 최신 상태로 만듭니다">↻</button><span id="gmeta" class="meta"></span></div>');
   console.log('</div><div id="scroll">');
   console.log('<div id="graph" class="graph" style="position:relative"><span style="color:var(--text-soft)">그래프를 그리는 중… (보이지 않으면 이 슬롯의 "JavaScript 허용"을 켜세요)</span></div>');
   console.log('<div id="btabs" style="display:flex;gap:4px;margin:10px 0 4px"></div>');
   console.log('<div id="below"></div>');
-  console.log('</div><div id="detail" hidden><div id="dtool"></div><div id="dbody"></div></div></div>');
+  console.log('</div><div id="sph2" class="sph" title="끌어서 변경 내용 칸 높이 조절 (더블클릭: 기본)"></div><div id="detail" hidden><div id="dtool"></div><div id="dbody"></div></div></div>');
   console.log('<script type="application/json" id="data">' + json + '</script>');
   console.log('<script>(' + frameMain.toString() + ')()</script>');
 })().catch(e => { console.log(REQ ? JSON.stringify({ ok: false, error: String((e && e.message) || e) }) : '<pre style="color:#f85149;white-space:pre-wrap">' + esc((e && e.stack) || e) + '</pre>'); });
