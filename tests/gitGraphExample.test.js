@@ -229,3 +229,87 @@ test('저장소와 브랜치가 많아도 페이지가 한도 안이고, 모든 
   assert.strictEqual(g.ok, true); assert.strictEqual(g.n, PER);
   assert.ok(JSON.stringify(g).length < 900000);
 });
+
+// ---- 커밋을 누르면 바로 보이는 변경 내용(op: 'cfile'): 파일 전체 + 줄별 변경 표시, 마크다운 원문, 삭제·새 파일·이진 파일, 악의적 요청 거절 ----
+function cfileSetup() {
+  const ctx = setup();
+  const L = ctx.lead;
+  const rev = (...a) => git(L, ...a).trim();
+  const root = rev('rev-list', '--max-parents=0', 'HEAD');
+  fs.writeFileSync(path.join(L, 'a.txt'), 'l1\nl2\nl3\n'); git(L, 'add', '-A'); git(L, 'commit', '-q', '-m', 'a 세 줄');
+  const base = rev('rev-parse', 'HEAD');
+  fs.writeFileSync(path.join(L, 'a.txt'), 'l1\nL2\nl3\nl4\n');
+  fs.writeFileSync(path.join(L, 'doc.md'), '# 문서\n\n- 항목\n  - 안쪽\n');
+  fs.writeFileSync(path.join(L, 'blob.bin'), Buffer.from([0, 1, 2, 0, 255]));
+  git(L, 'rm', '-q', 'b.txt'); git(L, 'add', '-A'); git(L, 'commit', '-q', '-m', '수정·추가·삭제');
+  return { ctx, root, base, head: rev('rev-parse', 'HEAD') };
+}
+const cfile = (ctx, sha, p, st, repo) => call(ctx, { op: 'cfile', repo: repo || ctx.lead, sha, path: p, st });
+
+test('cfile: 수정된 파일은 전체 내용에 바뀐 줄 표시와 줄 번호가 붙는다', () => {
+  const { ctx, head } = cfileSetup();
+  const r = cfile(ctx, head, 'a.txt', 'M');
+  assert.strictEqual(r.ok, true, JSON.stringify(r));
+  assert.deepStrictEqual(r.rows.map(x => x[0] + x[3]), [' l1', '-l2', '+L2', ' l3', '+l4']);
+  assert.deepStrictEqual(r.rows.filter(x => x[0] !== '-').map(x => x[2]), [1, 2, 3, 4], '새 줄 번호');
+  assert.strictEqual(r.rows.find(x => x[0] === '-')[1], 2, '지운 줄은 옛 줄 번호');
+  assert.strictEqual(r.raw, '', '마크다운이 아니면 원문을 따로 보내지 않는다');
+  fs.rmSync(ctx.base, { recursive: true, force: true });
+});
+
+test('cfile: 새 파일은 전부 추가, 마크다운은 렌더링용 원문, 삭제된 파일은 이전 내용이 전부 삭제로, 이진 파일은 내용 없음', () => {
+  const { ctx, head } = cfileSetup();
+  const md = cfile(ctx, head, 'doc.md', 'A');
+  assert.ok(md.rows.length === 4 && md.rows.every(x => x[0] === '+') && md.raw.startsWith('# 문서'), JSON.stringify(md).slice(0, 200));
+  const del = cfile(ctx, head, 'b.txt', 'D');
+  assert.ok(del.ok && del.status === 'D' && del.rows.length === 1 && del.rows[0][0] === '-' && del.rows[0][3] === '2', JSON.stringify(del));
+  const bin = cfile(ctx, head, 'blob.bin', 'A');
+  assert.strictEqual(bin.binary, true); assert.deepStrictEqual(bin.rows, []);
+  fs.rmSync(ctx.base, { recursive: true, force: true });
+});
+
+test('cfile: 첫 커밋(부모 없음)의 파일도 전부 추가로 보인다', () => {
+  const { ctx, root } = cfileSetup();
+  const r = cfile(ctx, root, 'a.txt', 'A');
+  assert.ok(r.ok && r.rows.length === 1 && r.rows[0][0] === '+' && r.rows[0][3] === '1', JSON.stringify(r));
+  fs.rmSync(ctx.base, { recursive: true, force: true });
+});
+
+test('cfile: 한글 경로와 아주 큰 파일(잘림)', () => {
+  const { ctx } = cfileSetup();
+  fs.writeFileSync(path.join(ctx.lead, '한글 문서.md'), '# 한글\n'); fs.writeFileSync(path.join(ctx.lead, 'big.txt'), 'y'.repeat(500000));
+  git(ctx.lead, 'add', '-A'); git(ctx.lead, 'commit', '-q', '-m', '한글·큰 파일');
+  const sha = git(ctx.lead, 'rev-parse', 'HEAD').trim();
+  const kr = cfile(ctx, sha, '한글 문서.md', 'A');
+  assert.ok(kr.ok && kr.raw.startsWith('# 한글'), JSON.stringify(kr).slice(0, 160));
+  const big = cfile(ctx, sha, 'big.txt', 'A');
+  assert.strictEqual(big.truncated, true); assert.ok(JSON.stringify(big).length < 700000);
+  fs.rmSync(ctx.base, { recursive: true, force: true });
+});
+
+test('cfile: 잘못된·악의적 요청(허용 안 된 저장소, 이상한 커밋 id, 경로 탈출·git 경로 마법)은 거절한다', () => {
+  const { ctx, head } = cfileSetup();
+  const bad = [
+    { op: 'cfile', repo: ctx.notGit, sha: head, path: 'a.txt', st: 'M' },
+    { op: 'cfile', repo: path.join(ctx.base, '없는 저장소'), sha: head, path: 'a.txt', st: 'M' },
+    { op: 'cfile', repo: ctx.lead, sha: 'zzzzzzz', path: 'a.txt', st: 'M' },
+    { op: 'cfile', repo: ctx.lead, sha: '--output=pwned.txt', path: 'a.txt', st: 'M' },
+    { op: 'cfile', repo: ctx.lead, sha: 'HEAD', path: 'a.txt', st: 'M' },
+    { op: 'cfile', repo: ctx.lead, sha: '0123456789abcdef0123456789abcdef01234567', path: 'a.txt', st: 'M' },
+    { op: 'cfile', repo: ctx.lead, sha: head, path: '../leads.json', st: 'M' },
+    { op: 'cfile', repo: ctx.lead, sha: head, path: 'x/../../leads.json', st: 'M' },
+    { op: 'cfile', repo: ctx.lead, sha: head, path: '/etc/passwd', st: 'M' },
+    { op: 'cfile', repo: ctx.lead, sha: head, path: 'C:\Windows\win.ini', st: 'M' },
+    { op: 'cfile', repo: ctx.lead, sha: head, path: ':(top)a.txt', st: 'M' },
+    { op: 'cfile', repo: ctx.lead, sha: head, path: 'a.txt\nb.txt', st: 'M' },
+    { op: 'cfile', repo: ctx.lead, sha: head, path: '', st: 'M' },
+    { op: 'cfile', repo: ctx.lead, sha: head, path: 5, st: 'M' },
+    { op: 'cfile', repo: ctx.lead, sha: head, path: '없는 파일.txt', st: 'M' },
+  ];
+  for (const req of bad) {
+    const r = call(ctx, req);
+    assert.strictEqual(r.ok, false, JSON.stringify(req) + ' → ' + JSON.stringify(r).slice(0, 160));
+  }
+  assert.ok(!fs.existsSync(path.join(ctx.lead, 'pwned.txt')), 'git 옵션이 실행되면 안 된다');
+  fs.rmSync(ctx.base, { recursive: true, force: true });
+});

@@ -2010,6 +2010,7 @@ console.log('<script>(' + frameMain.toString() + ')()</script>');
 const PS_EXAMPLE_GRAPH_TEAM_JS = String.raw`// git 그래프(팀장+팀원 · 질의 방식): 처음에는 가벼운 정보(저장소별 전체 브랜치 목록과 "전체 브랜치" 그래프)만 그리고, 브랜치를 누르면 그 브랜치의 그래프를 화면이 이 스크립트를 다시 불러(ctm.call) 받아 옵니다.
 // 화면 구성: 맨 위(저장소 탭·그래프 제목줄·커밋 설명 박스)는 고정되고, 그 아래의 그래프와 브랜치 목록만 스크롤됩니다(패널이 알려 주는 보이는 높이 ctm.onViewport에 맞춤). 커밋 설명 박스는 접을 수 있습니다.
 // 위쪽 탭에서 팀장 저장소(설계)와 허용한 팀원 저장소(구현)를 고르고, 아래 "브랜치" 목록(검색 가능)이나 "워크트리" 표의 행을 누르면 그래프가 그 브랜치 기준으로 바뀝니다. "더 보기"로 더 옛날 커밋까지, "↻"로 최신 상태로 다시 불러옵니다.
+// 커밋을 누르면 그 커밋의 변경 내용이 그래프 아래에 바로 열립니다: 첫 파일의 전체 내용(바뀐 줄은 색으로)을 보여 주고, 커밋 설명 칸의 파일 줄을 누르면 그 파일로 바뀝니다. 탭으로 "전체/변경만"(마크다운은 "렌더링"도)을 고르고, ⤢로 변경 내용을 크게 볼 수 있습니다.
 // 이 슬롯은 "출력: HTML"과 "JavaScript 허용"을 켜야 합니다(읽기만 하는 git 명령, 상태를 바꾸지 않습니다).
 // 동작 방식: 환경 변수 CTM_REQUEST가 비어 있으면 페이지 전체를 출력하고, 채워져 있으면(화면이 ctm.call로 부른 것) 요청에 맞는 데이터만 JSON으로 출력합니다.
 // 캐시: 커밋 하나의 내용(변경 파일)은 해시가 같으면 영원히 같으므로 임시 폴더에 기억하고, 브랜치 목록·브랜치 끝 커밋처럼 바뀌는 것은 매번 새로 읽습니다.
@@ -2186,6 +2187,59 @@ async function graphFit(git, rev, limit) {
 const refsFingerprint = refs => crypto.createHash('sha1').update(refs.map(r => r.full + ' ' + r.sha).join('\n')).digest('hex').slice(0, 12);
 
 // ---------------------------------------------------------------------------------------------------
+// 커밋 안 파일 하나의 변경 내용: 파일 전체 + 줄별 변경 표시(rows = [종류('+','-',' '), 옛 줄번호, 새 줄번호, 글자]). 마크다운은 렌더링용 원문(raw)도 준다.
+// ---------------------------------------------------------------------------------------------------
+const CF_MAX_BYTES = 400000; // 파일 하나에서 읽는 최대 크기(넘으면 앞부분만)
+const CF_MAX_ROWS = 8000; // 파일 하나에서 보내는 최대 줄 수
+function cfParseDiff(out) {
+  const rows = []; let o = 0, n = 0, inHunk = false;
+  for (const l of out.split('\n')) {
+    const h = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l);
+    if (h) { o = Number(h[1]); n = Number(h[2]); inHunk = true; continue; }
+    if (!inHunk || l.startsWith('\\')) continue; // 머리글, "\ No newline at end of file"
+    const c = l[0];
+    if (c === '+') rows.push(['+', 0, n++, l.slice(1)]);
+    else if (c === '-') rows.push(['-', o++, 0, l.slice(1)]);
+    else if (c === ' ') rows.push([' ', o++, n++, l.slice(1)]);
+  }
+  return rows;
+}
+function cfPlainRows(text, kind) {
+  const lines = text.split('\n'); if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  return lines.map((tx, i) => kind === '-' ? ['-', i + 1, 0, tx] : kind === '+' ? ['+', 0, i + 1, tx] : [' ', i + 1, i + 1, tx]);
+}
+function cfValidRel(p) {
+  if (typeof p !== 'string' || !p || p.length > 1000) return false;
+  if (/^[\\/:]/.test(p) || /^[A-Za-z]:/.test(p) || p.indexOf('\0') !== -1 || p.indexOf('\n') !== -1) return false; // 절대 경로·git 경로 마법(:)·줄바꿈 금지
+  return !p.split(/[\\/]/).some(seg => seg === '..');
+}
+async function commitFile(git, sha, rel, st) {
+  const relG = rel.replace(/\\/g, '/');
+  const parent = ((await git('rev-parse', '--verify', '--quiet', sha + '^')) || '').trim();
+  const isMd = /\.(md|markdown)$/i.test(rel);
+  let rows = [], raw = '', binary = false, truncated = false, status = ['M', 'A', 'D', 'R'].includes(st) ? st : 'M';
+  const cut = text => { if (text.length > CF_MAX_BYTES) { truncated = true; return text.slice(0, CF_MAX_BYTES); } return text; };
+  if (status === 'D') {
+    const old = parent ? await git('show', parent + ':' + relG) : null;
+    if (old === null) return { ok: false, error: '지운 파일의 이전 내용을 읽지 못했습니다' };
+    if (old.indexOf('\0') !== -1) binary = true;
+    else { raw = cut(old); rows = cfPlainRows(raw, '-'); }
+  } else {
+    const now = await git('show', sha + ':' + relG);
+    if (now === null) return { ok: false, error: '이 커밋에서 그 파일을 읽지 못했습니다' };
+    if (now.indexOf('\0') !== -1) binary = true;
+    else {
+      raw = cut(now);
+      const d = parent ? await git('diff', '-U99999', '--no-color', '--no-ext-diff', sha + '^', sha, '--', relG) : await git('show', '-U99999', '--format=', '--no-color', '--no-ext-diff', sha, '--', relG);
+      rows = d ? cfParseDiff(d) : [];
+      if (!rows.length) rows = cfPlainRows(raw, status === 'A' || !parent ? '+' : ' '); // 내용이 같은 변경(권한 등)은 전체만 보여 준다
+    }
+  }
+  if (rows.length > CF_MAX_ROWS) { rows = rows.slice(0, CF_MAX_ROWS); truncated = true; }
+  return { ok: true, op: 'cfile', path: rel, status, binary, truncated, rows, raw: isMd && !binary ? raw : '' };
+}
+
+// ---------------------------------------------------------------------------------------------------
 // 질의 방식: 화면이 ctm.call로 보낸 요청에 맞는 데이터만 JSON으로 낸다. 요청은 화면이 만든 믿을 수 없는 입력이라 허용 목록과 대조해서 쓴다.
 // ---------------------------------------------------------------------------------------------------
 async function answer(reqText) {
@@ -2197,6 +2251,13 @@ async function answer(reqText) {
   const p = await probe(hit.dir);
   if (p.err) return { ok: false, error: p.err };
   const git = mkGit(hit.dir);
+  if (req.op === 'cfile') { // 커밋 하나 안의 파일 하나의 변경 내용 — 커밋은 16진수 id이고 그 저장소에 실제로 있어야 하며, 경로는 폴더 밖으로 나갈 수 없다
+    const sha = String(req.sha || '');
+    if (!/^[0-9a-f]{7,40}$/.test(sha) || (await git('cat-file', '-e', sha + '^{commit}')) === null) return { ok: false, error: '알 수 없는 커밋입니다' };
+    if (!cfValidRel(req.path)) return { ok: false, error: '경로가 올바르지 않습니다' };
+    const r = await commitFile(git, sha, String(req.path), String(req.st || 'M'));
+    return r.ok ? Object.assign({ repo: hit.dir, sha }, r) : r;
+  }
   const refs = await listRefs(git);
   if (req.op === 'refs') {
     const wts = await listWorktrees(git, p.top);
@@ -2251,6 +2312,8 @@ function frameMain() {
   var ptoggle = document.getElementById('ptoggle');
   var paneOff = false, scrollTimer = null, pendingScroll = null;
   var below = document.getElementById('below');
+  var detailEl = document.getElementById('detail'), dtool = document.getElementById('dtool'), dbody = document.getElementById('dbody');
+  var DV = { sha: null, path: null, st: null, mode: 'full', cur: null, seq: 0, max: false, closed: false, want: null }; // 커밋 안 파일의 변경 내용 보기
   var R = null, curR = -1, curRev = '';
   var sel = null, selSha = null, restoring = false, busy = false, pendingSha = null;
   var tab = 'b', filterText = '', sortKey = 'ts', dir = -1;
@@ -2270,7 +2333,7 @@ function frameMain() {
   // 패널이 다시 그려져도(다른 탭에 갔다 와도) 보던 저장소·브랜치·커밋·정렬·검색어를 되살린다 — 앱이 상태를 기억해 두었다가 돌려준다(ctm.getState/setState).
   function saveState() {
     if (restoring || !R || !window.ctm || !window.ctm.setState) return;
-    try { window.ctm.setState({ repo: R.name + '|' + R.dir, rev: curRev, sha: selSha, sk: sortKey, sd: dir, tab: tab, q: filterText, pc: paneOff, sy: scrollEl.scrollTop }); } catch (e) { /* 저장 못 해도 화면은 그대로 */ }
+    try { window.ctm.setState({ repo: R.name + '|' + R.dir, rev: curRev, sha: selSha, sk: sortKey, sd: dir, tab: tab, q: filterText, pc: paneOff, sy: scrollEl.scrollTop, df: DV.path, dm: DV.mode, dc: DV.closed ? 1 : 0, dx: DV.max ? 1 : 0 }); } catch (e) { /* 저장 못 해도 화면은 그대로 */ }
   }
   function setPane(off) {
     paneOff = !!off;
@@ -2288,7 +2351,7 @@ function frameMain() {
       appEl.className = h < 520 ? 'compact' : '';
     });
   }
-  function resetPane() { pane.textContent = ''; pane.appendChild(el('span', 'empty', '아래 그래프에서 커밋을 클릭하세요.')); }
+  function resetPane() { pane.textContent = ''; pane.appendChild(el('span', 'empty', '아래 그래프에서 커밋을 클릭하세요.')); closeDetail(true); }
   function show(sha) {
     var c = R.commits[sha];
     if (!c) return;
@@ -2302,12 +2365,109 @@ function frameMain() {
     c.files.forEach(function (f) {
       var full = join(R.top, f.p);
       var r = el('div', 'fr');
+      r.setAttribute('data-p', f.p);
+      r.title = '눌러서 이 파일의 변경 내용 보기';
       r.appendChild(el('span', 'st st' + f.s, f.s));
       r.appendChild(el('span', 'fp', f.p));
       r.appendChild(iconBtn('📂', '탐색기에서 보기', function () { ctm.reveal(full); }));
       r.appendChild(iconBtn('✎', 'VS Code로 열기', function () { ctm.editor(full); }));
+      r.addEventListener('click', function () { openFile(sha, f); });
       pane.appendChild(r);
     });
+    // 커밋을 누르면 바로 변경 내용을 보여 준다: 저장해 둔 파일이 이 커밋에 있으면 그 파일을, 아니면 첫 파일을
+    var want = DV.want; DV.want = null;
+    var first = c.files.length ? c.files[0] : null;
+    if (want && want.sha === sha) { for (var wi = 0; wi < c.files.length; wi++) if (c.files[wi].p === want.path) { first = c.files[wi]; break; } }
+    if (!first) { showDetailMessage(sha, '이 커밋에는 보여 줄 변경 파일이 없습니다(병합 커밋 등).'); return; }
+    if (want && want.sha === sha && want.closed) { DV.sha = sha; DV.closed = true; return; }
+    openFile(sha, first, want && want.sha === sha ? want.mode : null);
+  }
+
+  // ---- 커밋 안 파일의 변경 내용: 그래프 아래에 파일 전체(바뀐 줄은 색으로)·변경만·마크다운 렌더링을 보여 준다 ----
+  function isMd(p) { return /\.(md|markdown)$/i.test(p); }
+  function openFile(sha, f, mode) {
+    DV.sha = sha; DV.path = f.p; DV.st = f.s; DV.closed = false; DV.cur = null;
+    DV.mode = mode || (isMd(f.p) ? 'md' : 'full');
+    Array.prototype.forEach.call(pane.querySelectorAll('.fr'), function (r) { r.classList.toggle('on', r.getAttribute('data-p') === f.p); });
+    detailEl.hidden = false; appEl.classList.add('dopen');
+    renderDetailTool();
+    dbody.textContent = ''; dbody.appendChild(el('div', 'empty', '불러오는 중…'));
+    var mySeq = ++DV.seq, repo = R;
+    call({ op: 'cfile', repo: repo.dir, sha: sha, path: f.p, st: f.s }).then(function (r) {
+      if (mySeq !== DV.seq) return;
+      DV.cur = r; renderDetailBody(); saveState();
+    }, function (e) { if (mySeq !== DV.seq) return; dbody.textContent = ''; dbody.appendChild(el('div', 'meta err', '변경 내용을 불러오지 못했습니다: ' + e.message)); });
+    saveState();
+  }
+  function showDetailMessage(sha, msg) {
+    DV.sha = sha; DV.path = null; DV.cur = null; DV.closed = false; ++DV.seq;
+    detailEl.hidden = false; appEl.classList.add('dopen');
+    dtool.textContent = ''; var x = iconBtn('✕', '변경 내용 닫기', function () { closeDetail(false); }); dtool.appendChild(x);
+    dbody.textContent = ''; dbody.appendChild(el('div', 'empty', msg));
+  }
+  function closeDetail(silent) {
+    ++DV.seq; DV.cur = null; DV.path = null;
+    detailEl.hidden = true; appEl.classList.remove('dopen', 'dmax'); DV.max = false;
+    if (!silent) { DV.closed = true; saveState(); }
+  }
+  function renderDetailTool() {
+    dtool.textContent = '';
+    var nm = DV.path.replace(/\\/g, '/');
+    var title = el('b', 'dtitle', nm.slice(nm.lastIndexOf('/') + 1)); title.title = nm; dtool.appendChild(title);
+    dtool.appendChild(iconBtn('✎', 'VS Code로 열기', function () { ctm.editor(join(R.top, DV.path)); }));
+    dtool.appendChild(iconBtn('📂', '탐색기에서 보기', function () { ctm.reveal(join(R.top, DV.path)); }));
+    dtool.appendChild(iconBtn(DV.max ? '⤡' : '⤢', DV.max ? '그래프도 같이 보기' : '변경 내용을 크게 보기(그래프 숨김)', function () { DV.max = !DV.max; appEl.classList.toggle('dmax', DV.max); renderDetailTool(); saveState(); }));
+    dtool.appendChild(iconBtn('✕', '변경 내용 닫기', function () { closeDetail(false); }));
+    var tabs = el('div', 'chips');
+    function tabBtn(mode, text, tip) { var b = el('button', 'chip' + (DV.mode === mode ? ' on' : ''), text); b.title = tip; b.addEventListener('click', function () { DV.mode = mode; renderDetailTool(); renderDetailBody(); saveState(); }); tabs.appendChild(b); }
+    if (isMd(DV.path)) tabBtn('md', '렌더링', '서식이 적용된 모습');
+    tabBtn('full', '전체(변경 표시)', '파일 전체를 보고 바뀐 줄은 색으로 표시');
+    tabBtn('diff', '변경만', '바뀐 줄과 앞뒤 3줄만');
+    var jump = el('button', 'chip', '다음 변경 ↓'); jump.title = '다음에 바뀐 곳으로 이동'; jump.addEventListener('click', nextChange); tabs.appendChild(jump);
+    dtool.appendChild(tabs);
+  }
+  function nextChange() {
+    var rows = dbody.querySelectorAll('tr.add, tr.del'); if (!rows.length) return;
+    var top = dbody.getBoundingClientRect().top + 4, target = null;
+    for (var i = 0; i < rows.length; i++) { if (rows[i].getBoundingClientRect().top > top + 24 && (i === 0 || rows[i - 1].nextElementSibling !== rows[i])) { target = rows[i]; break; } }
+    if (!target) target = rows[0];
+    dbody.scrollTop += target.getBoundingClientRect().top - top;
+  }
+  function codeTable(rows, onlyChanges) {
+    var keep = null;
+    if (onlyChanges) { keep = new Array(rows.length).fill(false); rows.forEach(function (r, i) { if (r[0] !== ' ') for (var k = Math.max(0, i - 3); k <= Math.min(rows.length - 1, i + 3); k++) keep[k] = true; }); }
+    var table = el('table', 'code'); var tb = document.createElement('tbody'); table.appendChild(tb);
+    var gap = false;
+    rows.forEach(function (r, i) {
+      if (keep && !keep[i]) { if (!gap) { var g = document.createElement('tr'); g.className = 'gap'; var gc = el('td', null, '⋯'); gc.colSpan = 3; g.appendChild(gc); tb.appendChild(g); gap = true; } return; }
+      gap = false;
+      var tr = document.createElement('tr'); tr.className = r[0] === '+' ? 'add' : r[0] === '-' ? 'del' : '';
+      tr.appendChild(el('td', 'ln', r[0] === '-' ? '' : String(r[2])));
+      tr.appendChild(el('td', 'mk', r[0] === ' ' ? '' : r[0]));
+      tr.appendChild(el('td', 'tx', r[3] === '' ? ' ' : r[3]));
+      tb.appendChild(tr);
+    });
+    return table;
+  }
+  function renderDetailBody() {
+    dbody.textContent = '';
+    var cur = DV.cur;
+    if (!cur) { dbody.appendChild(el('div', 'empty', '불러오는 중…')); return; }
+    if (cur.binary) { dbody.appendChild(el('div', 'empty', '이진 파일이라 내용을 보여 줄 수 없습니다.')); return; }
+    if (cur.truncated) dbody.appendChild(el('div', 'meta err', '파일이 커서 앞부분만 보여 줍니다.'));
+    if (DV.mode === 'md' && isMd(cur.path)) {
+      var box = el('div', 'md', '렌더링하는 중…'); dbody.appendChild(box);
+      var seq = DV.seq;
+      window.ctm.renderMarkdown(cur.raw).then(function (html) {
+        if (seq !== DV.seq) return;
+        box.innerHTML = html;
+        Array.prototype.forEach.call(box.querySelectorAll('a[data-url]'), function (a) { a.addEventListener('click', function (e) { e.preventDefault(); window.ctm.open(a.getAttribute('data-url')); }); });
+      }, function (e) { box.textContent = '렌더링하지 못했습니다: ' + e.message; });
+      if (cur.status === 'D') box.insertAdjacentHTML('beforebegin', '<div class="meta err">삭제된 파일입니다(지우기 전 내용).</div>');
+      return;
+    }
+    dbody.appendChild(codeTable(cur.rows, DV.mode === 'diff'));
+    if (!cur.rows.length) dbody.appendChild(el('div', 'empty', '빈 파일입니다.'));
   }
   // 그래프 그리기(보고 있는 그래프 하나만)
   function renderGraph(g) {
@@ -2538,6 +2698,8 @@ function frameMain() {
   restoring = false;
   var wantScroll = st && typeof st.sy === 'number' && st.sy > 0 ? st.sy : null;
   var wantSha = st && st.sha ? String(st.sha).replace(/[^0-9a-f]/gi, '') : '';
+  if (st && wantSha && typeof st.df === 'string' && st.df) DV.want = { sha: wantSha, path: st.df.slice(0, 1000), mode: ['md', 'full', 'diff'].indexOf(st.dm) !== -1 ? st.dm : null, closed: st.dc === 1 };
+  if (st && st.dx === 1) { DV.max = true; appEl.classList.add('dmax'); }
   if (st && typeof st.rev === 'string' && st.rev && R && !R.err) {
     pendingSha = wantSha || null; pendingScroll = wantScroll;
     loadView(st.rev, data.limit, false); // 보던 브랜치는 다시 불러온다(그 사이 바뀌었을 수 있으므로 저장해 둔 그래프를 쓰지 않는다)
@@ -2593,7 +2755,18 @@ function frameMain() {
     + '#top{flex:none;position:relative;z-index:5;background:var(--bg);padding:2px 0 4px;border-bottom:1px solid var(--border)}'
     + '#scroll{flex:1;min-height:0;overflow:auto;padding-top:6px}'
     + '#info{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text-soft);margin-bottom:4px}'
-    + '#app.compact #pane{height:84px;margin:4px 0}#app.compact #repos{margin-bottom:2px}';
+    + '#app.compact #pane{height:84px;margin:4px 0}#app.compact #repos{margin-bottom:2px}'
+    + '#app.dopen #pane{height:76px}#app.dopen.compact #pane{height:60px}#app.dmax #scroll{display:none}.fr{cursor:pointer}.fr:hover,.fr.on{background:var(--surface)}'
+    + '#detail{flex:1 1 0;min-height:0;display:flex;flex-direction:column;border-top:2px solid var(--border-2);margin-top:4px}#detail[hidden]{display:none}'
+    + '#dtool{flex:none;display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;padding:3px 0;border-bottom:1px solid var(--border);font-size:11px}.dtitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#dtool .chips{flex-basis:100%}'
+    + '#dbody{flex:1;min-height:0;overflow:auto;padding-top:4px}.chips{display:flex;flex-wrap:wrap;gap:4px}'
+    + '.chip{background:var(--surface-2);color:var(--text);border:1px solid var(--border-2);border-radius:10px;padding:1px 8px;font-size:11px;cursor:pointer}.chip.on{background:var(--accent);color:var(--bg);border-color:transparent}'
+    + 'table.code{border-collapse:collapse;width:100%;font-family:Consolas,monospace;font-size:11px}table.code td{padding:0 4px;vertical-align:top}.ln{color:var(--text-soft);text-align:right;width:38px;user-select:none}.mk{width:12px;text-align:center;user-select:none}'
+    + 'table.code td.tx{white-space:pre-wrap;word-break:break-all}tr.add{background:#2ea04326}tr.del{background:#f8514926}tr.add .mk{color:#3fb950}tr.del .mk{color:#f85149}tr.gap td{color:var(--text-soft);text-align:center}'
+    + '.md{padding:4px 6px;line-height:1.55;font-size:12px}.md h2{font-size:17px;margin:14px 0 6px;border-bottom:1px solid var(--border);padding-bottom:3px}.md h3{font-size:15px;margin:12px 0 5px}.md h4{font-size:13px;margin:10px 0 4px}.md h5,.md h6{font-size:12px;margin:8px 0 3px}'
+    + '.md p{margin:6px 0}.md ul,.md ol{margin:4px 0;padding-left:20px}.md li{margin:2px 0}.md code{background:var(--surface-2);padding:0 4px;border-radius:3px;font-family:Consolas,monospace;font-size:11px}'
+    + '.md pre{background:var(--surface-2);border:1px solid var(--border);border-radius:4px;padding:6px 8px;overflow:auto}.md pre code{background:none;padding:0}.md blockquote{margin:6px 0;padding:2px 10px;border-left:3px solid var(--border-2);color:var(--text-soft)}'
+    + '.md hr{border:0;border-top:1px solid var(--border);margin:10px 0}.md table{border-collapse:collapse;margin:6px 0}.md th,.md td{border:1px solid var(--border-2);padding:3px 8px}.md th{background:var(--surface-2)}.md a{color:var(--accent)}';
   const css = cssBase + css2;
   console.log('<style>' + css + '</style>');
   console.log('<div id="app"><div id="top">');
@@ -2605,7 +2778,7 @@ function frameMain() {
   console.log('<div id="graph" class="graph" style="position:relative"><span style="color:var(--text-soft)">그래프를 그리는 중… (보이지 않으면 이 슬롯의 "JavaScript 허용"을 켜세요)</span></div>');
   console.log('<div id="btabs" style="display:flex;gap:4px;margin:10px 0 4px"></div>');
   console.log('<div id="below"></div>');
-  console.log('</div></div>');
+  console.log('</div><div id="detail" hidden><div id="dtool"></div><div id="dbody"></div></div></div>');
   console.log('<script type="application/json" id="data">' + json + '</script>');
   console.log('<script>(' + frameMain.toString() + ')()</script>');
 })().catch(e => { console.log(REQ ? JSON.stringify({ ok: false, error: String((e && e.message) || e) }) : '<pre style="color:#f85149;white-space:pre-wrap">' + esc((e && e.stack) || e) + '</pre>'); });
