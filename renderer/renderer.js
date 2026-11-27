@@ -2349,13 +2349,14 @@ function frameMain() {
   if (window.ctm && window.ctm.onViewport) {
     window.ctm.onViewport(function (h) {
       appEl.style.setProperty('--vh', Math.max(320, Math.min(2000, Math.floor(h))) + 'px');
-      appEl.className = h < 520 ? 'compact' : '';
+      appEl.classList.toggle('compact', h < 520);
     });
   }
   // ---- 영역 크기 조절: 칸 사이의 가는 막대를 끌면 높이가 바뀐다(더블클릭하면 기본 크기) ----
   function applySizes() {
     pane.style.height = SZ.ph ? SZ.ph + 'px' : '';
     var rp = document.getElementById('repos'); rp.style.height = SZ.rh ? SZ.rh + 'px' : ''; rp.style.overflowY = SZ.rh ? 'auto' : ''; rp.style.alignContent = SZ.rh ? 'flex-start' : '';
+    appEl.classList.toggle('dfix', !!SZ.dh);
     if (SZ.dh) { detailEl.style.flex = 'none'; detailEl.style.height = SZ.dh + 'px'; } else { detailEl.style.flex = ''; detailEl.style.height = ''; }
   }
   function bindSplitter(bar, which) {
@@ -2788,6 +2789,7 @@ function frameMain() {
     + '#app.dopen #pane{height:76px}#app.dopen.compact #pane{height:60px}#app.dmax #scroll{display:none}.fr{cursor:pointer}.fr:hover,.fr.on{background:var(--surface)}'
     + '.sph{flex:none;height:7px;margin:1px 0;cursor:row-resize;touch-action:none;position:relative;background:transparent}.sph::after{content:"";position:absolute;left:30%;right:30%;top:3px;height:2px;border-radius:1px;background:var(--border-2)}.sph:hover::after,.sph.drag::after{background:var(--accent)}'
     + '#pane[style*="display: none"]+#sph1{display:none}#app:not(.dopen) #sph2,#app.dmax #sph2{display:none}'
+    + '#app.dopen:not(.dfix) #scroll{flex:0 1 auto;max-height:45%}'
     + '#detail{flex:1 1 0;min-height:0;display:flex;flex-direction:column;border-top:2px solid var(--border-2);margin-top:4px}#detail[hidden]{display:none}'
     + '#dtool{flex:none;display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center;padding:3px 0;border-bottom:1px solid var(--border);font-size:11px}.dtitle{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#dtool .chips{flex-basis:100%}'
     + '#dbody{flex:1;min-height:0;overflow:auto;padding-top:4px}.chips{display:flex;flex-wrap:wrap;gap:4px}'
